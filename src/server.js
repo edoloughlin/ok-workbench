@@ -491,7 +491,7 @@ function turnWriter(res, threadId, turnId) {
   let sequence = 0;
   return (type, payload = {}) => res.write(`${JSON.stringify({ type, thread_id: threadId, turn_id: turnId, sequence: ++sequence, ...payload })}\n`);
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, signal, onDelta, onTool, systemPrompt, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onTool, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -501,7 +501,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onTool, systemPrompt, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onTool, beforeCreateProject, systemPrompt, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -572,6 +572,13 @@ async function gitProject(project) {
   if (canonicalProject !== canonicalRepo && !canonicalProject.startsWith(`${canonicalRepo}${path.sep}`)) throw new Error('Project is not inside its Git worktree');
   return { root: canonicalProject, repo: canonicalRepo, pathspec: path.relative(canonicalRepo, canonicalProject) || '.' };
 }
+async function ensureWorkspaceGit(root) {
+  let initialized = false;
+  try { await run('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root }); }
+  catch { await run('git', ['init'], { cwd: root }); initialized = true; }
+  const { stdout } = await run('git', ['rev-parse', '--show-toplevel'], { cwd: root });
+  return { initialized, repository: stdout.trim() };
+}
 async function gitStatus(project) {
   const git = await gitProject(project); const { stdout } = await run('git', ['status', '--porcelain=v1', '--untracked-files=all', '--', git.pathspec], { cwd: git.repo });
   const files = stdout.split('\n').filter(Boolean).map(line => ({ index: line.slice(0, 1), worktree: line.slice(1, 2), path: line.slice(3) }));
@@ -618,6 +625,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/app.js') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.js')), 'text/javascript; charset=utf-8');
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
+    if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     if (url.pathname === '/api/chat/auth/openai-codex/start' && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await startProviderLogin('openai-codex')); }
     if (url.pathname === '/api/chat/threads' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await listThreads(url.searchParams.get('project'))); }
@@ -650,7 +658,17 @@ const server = http.createServer(async (req, res) => {
         const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: projectRootForId(thread.project), prompt: message }).catch(() => '') : null;
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onTool: tool => { writeEvent(tool.phase === 'started' ? 'tool.started' : 'tool.completed', { tool: tool.name }); if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.path ? [tool.result.path] : [] }); } });
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onTool: tool => {
+          const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
+          if (tool.error) diagnostic.error = tool.error;
+          if (tool.result?.id) diagnostic.projectId = tool.result.id;
+          if (tool.result?.location) diagnostic.location = tool.result.location;
+          if (tool.result?.path) diagnostic.path = tool.result.path;
+          console.error(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
+          const type = tool.phase === 'started' ? 'tool.started' : tool.phase === 'failed' ? 'tool.failed' : 'tool.completed';
+          writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
+          if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.path ? [tool.result.path] : [] });
+        } });
         const title = titlePromise ? await titlePromise : ''; if (title) thread.title = title;
         thread.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, createdAt: new Date().toISOString() }); await saveThread(thread); writeEvent('message.completed'); writeEvent('turn.completed');
       } catch (error) { writeEvent('turn.failed', { error: abort.signal.aborted || error.name === 'AbortError' ? 'Turn cancelled' : error.message }); }

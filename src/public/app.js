@@ -292,8 +292,24 @@ let chatFollowsActivity = true;
 let chatScrollFrame = null;
 
 function persistChatSettings() { localStorage.setItem(chatStorageKey, JSON.stringify(chatSettings)); }
-const chatCsrf = document.querySelector('meta[name="ok-workbench-csrf"]')?.content || '';
-function chatApi(path, options = {}) { return fetch(path, { ...options, headers: { accept: 'application/json', 'x-ok-workbench-csrf': chatCsrf, ...(options.headers || {}) } }); }
+let chatCsrf = document.querySelector('meta[name="ok-workbench-csrf"]')?.content || '';
+async function refreshChatCsrf() {
+  const response = await fetch('/api/chat/session', { headers: { accept: 'application/json' } });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.csrf) throw new Error(data.error || 'Could not refresh the chat session');
+  chatCsrf = data.csrf;
+}
+async function invalidChatToken(response) {
+  if (response.status !== 400) return false;
+  const data = await response.clone().json().catch(() => ({}));
+  return data.error === 'Invalid chat request token';
+}
+async function chatApi(path, options = {}) {
+  const request = () => fetch(path, { ...options, headers: { accept: 'application/json', 'x-ok-workbench-csrf': chatCsrf, ...(options.headers || {}) } });
+  let response = await request();
+  if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await request(); }
+  return response;
+}
 function setChatStatus(message) { chatUi.status.textContent = message; }
 function chatSizeBounds() {
   // Right dock: reserve the 240px file sidebar, 8px splitter, and a 320px
@@ -477,14 +493,16 @@ async function streamChatTurn(message) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread();
   chatAbort = new AbortController(); chatTurnId = null; chatTurnUnread = false; chatUi.send.disabled = true; chatUi.stop.hidden = false; setChatStatus('Thinking…');
-  const assistantBody = addChatMessage('assistant', ''); let assistantText = '';
+  const assistantBody = addChatMessage('assistant', ''); let assistantText = ''; let projectCreated = false;
   try {
-    const response = await fetch(`/api/chat/threads/${encodeURIComponent(chatThreadId)}/turns`, { method: 'POST', signal: chatAbort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(chatThreadId)}/turns`, { method: 'POST', signal: chatAbort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    let response = await requestTurn();
+    if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
-    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); if (event.type === 'turn.started') chatTurnId = event.turn_id || null; else if (event.type === 'message.delta') { assistantText += event.delta || ''; renderAssistantMarkdown(assistantBody, assistantText); scrollChatToLatest(); if (chatSettings.collapsed && !chatTurnUnread) { chatTurnUnread = true; chatUnread++; applyChatLayout(); } } else if (event.type === 'tool.completed') { const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; activity.textContent = `Used ${event.tool || 'workspace tool'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'scope.granted') { const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; activity.textContent = `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'turn.failed') throw new Error(event.error || 'Turn failed'); else if (event.type === 'workspace.changed') { refreshGitStatus(); reloadChangedDocument(event); } else if (event.type === 'usage.updated') setChatStatus(event.usage || 'Working…'); } }
+    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); if (event.type === 'turn.started') chatTurnId = event.turn_id || null; else if (event.type === 'message.delta') { assistantText += event.delta || ''; renderAssistantMarkdown(assistantBody, assistantText); scrollChatToLatest(); if (chatSettings.collapsed && !chatTurnUnread) { chatTurnUnread = true; chatUnread++; applyChatLayout(); } } else if (event.type === 'tool.completed') { const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; if (event.tool === 'create_project' && event.result?.location) { projectCreated = true; activity.append('Created project: '); const link = document.createElement('a'); link.href = event.result.location; link.textContent = event.result.title || event.result.id || event.result.location; activity.append(link); } else activity.textContent = `Used ${event.tool || 'workspace tool'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'scope.granted') { const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; activity.textContent = `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'turn.failed') throw new Error(event.error || 'Turn failed'); else if (event.type === 'workspace.changed') { refreshGitStatus(); reloadChangedDocument(event); } else if (event.type === 'usage.updated') setChatStatus(event.usage || 'Working…'); } }
     if (!assistantText) { renderAssistantMarkdown(assistantBody, 'No response returned.'); scrollChatToLatest(); }
-    setChatStatus('Ready'); await loadChatThreads();
+    setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads();
   } catch (error) { assistantBody.parentElement.classList.add('error'); assistantBody.parentElement.querySelector('.message-meta').textContent = 'Error'; assistantBody.textContent = error.name === 'AbortError' ? 'Stopped.' : error.message; setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); }
   finally { chatAbort = null; chatTurnId = null; chatUi.send.disabled = false; chatUi.stop.hidden = true; }
 }

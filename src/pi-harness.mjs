@@ -14,6 +14,7 @@ import {
 
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(APP_DIR, 'tool-worker.js');
+const PROJECT_TEMPLATE = path.resolve(APP_DIR, '..', 'seed', 'workspace', 'templates', 'project');
 
 async function exists(file) { try { await access(file); return true; } catch { return false; } }
 async function bwrapPath() {
@@ -56,11 +57,12 @@ export class TurnWorker {
 async function createTurnWorker(projectRoot) {
   const bwrap = await bwrapPath();
   if (!bwrap) return null;
+  if (!(await exists(PROJECT_TEMPLATE))) throw new Error('Packaged OKF project template is unavailable');
   // The worker source is passed as an evaluated program so the sandbox never
   // mounts the package installation or seed bundle. Its only user-data mount
   // is the selected project at /workspace.
-  const workerSource = await readFile(WORKER, 'utf8');
-  const args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--tmpfs', '/', '--dir', '/workspace', '--bind', projectRoot, '/workspace', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
+  const workerSource = `${await readFile(WORKER, 'utf8')}\nstartWorker();`;
+  const args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', projectRoot, '/workspace', '--ro-bind', PROJECT_TEMPLATE, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
   for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
   // Node may be installed under nvm rather than /usr/bin; bind the executable
   // itself, not its home directory or any credentials alongside it.
@@ -137,10 +139,15 @@ export async function startPiLogin({ provider, stateDir, onEvent, onPrompt }) {
 function historyPrompt(messages) {
   return messages.slice(-20).map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`).join('\n\n');
 }
+export function projectToolResult(toolResult, git) {
+  if (!git) return toolResult;
+  const result = { ...(toolResult.details?.result || {}), git };
+  return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+}
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, stateDir, env = process.env, signal, onDelta, onTool, systemPrompt, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onTool, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
-  const worker = noWorkspaceTools ? null : await createTurnWorker(projectRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
+  const worker = noWorkspaceTools ? null : await createTurnWorker(workspaceRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
   const agentDir = path.join(stateDir, 'pi-agent');
   const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
   const apiKey = apiKeyFor(provider, env);
@@ -148,21 +155,33 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const model = modelRuntime.getModel(provider, modelId); if (!model) throw new Error(`Pi does not recognise ${provider}/${modelId}`);
   const loader = new DefaultResourceLoader({
     cwd: projectRoot, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPromptOverride: () => systemPrompt || 'You are an ok-workbench project assistant. You can access only the selected project through the supplied tools. Never claim access you do not have. Make concise, reviewable edits only when asked.'
+    systemPromptOverride: () => systemPrompt || 'You are an ok-workbench workspace assistant. You can access only the served workspace through the supplied tools. Use create_project to create a discoverable top-level project; it returns the canonical project ID and location, which you must report accurately. Never claim access or a completed change you do not have. Make concise, reviewable edits only when asked.'
   });
   await loader.reload();
   const call = async (name, params) => {
     if (!worker) throw new Error('Bubblewrap is required before agent file tools can run');
-    onTool?.({ phase: 'started', name });
-    const result = await worker.call(name, params);
-    onTool?.({ phase: 'completed', name, changed: name === 'apply_patch', result });
-    return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+    await onTool?.({ phase: 'started', name });
+    try {
+      const result = await worker.call(name, params);
+      await onTool?.({ phase: 'completed', name, changed: name === 'apply_patch' || name === 'create_project', result });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+    } catch (error) {
+      await onTool?.({ phase: 'failed', name, error: error.message });
+      throw error;
+    }
   };
   const tools = noWorkspaceTools ? [] : [
-    defineTool({ name: 'list_files', label: 'List files', description: 'List files in the selected project.', parameters: Type.Object({ path: Type.Optional(Type.String()) }), execute: (_id, params) => call('list_files', params) }),
-    defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file in the selected project.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('read_file', params) }),
-    defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the selected project.', parameters: Type.Object({ query: Type.String() }), execute: (_id, params) => call('search_files', params) }),
-    defineTool({ name: 'apply_patch', label: 'Apply file replacement', description: 'Replace a selected project text file with the supplied content.', parameters: Type.Object({ path: Type.String(), content: Type.String() }), execute: (_id, params) => call('apply_patch', params) })
+    defineTool({ name: 'list_files', label: 'List files', description: 'List files in the served workspace.', parameters: Type.Object({ path: Type.Optional(Type.String()) }), execute: (_id, params) => call('list_files', params) }),
+    defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file in the served workspace.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('read_file', params) }),
+    defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the served workspace.', parameters: Type.Object({ query: Type.String() }), execute: (_id, params) => call('search_files', params) }),
+    defineTool({ name: 'apply_patch', label: 'Apply file replacement', description: 'Replace a text file in the served workspace with the supplied content.', parameters: Type.Object({ path: Type.String(), content: Type.String() }), execute: (_id, params) => call('apply_patch', params) }),
+    defineTool({ name: 'create_project', label: 'Create workspace project', description: 'Create and register a discoverable top-level project from the OKF project template. Use this instead of manually creating a project directory.', parameters: Type.Object({ id: Type.String(), title: Type.Optional(Type.String()) }), execute: async (_id, params) => {
+      let git;
+      try { git = await beforeCreateProject?.(); }
+      catch (error) { await onTool?.({ phase: 'failed', name: 'create_project', error: `Git setup failed: ${error.message}` }); throw error; }
+      const toolResult = await call('create_project', params);
+      return projectToolResult(toolResult, git);
+    } })
   ];
   const { session } = await createAgentSession({ cwd: projectRoot, agentDir, model, modelRuntime, settingsManager, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectRoot), thinkingLevel: effort || undefined, noTools: 'builtin', tools: tools.map(tool => tool.name), customTools: tools });
   const unsubscribe = session.subscribe(event => { if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') onDelta(event.assistantMessageEvent.delta); });

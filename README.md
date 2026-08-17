@@ -64,7 +64,7 @@ The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_B
 
 ## Security model
 
-The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes. File-changing model tools fail closed without Bubblewrap; when available, the worker receives a cleared environment, no network, a temporary root, and only the selected project as user data. Git review actions use project-scoped pathspecs. See the full [threat model](docs/THREAT-MODEL.md) and [security policy](docs/SECURITY.md).
+The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes. File-changing model tools fail closed without Bubblewrap; when available, the worker receives a cleared environment, no network, a temporary root, the served workspace, and a read-only packaged OKF template. The agent can create a discoverable top-level project only through the template-backed `create_project` tool; the workspace is initialized as a Git worktree before that operation. Git review actions use project-scoped pathspecs. See the full [threat model](docs/THREAT-MODEL.md) and [security policy](docs/SECURITY.md).
 
 ## Development and release
 

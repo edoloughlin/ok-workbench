@@ -65,12 +65,43 @@ async function applyPatch({ path: relative, content }) {
   if (existing?.isSymbolicLink()) throw new Error('Refusing to replace a symbolic link');
   await fs.writeFile(target, content, 'utf8'); return { path: safe, bytes: Buffer.byteLength(content) };
 }
+function projectId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) throw new Error('Project ID must start with a letter and use only letters, numbers, hyphens, or underscores');
+  return value;
+}
+function projectTitle(value, id) {
+  if (value === undefined || value === null || value === '') return id;
+  if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\r\n\[\]]/.test(value)) throw new Error('Project title must be a short single line without brackets');
+  return value.trim();
+}
+async function createProject({ id: requestedId, title: requestedTitle }) {
+  const id = projectId(requestedId); const title = projectTitle(requestedTitle, id);
+  const target = path.join(ROOT, id);
+  if (await fs.lstat(target).then(() => true).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error))) throw new Error(`Project already exists: ${id}`);
+  const rootIndex = path.join(ROOT, 'index.md'); const link = `- [${title}](${id}/)`;
+  let index = await fs.readFile(rootIndex, 'utf8').catch(error => error.code === 'ENOENT' ? '# Workspace\n' : Promise.reject(error));
+  if (new RegExp(`\\]\\(${id.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}/?\\)`).test(index)) throw new Error(`Project is already registered: ${id}`);
+  const template = process.env.OK_WORKBENCH_PROJECT_TEMPLATE || path.join(ROOT, 'templates', 'project');
+  if (!(await fs.stat(template).then(stat => stat.isDirectory()).catch(() => false))) throw new Error('OKF project template is unavailable in this workspace');
+  try {
+    await fs.cp(template, target, { recursive: true, errorOnExist: true });
+    const files = await listFiles(id);
+    for (const relative of files) {
+      const file = path.join(ROOT, relative); const content = await fs.readFile(file, 'utf8');
+      if (content.includes('<Project>')) await fs.writeFile(file, content.replaceAll('<Project>', title), 'utf8');
+    }
+    index = `${index.replace(/\s*$/, '')}\n\n${link}\n`;
+    await fs.writeFile(rootIndex, index, 'utf8');
+  } catch (error) {
+    await fs.rm(target, { recursive: true, force: true });
+    throw error;
+  }
+  return { id, path: id, location: `/workspace/${encodeURIComponent(id)}`, title, structure: 'OKF 0.2 project template' };
+}
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
-module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, applyPatch };
-
-if (require.main === module) {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_patch: applyPatch };
+function startWorker() {
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_patch: applyPatch, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // A caller can close stdin immediately after its final JSONL request. Keep
   // the event loop alive until the asynchronous filesystem operation replies.
@@ -88,3 +119,6 @@ if (require.main === module) {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
+module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, applyPatch, createProject, startWorker };
+
+if (require.main === module) startWorker();
