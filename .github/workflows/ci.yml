@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22.19.0, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: OK_WORKBENCH_INTEGRATION=1 npm test
+      - run: npm pack --dry-run
+      - run: npm pack --pack-destination /tmp
+      - run: mkdir -p /tmp/ok-workbench-install && npm install --prefix /tmp/ok-workbench-install /tmp/ok-workbench-*.tgz
+      - run: /tmp/ok-workbench-install/node_modules/.bin/ok-workbench init /tmp/ok-workbench-smoke --yes
+      - run: npm audit --omit=dev --audit-level=high
+      - uses: anchore/sbom-action@v0
+        with: { artifact-name: ok-workbench-sbom, format: spdx-json }

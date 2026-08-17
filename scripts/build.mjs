@@ -1,0 +1,10 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const dist = path.join(root, 'dist');
+await fs.rm(dist, { recursive: true, force: true });
+await fs.mkdir(dist, { recursive: true });
+for (const file of await fs.readdir(path.join(root, 'src'))) await fs.cp(path.join(root, 'src', file), path.join(dist, file), { recursive: true });
+await fs.cp(path.join(root, 'seed'), path.join(dist, 'seed'), { recursive: true });
+await fs.chmod(path.join(dist, 'bin', 'ok-workbench.mjs'), 0o755);

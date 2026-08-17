@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="ok-workbench-csrf" content="__CHAT_CSRF__">
+    <title>OK Workbench</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/workspace/">OK<span>Workbench</span></a>
+      <div class="project-summary"><span id="project-name">Loading</span><span class="stats" id="stats"></span></div>
+      <div class="topbar-actions">
+        <button class="chat-toggle" id="chat-toggle" type="button" aria-expanded="true" aria-controls="chat-pane">Chat</button>
+        <label class="project-picker">Project <select id="project-select" aria-label="Select project"></select></label>
+      </div>
+    </header>
+    <div class="layout" id="app-layout">
+      <aside class="sidebar"><nav id="file-nav" aria-label="Project files"></nav></aside>
+      <div class="workspace">
+        <main id="document" class="document" aria-live="polite"><p class="loading">Opening document…</p></main>
+        <div id="chat-splitter" class="chat-splitter" role="separator" tabindex="0" aria-label="Resize chat pane"></div>
+        <aside id="chat-pane" class="chat-pane" aria-label="Project chat">
+          <header class="chat-header">
+            <div class="chat-heading"><span class="chat-kicker">Project chat</span><strong id="chat-project">Loading</strong></div>
+            <div class="chat-header-actions">
+              <button id="chat-new-thread" type="button" title="New thread">New</button>
+              <div class="chat-menu">
+                <button id="chat-settings" class="chat-icon-button" type="button" aria-label="Chat settings" title="Chat settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="chat-settings-menu"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20.3h-3v-.08A1.7 1.7 0 0 0 10.66 18.66a1.7 1.7 0 0 0-1.88.34l-.06.06L6.6 16.94l.06-.06A1.7 1.7 0 0 0 7 15a1.7 1.7 0 0 0-1.56-1.04h-.08v-3h.08A1.7 1.7 0 0 0 7 9.92a1.7 1.7 0 0 0-.34-1.88L6.6 7.98 8.72 5.86l.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.04-1.56V4.62h3v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.08v3h-.08A1.7 1.7 0 0 0 19.4 15Z"></path></svg></button>
+                <div id="chat-settings-menu" class="chat-menu-panel" hidden>
+                  <p class="chat-menu-title">Conversation titles</p>
+                  <label class="chat-menu-setting">Model <select id="chat-title-model" aria-label="Conversation title model"></select></label>
+                  <label class="chat-menu-setting">Effort <select id="chat-title-effort" aria-label="Conversation title effort"></select></label>
+                  <hr class="chat-menu-rule">
+                  <button id="chat-codex-login" type="button">Sign in to Codex</button>
+                </div>
+              </div>
+              <button id="chat-collapse" type="button" title="Collapse chat">×</button>
+            </div>
+          </header>
+          <div class="chat-body">
+            <div id="chat-controls" class="chat-controls">
+              <label>Provider <select id="chat-provider" aria-label="Chat provider"></select></label>
+              <label>Model <select id="chat-model" aria-label="Chat model"></select></label>
+              <label>Effort <select id="chat-effort" aria-label="Reasoning effort"></select></label>
+            </div>
+            <div class="chat-conversation">
+              <div class="chat-thread-bar"><select id="chat-thread" aria-label="Chat thread"></select><button id="chat-changes" type="button">Changes <span id="chat-change-count">0</span></button></div>
+              <section id="chat-messages" class="chat-messages" aria-live="polite"></section>
+            </div>
+            <form id="chat-composer" class="chat-composer">
+              <label class="sr-only" for="chat-input">Message the project agent</label>
+              <textarea id="chat-input" rows="3" placeholder="Ask about this project…"></textarea>
+              <div class="chat-composer-actions"><span id="chat-status" role="status">Ready</span><button id="chat-stop" type="button" hidden>Stop</button><button id="chat-send" type="submit">Send</button></div>
+            </form>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <button id="chat-restore" class="chat-restore" type="button" hidden aria-controls="chat-pane">Chat <span id="chat-restore-badge" aria-label="Unread messages"></span></button>
+    <dialog id="changes-dialog" class="changes-dialog">
+      <form method="dialog" class="changes-header"><div><span class="chat-kicker">Workspace changes</span><h2>Changed files</h2></div><button aria-label="Close changes">×</button></form>
+      <p class="changes-notice">This is the current Git diff for the selected project. It may include changes made by you, another tool, or an earlier agent turn—not only the latest chat response.</p>
+      <div class="changes-toolbar"><div id="diff-source-tabs" role="tablist"><button role="tab" aria-selected="true" data-diff-source="unstaged">Unstaged</button><button role="tab" aria-selected="false" data-diff-source="staged">Staged</button><button role="tab" aria-selected="false" data-diff-source="commits">Latest commit</button></div><div><button id="diff-layout" type="button">Side by side</button><button id="diff-palette" type="button">Red / green</button></div></div>
+      <div id="diff-summary" class="diff-summary"></div><div class="diff-workspace"><aside id="diff-files" class="diff-files" aria-label="Changed files"></aside><section class="diff-detail" aria-live="polite"><div id="diff-file-title" class="diff-file-title"></div><div id="diff-content" class="diff-content"></div></section></div>
+      <div class="changes-actions"><button id="diff-revert" type="button">Revert selected changes</button><button id="diff-unstage" type="button">Unstage selected changes</button><button id="diff-undo" type="button" hidden>Undo revert</button></div>
+    </dialog>
+    <script src="/app.js"></script>
+  </body>
+</html>

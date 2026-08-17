@@ -1,0 +1,30 @@
+{
+  "okf_version": "0.2",
+  "workflow_version": "1.0.0",
+  "seed_version": "1.0.0",
+  "managed_files": {
+    "AGENTS.md": "sha256:34127e07ababc74bf5fd6361ff5f57de578aea27c4280d4b4144fc8cdd2812f9",
+    "example-project/AGENTS.md": "sha256:0f00c5b47171c9da28afe0a6d3d946c9a87cb17edcbb97640b5f1c0472f08810",
+    "example-project/brief.md": "sha256:2b16007f70fccbfa4d6907c710eadf45b703234dc215eecdd8b12dda94976b08",
+    "example-project/decision.md": "sha256:7f9d476ff9c41e6b9c87bd38930d314f5e68d286c7b450f2c3f55d034fd0a2c3",
+    "example-project/index.md": "sha256:62132e9c6ae26b6483e631da8684a8f3757bbb0250ae640ee2cc7447e6de2d01",
+    "example-project/log.md": "sha256:76e7565882ee8297473830cd34f59d0ed688b3287e8f145f02c2d6609fd65bd0",
+    "example-project/review.md": "sha256:a909ff7443eef71db154de9d1021041056b9ff39e941ad1fab359f396194e40c",
+    "example-project/status.md": "sha256:c6de9fc6de820f48116ffcaf08745b4a94e4c7b5f6d9166384cfb0f0fc2dfbc9",
+    "example-project/todo.md": "sha256:e135360947044e98b7658ae4707c6be2e21f885efb48dd1c79e9db98566d5dcd",
+    "index.md": "sha256:a526e0b1eeaa2a1cb72b7f30166ed8821fdb1964778640565db2d6cb5d3b7710",
+    "templates/index.md": "sha256:689d74ef6208e53e9fb81e1ce5d0975dcc94f37b37e5d94e7322b8b989237e62",
+    "templates/log.md": "sha256:3e98938d5958193b174e0fdef5e3c47996c5bb3ab48701ac8ae56c3247517f87",
+    "templates/project/AGENTS.md": "sha256:94d9cf99e935ac924f32d9944533eece75a00d65cc603475b1bd6c5cd40d1699",
+    "templates/project/index.md": "sha256:63b17cbb15eb4ddc720be4dae949b0c3c50be4e36f36dfda7510181c907b0adc",
+    "templates/project/log.md": "sha256:940471c9583c074d720f905d3dac01bd2428dcc92c97a37042c5b7041eb2aa2a",
+    "templates/project/review.md": "sha256:b2e7233ac10bca35a9309678ef0514128470122811903e84e73625e7a88434ef",
+    "templates/project/status.md": "sha256:bf262a87498969ee4a315ef487f2af6109cd8519d73b2ba71d73aa35b4c15ec5",
+    "templates/project/todo.md": "sha256:66fca0dcc1ea8acf950d9289c45b3ad8ee0d576abeaa83f5d8b0f4a308759371",
+    "templates/review.md": "sha256:930ce939d59c7512c13faaf5e02f61231fa2dba2c61294aaa0e1dc2f425ef7ed",
+    "templates/status.md": "sha256:58a71b28f524b47ae236fc0bd6b23f57fac3b6a151363454daee0bc05fd56d7d",
+    "templates/todo.md": "sha256:960036c03a4651cc651ffb7e73fe75f9ea14eec09effce5154890346c22c5e9f",
+    "workflow/index.md": "sha256:64c9a62700b27880b5ac9d9b30d7ee4b72cc6ebab91379a88d90e7553c9d74bb",
+    "workflow/orient.md": "sha256:9a4fabe84d968102d2b6c46550911d8251c45ca1f8dc8483c4a198457453d937"
+  }
+}

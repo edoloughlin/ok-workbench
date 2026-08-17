@@ -1,0 +1,7 @@
+OK Workbench is independently developed and distributed under Apache-2.0.
+
+The workspace seed declares compatibility with Open Knowledge Format (OKF) v0.2.
+It does not include copied upstream specification text, code, templates, or
+private workflows. The referenced upstream Knowledge Catalog repository is
+published by GoogleCloudPlatform under Apache-2.0; consult its OKF
+specification and LICENSE for the authoritative format and license terms.

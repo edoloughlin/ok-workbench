@@ -1,0 +1,26 @@
+name: Publish documentation
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/**, seed/workspace/templates/**, scripts/sync-doc-templates.mjs, .github/workflows/pages.yml]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    environment: github-pages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22.19.0 }
+      - run: npm run docs:sync
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: docs }
+      - id: deployment
+        uses: actions/deploy-pages@v4
