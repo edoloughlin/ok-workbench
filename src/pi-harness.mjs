@@ -21,20 +21,34 @@ async function bwrapPath() {
   return null;
 }
 
-class TurnWorker {
+export class TurnWorker {
   constructor(child) {
-    this.child = child; this.pending = new Map(); this.sequence = 0; this.buffer = '';
+    this.child = child; this.pending = new Map(); this.sequence = 0; this.buffer = ''; this.stderr = ''; this.failure = null;
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => this.read(chunk));
-    child.on('exit', () => this.failAll(new Error('Sandbox worker exited')));
+    child.stderr?.setEncoding('utf8'); child.stderr?.on('data', chunk => { this.stderr = `${this.stderr}${chunk}`.slice(-4096); });
+    child.on('error', error => this.failAll(new Error(`Sandbox worker failed: ${error.message}`)));
+    // `close` follows stderr draining, so Bubblewrap's diagnostic reaches the
+    // browser with the failure rather than being lost to an ignored stream.
+    child.on('close', (code, signal) => this.failAll(this.exitError(code, signal)));
+    child.stdin?.on('error', error => this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)));
+    // A failed Bubblewrap setup can exit between spawn succeeding and this
+    // listener being installed. Preserve that failure for later tool calls.
+    if (child.exitCode !== null || child.signalCode !== null) this.failAll(this.exitError(child.exitCode, child.signalCode));
   }
+  exitError(code, signal) { const status = signal ? `was killed by ${signal}` : `exited with status ${code ?? 'unknown'}`; const detail = this.stderr.trim(); return new Error(`Sandbox worker ${status}${detail ? `: ${detail}` : ''}`); }
   read(chunk) {
     this.buffer += chunk; const lines = this.buffer.split('\n'); this.buffer = lines.pop();
     for (const line of lines) try { const response = JSON.parse(line); const pending = this.pending.get(response.id); if (!pending) continue; this.pending.delete(response.id); response.ok ? pending.resolve(response.result) : pending.reject(new Error(response.error || 'Workspace operation failed')); } catch { /* malformed worker response is ignored */ }
   }
-  failAll(error) { for (const { reject } of this.pending.values()) reject(error); this.pending.clear(); }
+  failAll(error) { if (!this.failure) this.failure = error; for (const { reject } of this.pending.values()) reject(this.failure); this.pending.clear(); }
   call(operation, params) {
+    if (this.failure) return Promise.reject(this.failure);
     const id = ++this.sequence;
-    return new Promise((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.child.stdin.write(`${JSON.stringify({ id, operation, params })}\n`); });
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      if (!this.child.stdin?.writable) return this.failAll(new Error('Sandbox worker input is unavailable'));
+      try { this.child.stdin.write(`${JSON.stringify({ id, operation, params })}\n`, error => { if (error) this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)); }); } catch (error) { this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)); }
+    });
   }
   close() { this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
@@ -52,7 +66,7 @@ async function createTurnWorker(projectRoot) {
   // itself, not its home directory or any credentials alongside it.
   if (!process.execPath.startsWith('/usr/') && !process.execPath.startsWith('/bin/')) args.push('--ro-bind', process.execPath, process.execPath);
   args.push(process.execPath, '--input-type=commonjs', '--eval', workerSource);
-  const child = spawn(bwrap, args, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  const child = spawn(bwrap, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
   return new TurnWorker(child);
 }
