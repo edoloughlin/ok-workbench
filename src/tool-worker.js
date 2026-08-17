@@ -65,6 +65,30 @@ async function applyPatch({ path: relative, content }) {
   if (existing?.isSymbolicLink()) throw new Error('Refusing to replace a symbolic link');
   await fs.writeFile(target, content, 'utf8'); return { path: safe, bytes: Buffer.byteLength(content) };
 }
+async function directoryExists(target) { return fs.stat(target).then(value => value.isDirectory()).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error)); }
+async function applyProjectUpdate({ changes }) {
+  if (!Array.isArray(changes) || !changes.length || changes.length > 64) throw new Error('Provide 1–64 workspace file changes');
+  const prepared = new Map();
+  for (const change of changes) {
+    if (!change || typeof change.content !== 'string' || change.content.length > 1024 * 1024) throw new Error('Each workspace change needs text content under 1 MiB');
+    const { safe } = await targetFor(change.path, true);
+    if (prepared.has(safe)) throw new Error(`Duplicate workspace change: ${safe}`);
+    prepared.set(safe, change.content);
+  }
+  const projects = new Set();
+  for (const safe of prepared.keys()) {
+    const parts = safe.split('/'); if (parts.length < 2) continue;
+    const project = parts[0];
+    if (prepared.has(`${project}/index.md`) || await fs.stat(path.join(ROOT, project, 'index.md')).then(item => item.isFile()).catch(() => false)) projects.add(project);
+    for (let directory = parts.slice(0, -1).join('/'); directory; directory = directory.split('/').slice(0, -1).join('/')) {
+      if (!(await directoryExists(path.join(ROOT, directory))) && !prepared.has(`${directory}/index.md`)) throw new Error(`New directory ${directory} requires ${directory}/index.md in the same update`);
+    }
+  }
+  for (const project of projects) for (const name of ['index.md', 'log.md', 'status.md']) if (!prepared.has(`${project}/${name}`)) throw new Error(`OKF project update requires ${project}/${name} in the same update`);
+  const written = [];
+  for (const [safe, content] of prepared) written.push(await applyPatch({ path: safe, content }));
+  return { paths: written.map(item => item.path), bytes: written.reduce((sum, item) => sum + item.bytes, 0) };
+}
 function projectId(value) {
   if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) throw new Error('Project ID must start with a letter and use only letters, numbers, hyphens, or underscores');
   return value;
@@ -101,7 +125,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_patch: applyPatch, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // A caller can close stdin immediately after its final JSONL request. Keep
   // the event loop alive until the asynchronous filesystem operation replies.
@@ -119,6 +143,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, applyPatch, createProject, startWorker };
+module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();

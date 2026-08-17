@@ -3,7 +3,7 @@
   "workflow_version": "1.0.0",
   "seed_version": "1.0.0",
   "managed_files": {
-    "AGENTS.md": "sha256:34127e07ababc74bf5fd6361ff5f57de578aea27c4280d4b4144fc8cdd2812f9",
+    "AGENTS.md": "sha256:f689d7dd99842b911790ad86b99f0a9235a1d26f64ce49155886fbfb9e2e08c3",
     "example-project/AGENTS.md": "sha256:0f00c5b47171c9da28afe0a6d3d946c9a87cb17edcbb97640b5f1c0472f08810",
     "example-project/brief.md": "sha256:2b16007f70fccbfa4d6907c710eadf45b703234dc215eecdd8b12dda94976b08",
     "example-project/decision.md": "sha256:7f9d476ff9c41e6b9c87bd38930d314f5e68d286c7b450f2c3f55d034fd0a2c3",

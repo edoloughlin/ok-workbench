@@ -667,7 +667,7 @@ const server = http.createServer(async (req, res) => {
           console.error(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
           const type = tool.phase === 'started' ? 'tool.started' : tool.phase === 'failed' ? 'tool.failed' : 'tool.completed';
           writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
-          if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.path ? [tool.result.path] : [] });
+          if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
         const title = titlePromise ? await titlePromise : ''; if (title) thread.title = title;
         thread.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, createdAt: new Date().toISOString() }); await saveThread(thread); writeEvent('message.completed'); writeEvent('turn.completed');

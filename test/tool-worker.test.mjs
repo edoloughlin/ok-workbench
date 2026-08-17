@@ -38,5 +38,20 @@ test('worker creates and registers a discoverable top-level project', async () =
     assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /- \[Private planning\]\(planning\/\)/);
     await assert.rejects(worker.createProject({ id: 'planning' }), /already exists/);
     await assert.rejects(worker.createProject({ id: '../outside' }), /Project ID/);
+    await assert.rejects(worker.applyProjectUpdate({ changes: [{ path: 'planning/brief.md', content: '# Brief\n' }] }), /requires planning\/index.md/);
+    const index = await readFile(path.join(workspace, 'planning', 'index.md'), 'utf8');
+    const log = await readFile(path.join(workspace, 'planning', 'log.md'), 'utf8');
+    const status = await readFile(path.join(workspace, 'planning', 'status.md'), 'utf8');
+    await assert.rejects(worker.applyProjectUpdate({ changes: [
+      { path: 'planning/index.md', content: index }, { path: 'planning/log.md', content: log }, { path: 'planning/status.md', content: status }, { path: 'planning/references/note.md', content: 'evidence\n' }
+    ] }), /New directory planning\/references requires planning\/references\/index.md/);
+    const update = await worker.applyProjectUpdate({ changes: [
+      { path: 'planning/index.md', content: `${index}\n* [Evidence](references/index.md)\n` },
+      { path: 'planning/log.md', content: `${log}\n## 2026-08-17\n\n- Added initial evidence.\n` },
+      { path: 'planning/status.md', content: status.replace('No substantive work recorded yet.', 'Added initial evidence.') },
+      { path: 'planning/references/index.md', content: '# References\n\n* [Evidence note](note.md)\n' },
+      { path: 'planning/references/note.md', content: 'evidence\n' }
+    ] });
+    assert.deepEqual(update.paths, ['planning/index.md', 'planning/log.md', 'planning/status.md', 'planning/references/index.md', 'planning/references/note.md']);
   } finally { if (savedTemplate === undefined) delete process.env.OK_WORKBENCH_PROJECT_TEMPLATE; else process.env.OK_WORKBENCH_PROJECT_TEMPLATE = savedTemplate; }
 });
