@@ -9,7 +9,7 @@ The owner selected **OK Workbench** / `ok-workbench` and supplied its intended p
 
 ## Decision still required
 
-- [!] Confirm npm package availability and configure the npm publisher, published homepage, and support/security contact before publishing.
+- [!] Configure the public repository homepage and support/security contact before release.
 - [!] Trademark and domain clearance require an owner-directed legal/domain review. The public availability checks above do not establish trademark rights.
 
 Package repository/homepage metadata uses the approved intended public repository. Do not publish until the repository is ready and the remaining review items are resolved.
