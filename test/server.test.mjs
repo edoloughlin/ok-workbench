@@ -19,6 +19,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /chatUi\.authDialog\.showModal\(\)/);
   assert.match(script, /Loading workspace…/);
   assert.match(script, /Loading chat history…/);
+  assert.match(script, /while \(i < lines\.length && lines\[i\]\.trim\(\) && !blockBoundary\(lines\[i\]\)\)/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);
   assert.match(server, /openai-codex\|github-copilot/);
 });
