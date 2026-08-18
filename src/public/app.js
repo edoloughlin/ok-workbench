@@ -99,12 +99,13 @@ function table(lines, sourcePath) {
 const TASK_STATES = {
   ' ': { name: 'To do', className: 'todo', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" />' },
   x: { name: 'Completed', className: 'completed', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="m5.25 8 1.8 1.8 3.7-3.7" />' },
+  '~': { name: 'In progress', className: 'in-progress', icon: '<circle cx="8" cy="8" r="5.5" /><path d="M8 4.7v3.5l2.3 1.4" />' },
   '!': { name: 'Blocked', className: 'blocked', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="M8 4.8v3.5M8 10.8h.01" />' },
   '-': { name: 'Canceled', className: 'canceled', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="m5.5 5.5 5 5m0-5-5 5" />' }
 };
 
 function taskListItem(value, sourcePath) {
-  const marker = value.match(/^\[([ xX!-])\]\s*/);
+  const marker = value.match(/^\[([ xX!~\-])\]\s*/);
   if (!marker) return { isTask: false, html: `<li>${inline(value, sourcePath)}</li>` };
 
   const state = TASK_STATES[marker[1].toLowerCase()];
