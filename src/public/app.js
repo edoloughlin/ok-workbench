@@ -280,6 +280,10 @@ const chatUi = {
 const todoUi = { popover: document.querySelector('#todo-popover'), form: document.querySelector('#todo-form'), close: document.querySelector('#todo-close'), cancel: document.querySelector('#todo-cancel'), states: document.querySelector('#todo-states'), markdown: document.querySelector('#todo-markdown'), useLlm: document.querySelector('#todo-use-llm'), llmFields: document.querySelector('#todo-llm-fields'), prompt: document.querySelector('#todo-prompt'), model: document.querySelector('#todo-model'), apply: document.querySelector('#todo-apply') };
 let activeTodo = null;
 function smallModel(models) { return models.find(model => /(?:mini|small|haiku|flash)/i.test(model.label || model.id))?.id || models[0]?.id || ''; }
+function todoModels() {
+  if (chatModels.length) return chatModels;
+  return [...chatUi.model.options].filter(option => option.value).map(option => ({ id: option.value, label: option.textContent }));
+}
 function closeTodo() { todoUi.popover.hidden = true; activeTodo = null; }
 function openTodo(button) {
   if (!displayedDocument?.text || !button.dataset.taskStartLine) return;
@@ -287,7 +291,7 @@ function openTodo(button) {
   const original = lines.slice(startLine - 1, endLine).join('\n'); if (!original) return;
   activeTodo = { path: button.dataset.taskSourcePath, startLine, endLine, original, state: (original.match(/^\s*[-*+]\s+\[([ xX!~\-])\]/)?.[1] || ' ').toLowerCase() };
   todoUi.markdown.value = original; todoUi.prompt.value = ''; todoUi.useLlm.checked = true; todoUi.llmFields.hidden = false;
-  setOptions(todoUi.model, chatModels.length ? chatModels : [{ id: '', label: 'No configured model' }], smallModel(chatModels)); todoUi.model.disabled = !chatModels.length;
+  const models = todoModels(); setOptions(todoUi.model, models.length ? models : [{ id: '', label: 'No configured model' }], smallModel(models)); todoUi.model.disabled = false;
   for (const state of todoUi.states.querySelectorAll('[data-todo-state]')) { const current = state.dataset.todoState === activeTodo.state; state.hidden = current; state.setAttribute('aria-pressed', String(current)); }
   const rect = button.getBoundingClientRect(); todoUi.popover.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - 368))}px`; todoUi.popover.style.top = `${Math.min(rect.bottom + 8, innerHeight - 80)}px`; todoUi.popover.hidden = false;
   requestAnimationFrame(() => { todoUi.popover.style.top = `${Math.max(8, Math.min(rect.bottom + 8, innerHeight - todoUi.popover.offsetHeight - 8))}px`; todoUi.markdown.focus(); });
