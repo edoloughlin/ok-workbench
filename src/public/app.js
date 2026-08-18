@@ -260,7 +260,7 @@ const chatUi = {
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
-  input: document.querySelector('#chat-input'), send: document.querySelector('#chat-send'), stop: document.querySelector('#chat-stop'), authCode: document.querySelector('#chat-auth-code'),
+  input: document.querySelector('#chat-input'), send: document.querySelector('#chat-send'), stop: document.querySelector('#chat-stop'), authCode: document.querySelector('#chat-auth-code'), authDialog: document.querySelector('#chat-auth-dialog'), authDialogCode: document.querySelector('#chat-auth-dialog-code'),
   status: document.querySelector('#chat-status'), changes: document.querySelector('#chat-changes'), changeCount: document.querySelector('#chat-change-count'),
   changesDialog: document.querySelector('#changes-dialog'), diffSummary: document.querySelector('#diff-summary'),
   diffFiles: document.querySelector('#diff-files'), diffFileTitle: document.querySelector('#diff-file-title'), diffContent: document.querySelector('#diff-content'), diffTabs: document.querySelector('#diff-source-tabs'),
@@ -388,6 +388,8 @@ function showAuthenticationCode(provider, label, code) {
   chatUi.authCode.dataset.provider = provider;
   chatUi.authCode.textContent = `${label} verification code: ${code}`;
   chatUi.authCode.hidden = false;
+  chatUi.authDialogCode.textContent = code;
+  if (!chatUi.authDialog.open) chatUi.authDialog.showModal();
 }
 function renderAssistantMarkdown(element, content) {
   // renderMarkdown escapes source text before creating markup; chat replies do

@@ -60,6 +60,14 @@
         </aside>
       </div>
     </div>
+    <dialog id="chat-auth-dialog" class="chat-auth-dialog" aria-labelledby="chat-auth-dialog-title">
+      <form method="dialog">
+        <p id="chat-auth-dialog-title" class="chat-auth-dialog-title">GitHub Copilot sign-in</p>
+        <p>Enter this verification code at GitHub:</p>
+        <output id="chat-auth-dialog-code" class="chat-auth-dialog-code"></output>
+        <button type="submit">I’ve copied the code</button>
+      </form>
+    </dialog>
     <button id="chat-restore" class="chat-restore" type="button" hidden aria-controls="chat-pane">Chat <span id="chat-restore-badge" aria-label="Unread messages"></span></button>
     <dialog id="changes-dialog" class="changes-dialog">
       <form method="dialog" class="changes-header"><div><span class="chat-kicker">Workspace changes</span><h2>Changed files</h2></div><button aria-label="Close changes">×</button></form>
