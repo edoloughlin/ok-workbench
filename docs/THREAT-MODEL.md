@@ -10,12 +10,12 @@ The local HTTP server binds loopback only. Its chat mutation endpoints require a
 
 - Workspace paths are lexically contained and resolved through `realpath`; served files and worker operations reject symlink escapes.
 - The worker rejects Git metadata, dotenv-style files, common private-key names, binary reads, traversal, and symbolic-link writes.
-- Mutating model tools require Bubblewrap. The sandbox has no network, a cleared environment, a temporary root, and only the selected project mounted as user data.
+- Mutating model tools require Bubblewrap on Linux or Seatbelt through `sandbox-exec` on macOS. The worker has no network, a cleared environment, a private temporary directory, access only to the selected workspace, and read-only access to the packaged project template.
 - Git status, diff, revert, and unstage operations use a project pathspec inside the selected worktree.
 - State directories are outside the bundle and are created with owner-only permissions for chat records.
 
 ## Known limits
 
-Bubblewrap/user namespaces are Linux controls and may be unavailable or restricted by host policy; the application fails closed for model file tools in that case. The current worker has no cgroup resource supervision. Direct API providers and OAuth remain third-party trust boundaries. A malicious same-user local process can read local files and is outside this application’s protection model. Seed updates are inspection-only in 1.0.0; automatic three-way merging is not yet implemented.
+Bubblewrap/user namespaces may be unavailable or restricted by Linux host policy. On macOS, `sandbox-exec` is an Apple-deprecated compatibility interface and does not provide Bubblewrap-style mount, PID, or network namespaces; Seatbelt nevertheless enforces the worker's explicit filesystem and network policy. The application fails closed for file tools when its platform backend cannot start. The current worker has no cgroup-equivalent resource supervision. Direct API providers and OAuth remain third-party trust boundaries. A malicious same-user local process can read local files and is outside this application’s protection model. Seed updates are inspection-only in 1.0.0; automatic three-way merging is not yet implemented. See [MACOS-SANDBOX.md](MACOS-SANDBOX.md) for macOS-specific details.
 
 Report security issues as described in [SECURITY.md](SECURITY.md).

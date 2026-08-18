@@ -4,15 +4,15 @@ OK Workbench is a local, LLM-assisted project workspace. It serves a portable `w
 
 ## Status and scope
 
-This is an early, Linux-focused release. It is designed for local project knowledge and reviewable LLM-assisted edits, not hosted multi-user collaboration, a cloud credential manager, an autonomous background agent, or a replacement for Git review. The bundled starter workflow is original minimal material, not a redistribution of any private workflow.
+This is an early local-first release for Linux and macOS. It is designed for local project knowledge and reviewable LLM-assisted edits, not hosted multi-user collaboration, a cloud credential manager, an autonomous background agent, or a replacement for Git review. The bundled starter workflow is original minimal material, not a redistribution of any private workflow.
 
 ## Requirements
 
 - Node.js 22.19.0 or newer.
-- Linux and Bubblewrap with unprivileged user namespaces for file-changing chat tools. Browsing and read-only chat remain available without Bubblewrap.
+- Linux with Bubblewrap and unprivileged user namespaces, or macOS with the system `/usr/bin/sandbox-exec`, for file-changing chat tools. Browsing and read-only chat remain available when an isolation backend is unavailable.
 - Git for the change-review controls.
 
-Run `ok-workbench doctor` to check the effective root, Git, Bubblewrap, state location, and provider configuration without printing secrets.
+Run `ok-workbench doctor` to check the effective root, Git, the platform-specific sandbox backend, state location, and provider configuration without printing secrets.
 
 ## Install and quick start
 
@@ -64,7 +64,7 @@ The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_B
 
 ## Security model
 
-The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes. File-changing model tools fail closed without Bubblewrap; when available, the worker receives a cleared environment, no network, a temporary root, the served workspace, and a read-only packaged OKF template. The agent can create a discoverable top-level project only through the template-backed `create_project` tool; the workspace is initialized as a Git worktree before that operation. Git review actions use project-scoped pathspecs. See the full [threat model](docs/THREAT-MODEL.md) and [security policy](docs/SECURITY.md).
+The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes. File-changing model tools fail closed without the platform sandbox: Bubblewrap on Linux or Seatbelt through `sandbox-exec` on macOS. Both workers receive a cleared environment, no network, a private temporary directory, the served workspace, and a read-only packaged OKF template. The agent can create a discoverable top-level project only through the template-backed `create_project` tool; the workspace is initialized as a Git worktree before that operation. Git review actions use project-scoped pathspecs. See the full [threat model](docs/THREAT-MODEL.md), [macOS sandbox guide](docs/MACOS-SANDBOX.md), and [security policy](docs/SECURITY.md).
 
 ## Development and release
 
