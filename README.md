@@ -58,7 +58,7 @@ ok-workbench migrate-state --yes
 
 The content root resolves in this order: explicit `--root`, `OK_WORKSPACE_ROOT`, legacy `OKF_WORKSPACE_ROOT`/`AGENTS_BUNDLE_ROOT`, `workspaceRoot` in `$XDG_CONFIG_HOME/ok-workbench/config.json` (then the legacy `okf-workbench` location), `./workspace` when present, then `~/workspace`.
 
-Chat state and provider credentials live outside the bundle under the XDG state directory (default `~/.local/state/ok-workbench/chat`). Set `OK_WORKBENCH_STATE_DIR` to use another state location. Provider API keys belong in the server environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or compatible-provider variables) or can be supplied through the local sign-in UI; never put them in the workspace.
+Chat state and provider credentials live outside the bundle under the XDG state directory (default `~/.local/state/ok-workbench/chat`). Set `OK_WORKBENCH_STATE_DIR` to use another state location. Provider API keys belong in the server environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or compatible-provider variables) or can be supplied through the local sign-in UI; GitHub Copilot subscription sign-in uses GitHub's device flow. Never put credentials in the workspace.
 
 The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_BROWSER_STATE_DIR`, old CSRF headers, `/agents/`, and `AGENTS_BUNDLE_ROOT` are one-release compatibility paths. Use `ok-workbench migrate-state --yes` only after reviewing the paths: it copies legacy state only if the destination does not exist and never deletes old data. Browser `localStorage` preferences may need to be set again when the route, origin, or port changes.
 

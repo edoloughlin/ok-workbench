@@ -127,6 +127,9 @@ function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
   const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  // The launcher waits for this acknowledgement before exposing file tools.
+  // A spawn event alone does not prove that the OS sandbox accepted the worker.
+  send({ ready: true });
   // A caller can close stdin immediately after its final JSONL request. Keep
   // the event loop alive until the asynchronous filesystem operation replies.
   const keepAlive = setInterval(() => {}, 1_000);

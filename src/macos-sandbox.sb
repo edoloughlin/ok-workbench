@@ -1,0 +1,29 @@
+; OK Workbench's Seatbelt policy for the file-tool worker.
+; Dynamic paths are passed using sandbox-exec -D arguments; do not interpolate
+; user-controlled paths into this file.
+(version 1)
+(deny default)
+
+; sandbox-exec applies this profile before it execs the Node worker.
+(allow process-exec (literal (param "NODE_BINARY")))
+(allow signal (target self))
+
+; Keep this explicit even though deny-default already blocks it.
+(deny network*)
+
+; macOS and Node runtime files required to launch the evaluated worker.
+(allow file-read*
+  (subpath "/System")
+  (subpath "/usr/lib")
+  (subpath "/private/var/db/dyld")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (subpath (param "NODE_RUNTIME")))
+(allow sysctl-read)
+
+; The worker can change only its selected workspace and an owner-only scratch
+; directory.  The project template remains read-only.
+(allow file-read* file-write*
+  (subpath (param "WORKSPACE"))
+  (subpath (param "PRIVATE_TMP")))
+(allow file-read* (subpath (param "TEMPLATE")))

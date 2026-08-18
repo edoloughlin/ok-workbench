@@ -21,3 +21,12 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - uses: anchore/sbom-action@v0
         with: { artifact-name: ok-workbench-sbom, format: spdx-json }
+
+  macos-seatbelt:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22.19.0, cache: npm }
+      - run: npm ci
+      - run: npm test
