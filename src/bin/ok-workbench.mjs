@@ -12,6 +12,7 @@ const version = '1.0.0';
 const usage = `ok-workbench ${version}\n\nCommands:\n  init [directory] [--yes] [--merge] [--git]\n  serve [--root directory] [--port port]\n  doctor [--root directory]\n  migrate-state --yes\n  seed diff [directory]`;
 const home = path.resolve(os.homedir());
 function fatal(message) { console.error(`ok-workbench: ${message}`); process.exitCode = 1; }
+function isMacOSVarAlias(target, canonical) { return process.platform === 'darwin' && target.startsWith('/var/') && canonical === `/private${target}`; }
 function isDangerous(target) { const states = ['ok-workbench', 'okf-workbench', 'agents-browser'].map(name => path.join(home, '.local', 'state', name)); return target === path.parse(target).root || target === home || states.some(state => target === state || target.startsWith(`${state}${path.sep}`)); }
 async function entries(directory) { try { return await fs.readdir(directory); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
 async function commandWorks(command, args) { return new Promise(resolve => { const child = spawn(command, args, { stdio: 'ignore' }); child.on('error', () => resolve(false)); child.on('exit', code => resolve(code === 0)); }); }
@@ -27,7 +28,8 @@ async function init(args) {
   if (existing?.length && !merge) { const conflicts = await conflictsIn(seed, target); return fatal(`target is not empty (${existing.length} entries); merge would preserve ${conflicts.length} conflicting seed path(s)${conflicts.length ? `:\n${conflicts.map(item => `  ${item}`).join('\n')}` : ''}\nRerun with --merge to copy only missing seed files.`); }
   if (!yes && !process.stdin.isTTY) return fatal('non-interactive init requires --yes');
   await fs.mkdir(target, { recursive: true, mode: 0o755 });
-  if (await fs.realpath(target) !== target) return fatal('refusing a target reached through a symbolic link');
+  const canonicalTarget = await fs.realpath(target);
+  if (canonicalTarget !== target && !isMacOSVarAlias(target, canonicalTarget)) return fatal('refusing a target reached through a symbolic link');
   const conflicts = [];
   async function copy(from, to) { for (const item of await fs.readdir(from, { withFileTypes: true })) { const source = path.join(from, item.name), output = path.join(to, item.name); let present; try { present = await fs.lstat(output); } catch (error) { if (error.code !== 'ENOENT') throw error; } if (item.isDirectory()) { if (present && !present.isDirectory()) { conflicts.push(path.relative(target, output)); continue; } await fs.mkdir(output, { recursive: true, mode: 0o755 }); await copy(source, output); } else if (present) conflicts.push(path.relative(target, output)); else await fs.copyFile(source, output); } }
   await copy(seed, target);

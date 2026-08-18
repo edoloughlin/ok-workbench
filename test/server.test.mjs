@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -17,6 +17,8 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(html, /id="chat-auth-dialog-code"/);
   assert.match(script, /showAuthenticationCode\(provider, label, data\.user_code\)/);
   assert.match(script, /chatUi\.authDialog\.showModal\(\)/);
+  assert.match(script, /Loading workspace…/);
+  assert.match(script, /Loading chat history…/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);
   assert.match(server, /openai-codex\|github-copilot/);
 });
@@ -26,9 +28,13 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
   const sibling = path.join(repository, 'sibling');
   const git = (...args) => { const result = spawnSync('git', args, { cwd: repository, encoding: 'utf8' }); assert.equal(result.status, 0, result.stderr); };
   git('init'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
-  await (await import('node:fs/promises')).mkdir(workspace); await (await import('node:fs/promises')).mkdir(sibling);
+  await mkdir(workspace); await mkdir(sibling); await mkdir(path.join(workspace, 'linked-project')); await mkdir(path.join(workspace, 'unlisted-project')); await mkdir(path.join(workspace, 'bare-project'));
   const outside = path.join(tmpdir(), `ok-workbench-outside-${process.pid}.md`);
-  await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n');
+  await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n\n- [Linked project](linked-project/index.md)\n');
+  await writeFile(path.join(workspace, 'linked-project', 'index.md'), '# Linked project\n');
+  await writeFile(path.join(workspace, 'linked-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'linked-project', 'log.md'), '# Log\n');
+  await writeFile(path.join(workspace, 'unlisted-project', 'index.md'), '# Unlisted project\n');
+  await writeFile(path.join(workspace, 'unlisted-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'unlisted-project', 'log.md'), '# Log\n');
   await writeFile(path.join(workspace, 'tracked.md'), 'before\n'); await writeFile(path.join(sibling, 'tracked.md'), 'before\n');
   await writeFile(outside, 'private\n');
   await symlink(outside, path.join(workspace, 'escape.md'));
@@ -39,6 +45,8 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('server did not start')), 5000); child.stdout?.on('data', () => { clearTimeout(timer); resolve(); }); child.on('error', reject); child.on('exit', code => reject(new Error(`server exited ${code}`))); });
     const document = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/index.md`);
     assert.equal(document.status, 200); assert.equal((await document.json()).title, 'Test workspace');
+    const project = await fetch(`http://127.0.0.1:${port}/api/project?path=/workspace/`);
+    const projectBody = await project.json(); assert.ok(projectBody.projects.some(item => item.name === 'linked-project' && item.path === '/workspace/linked-project')); assert.ok(projectBody.projects.some(item => item.name === 'unlisted-project' && item.path === '/workspace/unlisted-project')); assert.ok(projectBody.projects.some(item => item.name === 'bare-project' && item.path === '/workspace/bare-project'));
     const escaped = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/escape.md`);
     assert.equal(escaped.status, 404);
     const legacy = await fetch(`http://127.0.0.1:${port}/agents/`, { redirect: 'manual' });

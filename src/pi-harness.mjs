@@ -37,11 +37,15 @@ export function sandboxChildEnvironment({ workspace, template, temporaryDirector
   const sandboxRoot = platform === 'linux' ? '/workspace' : workspace;
   const sandboxTemplate = platform === 'linux' ? '/ok-workbench-template' : template;
   const temporary = platform === 'linux' ? '/tmp' : temporaryDirectory;
-  return {
+  const environment = {
     PATH: '/usr/bin:/bin', HOME: temporary, TMPDIR: temporary,
     OK_WORKSPACE_ROOT: sandboxRoot, OKF_WORKSPACE_ROOT: sandboxRoot,
     OK_WORKBENCH_PROJECT_TEMPLATE: sandboxTemplate,
   };
+  // Avoid CoreFoundation falling back to ~/.CFUserTextEncoding. The worker has
+  // no reason to read a user-home file just to determine a text encoding.
+  if (platform === 'darwin') environment.__CF_USER_TEXT_ENCODING = `0x${process.getuid().toString(16)}:0:0`;
+  return environment;
 }
 
 function nodeRuntimeRoot(nodeBinary) {
@@ -91,14 +95,19 @@ async function waitForSpawn(child) {
 }
 
 export class TurnWorker {
-  constructor(child, { cleanup } = {}) {
-    this.child = child; this.cleanup = cleanup; this.cleaned = false; this.pending = new Map(); this.sequence = 0; this.buffer = ''; this.stderr = ''; this.failure = null; this.ready = false; this.readyWaiters = [];
+  constructor(child, { cleanup, onUnexpectedExit } = {}) {
+    this.child = child; this.cleanup = cleanup; this.onUnexpectedExit = onUnexpectedExit; this.cleaned = false; this.closedByCaller = false; this.pending = new Map(); this.sequence = 0; this.buffer = ''; this.stderr = ''; this.failure = null; this.ready = false; this.readyWaiters = [];
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => this.read(chunk));
     child.stderr?.setEncoding('utf8'); child.stderr?.on('data', chunk => { this.stderr = `${this.stderr}${chunk}`.slice(-4096); });
     child.on('error', error => this.failAll(new Error(`Sandbox worker failed: ${error.message}`)));
     // `close` follows stderr draining, so the sandbox diagnostic reaches the
     // browser with the failure rather than being lost to an ignored stream.
-    child.on('close', (code, signal) => { this.failAll(this.exitError(code, signal)); this.removeTemporaryDirectory(); });
+    child.on('close', (code, signal) => {
+      const error = this.exitError(code, signal);
+      this.failAll(error);
+      if (!this.closedByCaller && (code !== 0 || signal)) this.onUnexpectedExit?.({ pid: child.pid, code, signal, stderr: this.stderr.trim(), error: error.message });
+      this.removeTemporaryDirectory();
+    });
     child.stdin?.on('error', error => this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)));
     // A failed sandbox setup can exit between spawn succeeding and this
     // listener being installed. Preserve that failure for later tool calls.
@@ -128,7 +137,7 @@ export class TurnWorker {
       try { this.child.stdin.write(`${JSON.stringify({ id, operation, params })}\n`, error => { if (error) this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)); }); } catch (error) { this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)); }
     });
   }
-  close() { this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
+  close() { this.closedByCaller = true; this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
 
 export async function createTurnWorker(projectRoot, { platform = process.platform } = {}) {
@@ -147,7 +156,10 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
     args.push(configuration.nodeBinary, '--input-type=commonjs', '--eval', configuration.workerSource);
   } else args = macosSandboxArgs(configuration);
   const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform }) });
-  const turnWorker = new TurnWorker(child, { cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory) });
+  const turnWorker = new TurnWorker(child, {
+    cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory),
+    onUnexpectedExit: details => console.error('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
+  });
   try { await waitForSpawn(child); await turnWorker.waitForReady(); return turnWorker; }
   catch (error) { turnWorker.close(); turnWorker.removeTemporaryDirectory(); throw error; }
 }

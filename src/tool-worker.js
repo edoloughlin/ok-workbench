@@ -24,9 +24,13 @@ function safeRelative(value) {
 async function targetFor(relative, write = false) {
   const safe = safeRelative(relative); const target = path.resolve(ROOT, safe);
   if (!target.startsWith(`${ROOT}${path.sep}`)) throw new Error('Path is outside the workspace');
+  // macOS commonly presents temporary directories through /var even though
+  // realpath returns /private/var. Compare canonical paths so that alias is
+  // not mistaken for an escape, while still rejecting a real symlink escape.
+  const root = await fs.realpath(ROOT);
   let ancestor = write ? path.dirname(target) : target; let real = null;
   while (!real) { real = await fs.realpath(ancestor).catch(() => null); if (!real) { const parent = path.dirname(ancestor); if (parent === ancestor) throw new Error('Cannot resolve workspace path'); ancestor = parent; } }
-  if (real !== ROOT && !real.startsWith(`${ROOT}${path.sep}`)) throw new Error('Symlink escapes workspace');
+  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw new Error('Symlink escapes workspace');
   return { safe, target };
 }
 async function listFiles(relative = '.') {

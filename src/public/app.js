@@ -2,6 +2,7 @@ const documentPane = document.querySelector('#document');
 const nav = document.querySelector('#file-nav');
 const picker = document.querySelector('#project-select');
 let displayedDocument = null;
+let pageLoadSequence = 0;
 
 function routePath() {
   const clean = decodeURIComponent(location.pathname).replace(/\/+$/, '');
@@ -201,10 +202,14 @@ function renderFile(file, kicker) {
 }
 
 async function loadPage() {
-  const route = routePath();
-  const [projectResponse, documentResponse] = await Promise.all([fetch(`/api/project?path=${encodeURIComponent(route)}`), fetch(`/api/document?path=${encodeURIComponent(route)}`)]);
-  if (!projectResponse.ok || !documentResponse.ok) throw new Error('That document could not be found.');
-  const data = await projectResponse.json(); const documentData = await documentResponse.json();
+  const request = ++pageLoadSequence; const route = routePath();
+  documentPane.setAttribute('aria-busy', 'true'); nav.setAttribute('aria-busy', 'true'); picker.disabled = true;
+  documentPane.innerHTML = '<p class="loading">Loading workspace…</p>';
+  try {
+    const [projectResponse, documentResponse] = await Promise.all([fetch(`/api/project?path=${encodeURIComponent(route)}`), fetch(`/api/document?path=${encodeURIComponent(route)}`)]);
+    if (!projectResponse.ok || !documentResponse.ok) throw new Error('That document could not be found.');
+    const data = await projectResponse.json(); const documentData = await documentResponse.json();
+    if (request !== pageLoadSequence) return;
   displayedDocument = { path: documentData.path, project: data.project.name };
   document.title = `${documentData.title || documentData.name} / workspace`;
   document.querySelector('#project-name').textContent = data.project.title;
@@ -219,10 +224,13 @@ async function loadPage() {
   documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
   if (typeof chatProjectChanged === 'function') chatProjectChanged(data.project).catch(error => setChatStatus(error.message));
   if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block: 'start' }); else { documentPane.scrollTop = 0; scrollTo(0, 0); }
+  } finally {
+    if (request === pageLoadSequence) { documentPane.removeAttribute('aria-busy'); nav.removeAttribute('aria-busy'); picker.disabled = false; }
+  }
 }
 
 function navigate(event) { const anchor = event.target.closest('a'); const href = anchor?.getAttribute('href') || ''; if (!anchor || anchor.target || /^(?:mailto:|https?:)/i.test(href)) return; const url = new URL(anchor.href); if (url.origin !== location.origin || !url.pathname.startsWith('/workspace')) return; event.preventDefault(); history.pushState({}, '', `${url.pathname}${url.hash}`); loadPage().catch(showError); }
-function showError(error) { documentPane.innerHTML = `<h1>Not found</h1><p>${escapeHtml(error.message)}</p>`; }
+function showError(error) { documentPane.removeAttribute('aria-busy'); nav.removeAttribute('aria-busy'); picker.disabled = false; documentPane.innerHTML = `<h1>Not found</h1><p>${escapeHtml(error.message)}</p>`; }
 
 function reloadChangedDocument(event) {
   if (!displayedDocument || event.project !== displayedDocument.project || !Array.isArray(event.paths)) return;
@@ -495,7 +503,10 @@ async function chatProjectChanged(project) {
   if (chatAbort && !confirm('Switching projects will stop the active chat turn. Continue?')) return;
   if (chatAbort) await cancelChatTurn();
   chatProjectId = project.name; chatThreadId = null; chatUi.project.textContent = project.title || project.name; setChatStatus('Loading project chat…');
-  await Promise.all([loadChatStatus(), loadChatThreads(), refreshGitStatus()]);
+  chatUi.messages.replaceChildren(); const loading = document.createElement('p'); loading.className = 'chat-empty loading'; loading.textContent = 'Loading chat history…'; chatUi.messages.append(loading);
+  chatUi.input.disabled = true; chatUi.send.disabled = true;
+  try { await Promise.all([loadChatStatus(), loadChatThreads(), refreshGitStatus()]); }
+  finally { chatUi.input.disabled = false; chatUi.send.disabled = false; }
 }
 async function cancelChatTurn() {
   const abort = chatAbort; const turnId = chatTurnId;

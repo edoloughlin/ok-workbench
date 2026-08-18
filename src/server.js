@@ -257,6 +257,10 @@ async function navigationTree(folder, isRoot = false, depth = 0) {
   }).map(({ commonIndex, sourceIndex, ...item }) => item);
 }
 
+async function isProjectDirectory(directory) {
+  return (await isDirectory(directory)) && !(await isIgnored(directory));
+}
+
 async function projectData(requested) {
   let requestedPath = safePath(requested || '/workspace');
   requestedPath = requestedPath && await bundlePath(requestedPath);
@@ -270,9 +274,27 @@ async function projectData(requested) {
   const bundleLinks = linksFromIndex(bundleIndex, BUNDLE_ROOT);
   const projects = [{ name: 'workspace', path: '/workspace', label: 'workspace / bundle root' }];
   for (const link of bundleLinks) {
-    const target = safePath(link.path);
-    if (!target || path.dirname(target) !== BUNDLE_ROOT || !(await isDirectory(target)) || await isIgnored(target)) continue;
-    if (!projects.some(project => project.path === link.path)) projects.push({ name: path.basename(target), path: link.path, label: navigationLabel(link.label, 'directory') });
+    let target = safePath(link.path);
+    // An index commonly links to a project's index.md rather than its
+    // directory. Both forms declare the same top-level project.
+    if (target && path.basename(target) === 'index.md') target = path.dirname(target);
+    if (!target || path.dirname(target) !== BUNDLE_ROOT || !(await isProjectDirectory(target))) continue;
+    const projectPath = publicPath(target);
+    if (!projects.some(project => project.path === projectPath)) projects.push({ name: path.basename(target), path: projectPath, label: navigationLabel(link.label, 'directory') });
+  }
+  // Every top-level, non-ignored directory is a project. Index links are
+  // optional: they control prose and, when present, display labels.
+  const topLevel = await fs.readdir(BUNDLE_ROOT, { withFileTypes: true });
+  for (const entry of topLevel.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const target = path.join(BUNDLE_ROOT, entry.name);
+    if (!(await isProjectDirectory(target))) continue;
+    const projectPath = publicPath(target);
+    if (!projects.some(project => project.path === projectPath)) {
+      const indexFile = path.join(target, 'index.md');
+      const label = (await exists(indexFile)) ? titleFromMarkdown(await fs.readFile(indexFile, 'utf8'), entry.name) : entry.name;
+      projects.push({ name: entry.name, path: projectPath, label });
+    }
   }
   const projectIndexFile = path.join(projectRoot, 'index.md');
   const projectIndex = (await exists(projectIndexFile)) ? await fs.readFile(projectIndexFile, 'utf8') : '';

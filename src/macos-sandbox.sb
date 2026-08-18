@@ -6,20 +6,60 @@
 
 ; sandbox-exec applies this profile before it execs the Node worker.
 (allow process-exec (literal (param "NODE_BINARY")))
-(allow signal (target self))
+(allow process-fork)
+(allow signal (target same-sandbox))
+; Node queries process metadata during startup. This does not grant process
+; execution or signalling beyond the worker sandbox.
+(allow process-info-pidinfo)
+(allow process-info-setcontrol)
+
+; These are the narrowly scoped system services Node uses during startup; they
+; do not provide network or filesystem access to the worker.
+(allow mach-lookup
+  (global-name "com.apple.logd")
+  (global-name "com.apple.diagnosticd")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.system.logger"))
 
 ; Keep this explicit even though deny-default already blocks it.
 (deny network*)
 
 ; macOS and Node runtime files required to launch the evaluated worker.
 (allow file-read*
+  ; Node probes the root directory while resolving its runtime paths. A literal
+  ; grant permits that directory entry only, not files below it.
+  (literal "/")
   (subpath "/System")
   (subpath "/usr/lib")
   (subpath "/private/var/db/dyld")
   (literal "/dev/null")
   (literal "/dev/urandom")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/autofs_nowait")
+  (literal "/Library/Preferences/Logging/com.apple.diagnosticd.filter.plist")
   (subpath (param "NODE_RUNTIME")))
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/dtracehelper"))
+(allow file-ioctl (literal "/dev/dtracehelper"))
+; macOS resolves /var through /private/var. Metadata traversal is needed to
+; reach the already-authorized private temporary directory, not to read it.
+(allow file-read-metadata
+  (literal "/")
+  (literal "/etc")
+  (literal "/var")
+  (literal "/Users")
+  (subpath "/Users")
+  (literal "/private")
+  (literal "/private/var")
+  (literal "/private/var/folders")
+  (literal "/private/var/db/timezone/zoneinfo")
+  (literal "/private/etc/localtime"))
 (allow sysctl-read)
+(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center"))
 
 ; The worker can change only its selected workspace and an owner-only scratch
 ; directory.  The project template remains read-only.

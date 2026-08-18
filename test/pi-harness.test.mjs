@@ -13,6 +13,19 @@ test('TurnWorker reports a sandbox process exit instead of leaving tool calls pe
   const worker = new TurnWorker(child);
   await assert.rejects(worker.call('list_files', {}), /Sandbox worker exited with status 17/);
 });
+test('TurnWorker reports unexpected sandbox exits to the backend logger', async () => {
+  const { TurnWorker } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const exits = [];
+  const child = spawn(process.execPath, ['-e', "process.stderr.write('sandbox diagnostic'); process.exit(23)"] , { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, NODE_TEST_CONTEXT: '' } });
+  const worker = new TurnWorker(child, { onUnexpectedExit: details => exits.push(details) });
+  await assert.rejects(worker.call('list_files', {}), /status 23/);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(exits.length, 1);
+  assert.equal(typeof exits[0].pid, 'number');
+  assert.equal(exits[0].code, 23);
+  assert.equal(exits[0].signal, null);
+  assert.match(exits[0].error, /status 23/);
+});
 test('sandbox backend selection and Seatbelt arguments are platform-specific', async () => {
   const { macosSandboxArgs, sandboxBackend, sandboxChildEnvironment } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
   assert.equal(sandboxBackend('linux'), 'bubblewrap');
@@ -32,12 +45,21 @@ test('sandbox backend selection and Seatbelt arguments are platform-specific', a
     platform: 'darwin', workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template', temporaryDirectory: '/private/tmp/ok-workbench-worker-123',
   }), {
     PATH: '/usr/bin:/bin', HOME: '/private/tmp/ok-workbench-worker-123', TMPDIR: '/private/tmp/ok-workbench-worker-123',
-    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template',
+    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template', __CF_USER_TEXT_ENCODING: `0x${process.getuid().toString(16)}:0:0`,
   });
   const profile = await readFile(path.join(root, 'dist', 'macos-sandbox.sb'), 'utf8');
   assert.match(profile, /^\(deny default\)$/m);
   assert.match(profile, /^\(deny network\*\)$/m);
   assert.doesNotMatch(profile, /\(allow network\*/);
+  assert.match(profile, /\(literal "\/"\)/);
+  assert.match(profile, /^\(allow process-info-pidinfo\)$/m);
+  assert.match(profile, /global-name "com\.apple\.cfprefsd\.daemon"/);
+  assert.match(profile, /global-name "com\.apple\.system\.opendirectoryd\.libinfo"/);
+  assert.match(profile, /global-name "com\.apple\.diagnosticd"/);
+  assert.match(profile, /global-name "com\.apple\.logd"/);
+  assert.match(profile, /\(allow file-ioctl \(literal "\/dev\/dtracehelper"\)\)/);
+  assert.match(profile, /ipc-posix-name "apple\.shm\.notification_center"/);
+  assert.match(profile, /\(allow file-write-data[\s\S]*\(literal "\/dev\/null"\)/);
 });
 test('TurnWorker waits for an explicit sandbox-ready acknowledgement', async () => {
   const { TurnWorker } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
