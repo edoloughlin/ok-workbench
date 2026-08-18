@@ -160,7 +160,10 @@ function sortMarkdownTable(header) {
 }
 
 function renderMarkdown(markdown, sourcePath) {
-  const lines = markdown.replace(/^---[\s\S]*?---\s*/,'').replace(/\r/g, '').split('\n');
+  const normalizedMarkdown = markdown.replace(/\r/g, '');
+  const frontmatter = normalizedMarkdown.match(/^---[\s\S]*?---\s*/);
+  const sourceLineOffset = frontmatter ? frontmatter[0].split('\n').length - 1 : 0;
+  const lines = (frontmatter ? normalizedMarkdown.slice(frontmatter[0].length) : normalizedMarkdown).split('\n');
   const blockBoundary = line => /^(?:#{1,6}\s|```|>\s?|\s*[-*+]\s+|\s*\d+\.\s+|\s*([-*_])(?:\s*\1){2,}\s*$)/.test(line);
   const output = []; let i = 0;
   while (i < lines.length) {
@@ -171,7 +174,7 @@ function renderMarkdown(markdown, sourcePath) {
     if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
     if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath)}</p></blockquote>`); continue; }
-    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1, endLine: i }); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
+    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
     if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
     const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath)}</p>`);
   }
