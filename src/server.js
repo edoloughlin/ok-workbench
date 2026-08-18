@@ -447,13 +447,14 @@ async function chatStatus(provider) {
 }
 
 async function startProviderLogin(provider) {
-  if (provider !== 'openai-codex') throw new Error('This provider does not support browser sign-in');
+  if (!['openai-codex', 'github-copilot'].includes(provider)) throw new Error('This provider does not support browser sign-in');
+  const label = provider === 'github-copilot' ? 'GitHub Copilot' : 'Codex';
   const existing = AUTH_FLOWS.get(provider);
-  if (existing?.url) return { url: existing.url, pending: true };
-  if (existing) throw new Error('Codex sign-in is starting; try again in a moment');
+  if (existing?.url) return { url: existing.url, user_code: existing.userCode || undefined, pending: true };
+  if (existing) throw new Error(`${label} sign-in is starting; try again in a moment`);
   let resolveUrl; let rejectUrl;
   const url = new Promise((resolve, reject) => { resolveUrl = resolve; rejectUrl = reject; });
-  const flow = { url: '', respond: null, cancel: null };
+  const flow = { url: '', userCode: '', respond: null, cancel: null };
   AUTH_FLOWS.set(provider, flow);
   try {
     const { startPiLogin } = await import('./pi-harness.mjs');
@@ -462,11 +463,19 @@ async function startProviderLogin(provider) {
       stateDir: CHAT_STATE_DIR,
       onEvent: event => {
         if (event.type === 'auth_url') { flow.url = event.url; resolveUrl(event.url); }
+        if (event.type === 'device_code') {
+          const verificationUri = event.verificationUri || event.verification_uri;
+          const userCode = event.userCode || event.user_code;
+          if (typeof verificationUri !== 'string' || !verificationUri) throw new Error('GitHub Copilot sign-in did not provide a verification URL');
+          flow.url = verificationUri; flow.userCode = typeof userCode === 'string' ? userCode : ''; resolveUrl(verificationUri);
+        }
       },
       onPrompt: (prompt, respond) => {
-        // The button is specifically the browser-login path. Pi asks the host
-        // to select it before it can emit the authorization URL.
-        if (prompt.type === 'select') respond('browser');
+        // Codex requires the browser option before it emits its auth URL.
+        // Copilot asks for an optional Enterprise domain; blank selects
+        // github.com and then emits a device code and verification URL.
+        if (provider === 'openai-codex' && prompt.type === 'select') respond('browser');
+        else if (provider === 'github-copilot' && prompt.type === 'text') respond('');
         else if (prompt.type === 'manual_code') flow.respond = respond;
       }
     });
@@ -475,12 +484,12 @@ async function startProviderLogin(provider) {
       flow.completed = true;
       setTimeout(() => AUTH_FLOWS.delete(provider), 60_000).unref();
     }, error => {
-      flow.error = error.message || 'Codex sign-in failed';
+      flow.error = error.message || `${label} sign-in failed`;
       rejectUrl(error);
       setTimeout(() => AUTH_FLOWS.delete(provider), 60_000).unref();
     });
     const address = await url;
-    return { url: address, pending: true };
+    return { url: address, user_code: flow.userCode || undefined, pending: true };
   } catch (error) {
     AUTH_FLOWS.delete(provider);
     throw error;
@@ -627,7 +636,8 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
-    if (url.pathname === '/api/chat/auth/openai-codex/start' && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await startProviderLogin('openai-codex')); }
+    const authMatch = url.pathname.match(/^\/api\/chat\/auth\/(openai-codex|github-copilot)\/start$/);
+    if (authMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await startProviderLogin(authMatch[1])); }
     if (url.pathname === '/api/chat/threads' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await listThreads(url.searchParams.get('project'))); }
     if (url.pathname === '/api/chat/threads' && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const root = projectRootForId(body.project); if (!(await isDirectory(root))) throw new Error('Project not found');

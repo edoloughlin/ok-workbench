@@ -256,11 +256,11 @@ const chatUi = {
   restore: document.querySelector('#chat-restore'), restoreBadge: document.querySelector('#chat-restore-badge'),
   splitter: document.querySelector('#chat-splitter'), project: document.querySelector('#chat-project'),
   provider: document.querySelector('#chat-provider'), model: document.querySelector('#chat-model'), effort: document.querySelector('#chat-effort'),
-  codexLogin: document.querySelector('#chat-codex-login'), settings: document.querySelector('#chat-settings'), settingsMenu: document.querySelector('#chat-settings-menu'),
+  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsMenu: document.querySelector('#chat-settings-menu'),
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
-  input: document.querySelector('#chat-input'), send: document.querySelector('#chat-send'), stop: document.querySelector('#chat-stop'),
+  input: document.querySelector('#chat-input'), send: document.querySelector('#chat-send'), stop: document.querySelector('#chat-stop'), authCode: document.querySelector('#chat-auth-code'),
   status: document.querySelector('#chat-status'), changes: document.querySelector('#chat-changes'), changeCount: document.querySelector('#chat-change-count'),
   changesDialog: document.querySelector('#changes-dialog'), diffSummary: document.querySelector('#diff-summary'),
   diffFiles: document.querySelector('#diff-files'), diffFileTitle: document.querySelector('#diff-file-title'), diffContent: document.querySelector('#diff-content'), diffTabs: document.querySelector('#diff-source-tabs'),
@@ -372,11 +372,22 @@ function loadTitleModels(providers = []) {
   loadTitleEfforts(chatSettings.titleEffort);
   persistChatSettings();
 }
-function setCodexLoginState(providers) {
-  const connected = providers.some(provider => provider.id === 'openai-codex');
-  chatUi.codexLogin.textContent = connected ? 'Codex connected' : 'Sign in to Codex';
-  chatUi.codexLogin.disabled = connected;
-  chatUi.codexLogin.title = connected ? 'This browser has its own Codex sign-in.' : 'Sign in to Codex for this browser.';
+function setProviderLoginState(providers) {
+  for (const { id, label, button } of [
+    { id: 'openai-codex', label: 'Codex', button: chatUi.codexLogin },
+    { id: 'github-copilot', label: 'Copilot', button: chatUi.copilotLogin },
+  ]) {
+    const connected = providers.some(provider => provider.id === id);
+    button.textContent = connected ? `${label} connected` : `Sign in to ${label}`;
+    button.disabled = connected;
+    button.title = connected ? `This browser has its own ${label} sign-in.` : `Sign in to ${label} for this browser.`;
+    if (connected && chatUi.authCode.dataset.provider === id) chatUi.authCode.hidden = true;
+  }
+}
+function showAuthenticationCode(provider, label, code) {
+  chatUi.authCode.dataset.provider = provider;
+  chatUi.authCode.textContent = `${label} verification code: ${code}`;
+  chatUi.authCode.hidden = false;
 }
 function renderAssistantMarkdown(element, content) {
   // renderMarkdown escapes source text before creating markup; chat replies do
@@ -418,37 +429,39 @@ async function loadChatStatus() {
   try {
     const response = await chatApi('/api/chat/status'); if (!response.ok) throw new Error('Chat unavailable');
     const data = await response.json(); const providers = data.providers || [];
-    setCodexLoginState(providers);
+    setProviderLoginState(providers);
     loadTitleModels(providers);
     const preference = projectChatPreference();
     setOptions(chatUi.provider, providers, providers.some(item => item.id === preference.provider) ? preference.provider : (chatUi.provider.value || data.defaultProvider));
     await loadChatModels();
     setChatStatus(data.enabled ? 'Ready' : (data.message || 'Configure a provider'));
-  } catch { setCodexLoginState([]); setOptions(chatUi.provider, [{ id: 'anthropic', label: 'Anthropic (not configured)' }], 'anthropic'); chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); loadTitleModels([]); setChatStatus('Chat service unavailable'); }
+  } catch { setProviderLoginState([]); setOptions(chatUi.provider, [{ id: 'anthropic', label: 'Anthropic (not configured)' }], 'anthropic'); chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); loadTitleModels([]); setChatStatus('Chat service unavailable'); }
 }
 async function loadChatModels() {
   const provider = chatUi.provider.value; if (!provider) return;
   try { const response = await chatApi(`/api/chat/status?provider=${encodeURIComponent(provider)}`); const data = await response.json(); chatModels = data.models || []; const preference = projectChatPreference(); setOptions(chatUi.model, chatModels.length ? chatModels : [{ id: '', label: 'No configured model' }], chatModels.some(item => item.id === preference.model) ? preference.model : (chatUi.model.value || data.defaultModel)); loadChatEfforts(preference.effort); } catch { chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); }
 }
-async function signInToCodex() {
+async function signInToProvider(provider) {
+  const copilot = provider === 'github-copilot'; const label = copilot ? 'Copilot' : 'Codex'; const button = copilot ? chatUi.copilotLogin : chatUi.codexLogin;
   closeChatSettings();
-  const loginWindow = window.open('', 'ok-workbench-codex-login', 'popup,width=680,height=760');
-  chatUi.codexLogin.disabled = true; setChatStatus('Preparing Codex sign-in…');
+  const loginWindow = window.open('', `ok-workbench-${provider}-login`, 'popup,width=680,height=760');
+  button.disabled = true; setChatStatus(`Preparing ${label} sign-in…`);
   try {
-    const response = await chatApi('/api/chat/auth/openai-codex/start', { method: 'POST' });
-    const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not start Codex sign-in');
+    const response = await chatApi(`/api/chat/auth/${provider}/start`, { method: 'POST' });
+    const data = await response.json(); if (!response.ok) throw new Error(data.error || `Could not start ${label} sign-in`);
     if (loginWindow) loginWindow.location.href = data.url;
     else window.location.assign(data.url);
-    setChatStatus('Complete the Codex sign-in in the browser window, then return here.');
+    if (data.user_code) showAuthenticationCode(provider, label, data.user_code);
+    setChatStatus(data.user_code ? `Enter the ${label} verification code shown above at GitHub.` : `Complete the ${label} sign-in in the browser window, then return here.`);
     const deadline = Date.now() + 120_000;
     const poll = async () => {
       await loadChatStatus();
-      if ([...chatUi.provider.options].some(option => option.value === 'openai-codex')) { setChatStatus('Codex is ready.'); return; }
+      if ([...chatUi.provider.options].some(option => option.value === provider)) { setChatStatus(`${label} is ready.`); return; }
       if (Date.now() < deadline) setTimeout(() => { void poll(); }, 1_500);
     };
     void poll();
-  } catch (error) { loginWindow?.close(); setChatStatus(error.message || 'Codex sign-in failed'); }
-  finally { chatUi.codexLogin.disabled = false; }
+  } catch (error) { loginWindow?.close(); setChatStatus(error.message || `${label} sign-in failed`); }
+  finally { button.disabled = false; }
 }
 function formatThreadTime(value) {
   const date = new Date(value); if (Number.isNaN(date.valueOf())) return '';
@@ -579,7 +592,8 @@ chatUi.settings.addEventListener('click', toggleChatSettings);
 document.addEventListener('click', event => { if (!event.target.closest('.chat-menu')) closeChatSettings(); });
 chatUi.titleModel.addEventListener('change', () => { const model = titleModels.find(item => titleModelKey(item) === chatUi.titleModel.value); if (!model) return; chatSettings.titleProvider = model.provider; chatSettings.titleModel = model.id; loadTitleEfforts(chatSettings.titleEffort); persistChatSettings(); });
 chatUi.titleEffort.addEventListener('change', () => { chatSettings.titleEffort = chatUi.titleEffort.value; persistChatSettings(); });
-chatUi.codexLogin.addEventListener('click', signInToCodex);
+chatUi.codexLogin.addEventListener('click', () => signInToProvider('openai-codex'));
+chatUi.copilotLogin.addEventListener('click', () => signInToProvider('github-copilot'));
 chatUi.newThread.addEventListener('click', () => createChatThread().catch(error => setChatStatus(error.message)));
 chatUi.thread.addEventListener('change', () => loadChatThread(chatUi.thread.value).catch(error => setChatStatus(error.message)));
 chatUi.composer.addEventListener('submit', event => { event.preventDefault(); const message = chatUi.input.value.trim(); if (!message || chatAbort) return; chatUi.input.value = ''; addChatMessage('user', message); streamChatTurn(message); });

@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
-import { access, readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, chmod, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Type } from 'typebox';
@@ -15,34 +17,108 @@ import {
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(APP_DIR, 'tool-worker.js');
 const PROJECT_TEMPLATE = path.resolve(APP_DIR, '..', 'seed', 'workspace', 'templates', 'project');
+const MACOS_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-sandbox.sb');
 const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
+const WORKER_READY_TIMEOUT = 5_000;
 
-async function exists(file) { try { await access(file); return true; } catch { return false; } }
+async function exists(file, mode = constants.F_OK) { try { await access(file, mode); return true; } catch { return false; } }
 async function bwrapPath() {
-  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) if (await exists(candidate)) return candidate;
+  for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) if (await exists(candidate, constants.X_OK)) return candidate;
   return null;
 }
 
+export function sandboxBackend(platform = process.platform) {
+  if (platform === 'linux') return 'bubblewrap';
+  if (platform === 'darwin') return 'seatbelt';
+  return null;
+}
+
+export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, platform }) {
+  const sandboxRoot = platform === 'linux' ? '/workspace' : workspace;
+  const sandboxTemplate = platform === 'linux' ? '/ok-workbench-template' : template;
+  const temporary = platform === 'linux' ? '/tmp' : temporaryDirectory;
+  return {
+    PATH: '/usr/bin:/bin', HOME: temporary, TMPDIR: temporary,
+    OK_WORKSPACE_ROOT: sandboxRoot, OKF_WORKSPACE_ROOT: sandboxRoot,
+    OK_WORKBENCH_PROJECT_TEMPLATE: sandboxTemplate,
+  };
+}
+
+function nodeRuntimeRoot(nodeBinary) {
+  // Homebrew and nvm both put node in a versioned `bin/` directory.  Keep the
+  // profile grant at that version directory instead of a broad prefix such as
+  // /opt/homebrew or the user's home directory.
+  return nodeBinary.startsWith('/usr/bin/') ? path.dirname(nodeBinary) : path.dirname(path.dirname(nodeBinary));
+}
+
+export function macosSandboxArgs({ workspace, template, temporaryDirectory, nodeBinary, workerSource }) {
+  const runtime = nodeRuntimeRoot(nodeBinary);
+  return [
+    '-D', `WORKSPACE=${workspace}`, '-D', `TEMPLATE=${template}`,
+    '-D', `PRIVATE_TMP=${temporaryDirectory}`, '-D', `NODE_BINARY=${nodeBinary}`,
+    '-D', `NODE_RUNTIME=${runtime}`, '-f', MACOS_SANDBOX_PROFILE,
+    nodeBinary, '--input-type=commonjs', '--eval', workerSource,
+  ];
+}
+
+async function workerConfiguration(projectRoot, platform) {
+  const [workspace, template, nodeBinary] = await Promise.all([realpath(projectRoot), realpath(PROJECT_TEMPLATE), realpath(process.execPath)]);
+  const [workspaceInfo, templateInfo] = await Promise.all([stat(workspace), stat(template)]);
+  if (!workspaceInfo.isDirectory()) throw new Error('Workspace root is not a directory');
+  if (!templateInfo.isDirectory()) throw new Error('Packaged OKF project template is unavailable');
+  const workerSource = `${await readFile(WORKER, 'utf8')}\nstartWorker();`;
+  const temporaryDirectory = platform === 'darwin' ? await mkdtemp(path.join(tmpdir(), 'ok-workbench-worker-')) : null;
+  if (temporaryDirectory) {
+    await chmod(temporaryDirectory, 0o700);
+    return { workspace, template, nodeBinary, workerSource, temporaryDirectory: await realpath(temporaryDirectory) };
+  }
+  return { workspace, template, nodeBinary, workerSource, temporaryDirectory: null };
+}
+
+async function cleanupTemporaryDirectory(directory) {
+  if (!directory) return;
+  await rm(directory, { recursive: true, force: true }).catch(() => {});
+}
+
+async function sandboxCommand(platform) {
+  if (platform === 'linux') return bwrapPath();
+  if (platform === 'darwin' && await exists('/usr/bin/sandbox-exec', constants.X_OK)) return '/usr/bin/sandbox-exec';
+  return null;
+}
+
+async function waitForSpawn(child) {
+  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+}
+
 export class TurnWorker {
-  constructor(child) {
-    this.child = child; this.pending = new Map(); this.sequence = 0; this.buffer = ''; this.stderr = ''; this.failure = null;
+  constructor(child, { cleanup } = {}) {
+    this.child = child; this.cleanup = cleanup; this.cleaned = false; this.pending = new Map(); this.sequence = 0; this.buffer = ''; this.stderr = ''; this.failure = null; this.ready = false; this.readyWaiters = [];
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => this.read(chunk));
     child.stderr?.setEncoding('utf8'); child.stderr?.on('data', chunk => { this.stderr = `${this.stderr}${chunk}`.slice(-4096); });
     child.on('error', error => this.failAll(new Error(`Sandbox worker failed: ${error.message}`)));
-    // `close` follows stderr draining, so Bubblewrap's diagnostic reaches the
+    // `close` follows stderr draining, so the sandbox diagnostic reaches the
     // browser with the failure rather than being lost to an ignored stream.
-    child.on('close', (code, signal) => this.failAll(this.exitError(code, signal)));
+    child.on('close', (code, signal) => { this.failAll(this.exitError(code, signal)); this.removeTemporaryDirectory(); });
     child.stdin?.on('error', error => this.failAll(new Error(`Sandbox worker input failed: ${error.message}`)));
-    // A failed Bubblewrap setup can exit between spawn succeeding and this
+    // A failed sandbox setup can exit between spawn succeeding and this
     // listener being installed. Preserve that failure for later tool calls.
     if (child.exitCode !== null || child.signalCode !== null) this.failAll(this.exitError(child.exitCode, child.signalCode));
   }
+  removeTemporaryDirectory() { if (!this.cleaned) { this.cleaned = true; void this.cleanup?.(); } }
   exitError(code, signal) { const status = signal ? `was killed by ${signal}` : `exited with status ${code ?? 'unknown'}`; const detail = this.stderr.trim(); return new Error(`Sandbox worker ${status}${detail ? `: ${detail}` : ''}`); }
   read(chunk) {
     this.buffer += chunk; const lines = this.buffer.split('\n'); this.buffer = lines.pop();
-    for (const line of lines) try { const response = JSON.parse(line); const pending = this.pending.get(response.id); if (!pending) continue; this.pending.delete(response.id); response.ok ? pending.resolve(response.result) : pending.reject(new Error(response.error || 'Workspace operation failed')); } catch { /* malformed worker response is ignored */ }
+    for (const line of lines) try { const response = JSON.parse(line); if (response.ready === true) { this.ready = true; for (const waiter of this.readyWaiters.splice(0)) waiter.resolve(); continue; } const pending = this.pending.get(response.id); if (!pending) continue; this.pending.delete(response.id); response.ok ? pending.resolve(response.result) : pending.reject(new Error(response.error || 'Workspace operation failed')); } catch { /* malformed worker response is ignored */ }
   }
-  failAll(error) { if (!this.failure) this.failure = error; for (const { reject } of this.pending.values()) reject(this.failure); this.pending.clear(); }
+  failAll(error) { if (!this.failure) this.failure = error; for (const { reject } of this.pending.values()) reject(this.failure); this.pending.clear(); for (const waiter of this.readyWaiters.splice(0)) waiter.reject(this.failure); }
+  waitForReady(timeout = WORKER_READY_TIMEOUT) {
+    if (this.ready) return Promise.resolve(); if (this.failure) return Promise.reject(this.failure);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { this.readyWaiters = this.readyWaiters.filter(waiter => waiter !== item); reject(new Error('Sandbox worker did not become ready')); }, timeout);
+      const item = { resolve: () => { clearTimeout(timer); resolve(); }, reject: error => { clearTimeout(timer); reject(error); } };
+      this.readyWaiters.push(item);
+    });
+  }
   call(operation, params) {
     if (this.failure) return Promise.reject(this.failure);
     const id = ++this.sequence;
@@ -55,23 +131,25 @@ export class TurnWorker {
   close() { this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
 
-async function createTurnWorker(projectRoot) {
-  const bwrap = await bwrapPath();
-  if (!bwrap) return null;
-  if (!(await exists(PROJECT_TEMPLATE))) throw new Error('Packaged OKF project template is unavailable');
-  // The worker source is passed as an evaluated program so the sandbox never
-  // mounts the package installation or seed bundle. Its only user-data mount
-  // is the selected project at /workspace.
-  const workerSource = `${await readFile(WORKER, 'utf8')}\nstartWorker();`;
-  const args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', projectRoot, '/workspace', '--ro-bind', PROJECT_TEMPLATE, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
-  for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
-  // Node may be installed under nvm rather than /usr/bin; bind the executable
-  // itself, not its home directory or any credentials alongside it.
-  if (!process.execPath.startsWith('/usr/') && !process.execPath.startsWith('/bin/')) args.push('--ro-bind', process.execPath, process.execPath);
-  args.push(process.execPath, '--input-type=commonjs', '--eval', workerSource);
-  const child = spawn(bwrap, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-  await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-  return new TurnWorker(child);
+export async function createTurnWorker(projectRoot, { platform = process.platform } = {}) {
+  const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
+  if (!backend || !command) return null;
+  let configuration;
+  try { configuration = await workerConfiguration(projectRoot, platform); }
+  catch (error) { throw new Error(`Sandbox worker setup failed: ${error.message}`); }
+  let args;
+  if (backend === 'bubblewrap') {
+    // The worker source is evaluated so the sandbox never mounts the package
+    // installation or seed bundle. Its only user-data mount is /workspace.
+    args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
+    for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
+    if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
+    args.push(configuration.nodeBinary, '--input-type=commonjs', '--eval', configuration.workerSource);
+  } else args = macosSandboxArgs(configuration);
+  const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform }) });
+  const turnWorker = new TurnWorker(child, { cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory) });
+  try { await waitForSpawn(child); await turnWorker.waitForReady(); return turnWorker; }
+  catch (error) { turnWorker.close(); turnWorker.removeTemporaryDirectory(); throw error; }
 }
 
 function apiKeyFor(provider, env) {
@@ -180,7 +258,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   });
   await loader.reload();
   const call = async (name, params) => {
-    if (!worker) throw new Error('Bubblewrap is required before agent file tools can run');
+    if (!worker) throw new Error('A supported sandbox is required before agent file tools can run');
     await onTool?.({ phase: 'started', name });
     try {
       const result = await worker.call(name, params);

@@ -6,6 +6,18 @@ import { spawn, spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
+test('chat UI exposes the GitHub Copilot device code outside transient status text', async () => {
+  const [html, script, server] = await Promise.all([
+    readFile(path.join(root, 'src', 'public', 'index.html'), 'utf8'),
+    readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'server.js'), 'utf8'),
+  ]);
+  assert.match(html, /id="chat-copilot-login"/);
+  assert.match(html, /id="chat-auth-code"/);
+  assert.match(script, /showAuthenticationCode\(provider, label, data\.user_code\)/);
+  assert.match(server, /event\.userCode \|\| event\.user_code/);
+  assert.match(server, /openai-codex\|github-copilot/);
+});
 test('server serves an arbitrary bundle, redirects legacy routes, and rejects escaping symlinks', { skip: !process.env.OK_WORKBENCH_INTEGRATION }, async () => {
   const repository = await mkdtemp(path.join(tmpdir(), 'ok-workbench-server-'));
   const workspace = path.join(repository, 'workspace');

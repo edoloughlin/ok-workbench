@@ -34,6 +34,7 @@
                   <label class="chat-menu-setting">Effort <select id="chat-title-effort" aria-label="Conversation title effort"></select></label>
                   <hr class="chat-menu-rule">
                   <button id="chat-codex-login" type="button">Sign in to Codex</button>
+                  <button id="chat-copilot-login" type="button">Sign in to Copilot</button>
                 </div>
               </div>
               <button id="chat-collapse" type="button" title="Collapse chat">×</button>
@@ -45,6 +46,7 @@
               <label>Model <select id="chat-model" aria-label="Chat model"></select></label>
               <label>Effort <select id="chat-effort" aria-label="Reasoning effort"></select></label>
             </div>
+            <div id="chat-auth-code" class="chat-auth-code" role="status" aria-live="assertive" hidden></div>
             <div class="chat-conversation">
               <div class="chat-thread-bar"><select id="chat-thread" aria-label="Chat thread"></select><button id="chat-changes" type="button">Changes <span id="chat-change-count">0</span></button></div>
               <section id="chat-messages" class="chat-messages" aria-live="polite"></section>
