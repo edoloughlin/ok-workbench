@@ -648,6 +648,19 @@ async function undoGitAction(project, operationId) {
   const git = await gitProject(project); const args = saved.action === 'unstage' ? ['apply', '--cached', '--check'] : ['apply', '--check']; await run('git', args, { cwd: git.repo, input: saved.patch }); await run('git', args.slice(0, -1), { cwd: git.repo, input: saved.patch }); GIT_RECOVERY.delete(operationId);
   return gitStatus(project);
 }
+async function updateTodo(project, body) {
+  const startLine = Number(body.startLine), endLine = Number(body.endLine);
+  const original = typeof body.original === 'string' ? body.original : null;
+  const replacement = typeof body.replacement === 'string' ? body.replacement : null;
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || !original || replacement === null || replacement.length > 64 * 1024) throw new Error('Invalid task update');
+  const root = await fs.realpath(projectRootForId(project)); const target = await bundlePath(safePath(String(body.path || '')));
+  if (!target || (target !== root && !target.startsWith(`${root}${path.sep}`)) || path.basename(target).startsWith('.env') || target.includes(`${path.sep}.git${path.sep}`)) throw new Error('Task is outside the selected project');
+  const content = await fs.readFile(target, 'utf8'); const lines = content.split('\n'); const actual = lines.slice(startLine - 1, endLine).join('\n');
+  if (actual !== original) throw new Error('This task changed; reload the document before saving');
+  lines.splice(startLine - 1, endLine - startLine + 1, ...replacement.replace(/\r/g, '').split('\n'));
+  await fs.writeFile(target, lines.join('\n'), 'utf8');
+  return { path: path.relative(root, target).split(path.sep).join('/') };
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -696,7 +709,7 @@ const server = http.createServer(async (req, res) => {
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
           if (tool.result?.location) diagnostic.location = tool.result.location;
           if (tool.result?.path) diagnostic.path = tool.result.path;
-          console.error(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
+          if (tool.error) console.error(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
           const type = tool.phase === 'started' ? 'tool.started' : tool.phase === 'failed' ? 'tool.failed' : 'tool.completed';
           writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
@@ -708,6 +721,8 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
     const gitStatusMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/status$/);
+    const todoMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/todos$/);
+    if (todoMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await updateTodo(decodeURIComponent(todoMatch[1]), await readJson(req))); }
     if (gitStatusMatch && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await gitStatus(decodeURIComponent(gitStatusMatch[1]))); }
     const gitDiffMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/diff$/);
     if (gitDiffMatch && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await gitDiff(decodeURIComponent(gitDiffMatch[1]), url.searchParams.get('source') || 'unstaged')); }

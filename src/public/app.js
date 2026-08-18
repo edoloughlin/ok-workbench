@@ -104,12 +104,12 @@ const TASK_STATES = {
   '-': { name: 'Canceled', className: 'canceled', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="m5.5 5.5 5 5m0-5-5 5" />' }
 };
 
-function taskListItem(value, sourcePath) {
+function taskListItem(value, sourcePath, location = {}) {
   const marker = value.match(/^\[([ xX!~\-])\]\s*/);
   if (!marker) return { isTask: false, html: `<li>${inline(value, sourcePath)}</li>` };
 
   const state = TASK_STATES[marker[1].toLowerCase()];
-  const icon = `<svg class="task-marker" viewBox="0 0 16 16" role="img" aria-label="${state.name}" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${state.icon}</svg>`;
+  const icon = `<button class="task-marker" type="button" title="Edit task: ${state.name}" aria-label="Edit task: ${state.name}" data-task-start-line="${location.startLine || ''}" data-task-end-line="${location.endLine || ''}" data-task-source-path="${escapeHtml(sourcePath)}"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${state.icon}</svg></button>`;
   return { isTask: true, html: `<li class="task-item task-${state.className}" data-task-state="${state.name.toLowerCase()}">${icon}<span class="task-content">${inline(value.slice(marker[0].length), sourcePath)}</span></li>` };
 }
 
@@ -171,7 +171,7 @@ function renderMarkdown(markdown, sourcePath) {
     if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
     if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath)}</p></blockquote>`); continue; }
-    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
+    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1, endLine: i }); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
     if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
     const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath)}</p>`);
   }
@@ -212,7 +212,7 @@ async function loadPage() {
     if (!projectResponse.ok || !documentResponse.ok) throw new Error('That document could not be found.');
     const data = await projectResponse.json(); const documentData = await documentResponse.json();
     if (request !== pageLoadSequence) return;
-  displayedDocument = { path: documentData.path, project: data.project.name };
+  displayedDocument = { path: documentData.path, project: data.project.name, text: documentData.text || '' };
   document.title = `${documentData.title || documentData.name} / workspace`;
   document.querySelector('#project-name').textContent = data.project.title;
   document.querySelector('#stats').textContent = `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
@@ -277,6 +277,44 @@ const chatUi = {
   diffLayout: document.querySelector('#diff-layout'), diffPalette: document.querySelector('#diff-palette'),
   diffRevert: document.querySelector('#diff-revert'), diffUnstage: document.querySelector('#diff-unstage'), diffUndo: document.querySelector('#diff-undo')
 };
+const todoUi = { popover: document.querySelector('#todo-popover'), form: document.querySelector('#todo-form'), close: document.querySelector('#todo-close'), cancel: document.querySelector('#todo-cancel'), states: document.querySelector('#todo-states'), markdown: document.querySelector('#todo-markdown'), useLlm: document.querySelector('#todo-use-llm'), llmFields: document.querySelector('#todo-llm-fields'), prompt: document.querySelector('#todo-prompt'), model: document.querySelector('#todo-model'), apply: document.querySelector('#todo-apply') };
+let activeTodo = null;
+function smallModel(models) { return models.find(model => /(?:mini|small|haiku|flash)/i.test(model.label || model.id))?.id || models[0]?.id || ''; }
+function closeTodo() { todoUi.popover.hidden = true; activeTodo = null; }
+function openTodo(button) {
+  if (!displayedDocument?.text || !button.dataset.taskStartLine) return;
+  const startLine = Number(button.dataset.taskStartLine), endLine = Number(button.dataset.taskEndLine); const lines = displayedDocument.text.replace(/\r/g, '').split('\n');
+  const original = lines.slice(startLine - 1, endLine).join('\n'); if (!original) return;
+  activeTodo = { path: button.dataset.taskSourcePath, startLine, endLine, original, state: (original.match(/^\s*[-*+]\s+\[([ xX!~\-])\]/)?.[1] || ' ').toLowerCase() };
+  todoUi.markdown.value = original; todoUi.prompt.value = ''; todoUi.useLlm.checked = true; todoUi.llmFields.hidden = false;
+  setOptions(todoUi.model, chatModels.length ? chatModels : [{ id: '', label: 'No configured model' }], smallModel(chatModels)); todoUi.model.disabled = !chatModels.length;
+  for (const state of todoUi.states.querySelectorAll('[data-todo-state]')) { const current = state.dataset.todoState === activeTodo.state; state.hidden = current; state.setAttribute('aria-pressed', String(current)); }
+  const rect = button.getBoundingClientRect(); todoUi.popover.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - 368))}px`; todoUi.popover.style.top = `${Math.min(rect.bottom + 8, innerHeight - 80)}px`; todoUi.popover.hidden = false;
+  requestAnimationFrame(() => { todoUi.popover.style.top = `${Math.max(8, Math.min(rect.bottom + 8, innerHeight - todoUi.popover.offsetHeight - 8))}px`; todoUi.markdown.focus(); });
+}
+function todoMarkdown(state) {
+  const source = todoUi.markdown.value.replace(/\r/g, '').trimEnd(); const marker = state === ' ' ? '[ ]' : `[${state}]`;
+  return /^\s*[-*+]\s+\[[ xX!~\-]\]\s*/.test(source) ? source.replace(/^(\s*[-*+]\s+)\[[ xX!~\-]\]\s*/, `$1${marker} `) : `* ${marker} ${source}`;
+}
+async function applyTodo() {
+  if (!activeTodo) return; const replacement = todoMarkdown(activeTodo.state); todoUi.apply.disabled = true;
+  try {
+    const response = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/todos`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...activeTodo, replacement }) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not update task');
+    const sideEffectCheck = todoUi.useLlm.checked;
+    const prompt = `I updated the task in ${activeTodo.path} (lines ${activeTodo.startLine}-${activeTodo.endLine}) to:\n\n${replacement}\n\nBriefly check this project for related side effects. Update only any task, status, or log items that genuinely need to stay consistent, then summarize what you found.${todoUi.prompt.value.trim() ? `\n\nAdditional instruction: ${todoUi.prompt.value.trim()}` : ''}`;
+    closeTodo(); await loadPage(); refreshGitStatus();
+    if (sideEffectCheck) await streamChatTurn(prompt, { model: todoUi.model.value });
+  } catch (error) { alert(error.message || 'Could not update task'); }
+  finally { todoUi.apply.disabled = false; }
+}
+documentPane.addEventListener('click', event => { const marker = event.target.closest('.task-marker'); if (!marker) return; event.preventDefault(); openTodo(marker); });
+todoUi.states.addEventListener('click', event => { const button = event.target.closest('[data-todo-state]'); if (!button || !activeTodo) return; activeTodo.state = button.dataset.todoState; for (const state of todoUi.states.querySelectorAll('[data-todo-state]')) { const current = state === button; state.hidden = current; state.setAttribute('aria-pressed', String(current)); } });
+todoUi.useLlm.addEventListener('change', () => { todoUi.llmFields.hidden = !todoUi.useLlm.checked; });
+todoUi.close.addEventListener('click', closeTodo); todoUi.cancel.addEventListener('click', closeTodo);
+todoUi.form.addEventListener('submit', event => { event.preventDefault(); void applyTodo(); });
+document.addEventListener('pointerdown', event => { if (!todoUi.popover.hidden && !todoUi.popover.contains(event.target) && !event.target.closest('.task-marker')) closeTodo(); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !todoUi.popover.hidden) closeTodo(); });
 const chatStorageKey = 'ok-workbench.chat-pane.v1';
 const chatProjectPreferencesKey = 'ok-workbench.chat-project-preferences.v1';
 const defaultChatSettings = { collapsed: false, rightSize: 420, diffLayout: 'side-by-side', diffPalette: 'green', titleProvider: '', titleModel: '', titleEffort: '' };
@@ -517,13 +555,13 @@ async function cancelChatTurn() {
   }
   abort?.abort();
 }
-async function streamChatTurn(message) {
+async function streamChatTurn(message, { model = chatUi.model.value } = {}) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread();
   chatAbort = new AbortController(); chatTurnId = null; chatTurnUnread = false; chatUi.send.disabled = true; chatUi.stop.hidden = false; setChatStatus('Thinking…');
   const assistantBody = addChatMessage('assistant', ''); let assistantText = ''; let projectCreated = false;
   try {
-    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(chatThreadId)}/turns`, { method: 'POST', signal: chatAbort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(chatThreadId)}/turns`, { method: 'POST', signal: chatAbort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
     if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');

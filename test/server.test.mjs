@@ -15,12 +15,17 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(html, /id="chat-copilot-login"/);
   assert.match(html, /id="chat-auth-code"/);
   assert.match(html, /id="chat-auth-dialog-code"/);
+  assert.match(html, /id="todo-popover"/);
   assert.match(script, /showAuthenticationCode\(provider, label, data\.user_code\)/);
   assert.match(script, /chatUi\.authDialog\.showModal\(\)/);
   assert.match(script, /Loading workspace…/);
   assert.match(script, /Loading chat history…/);
   assert.match(script, /while \(i < lines\.length && lines\[i\]\.trim\(\) && !blockBoundary\(lines\[i\]\)\)/);
   assert.match(script, /'~': \{ name: 'In progress'/);
+  assert.match(script, /data-task-start-line/);
+  assert.match(html, /Check side effects with LLM/);
+  assert.match(html, /id="todo-use-llm" type="checkbox" checked/);
+  assert.match(script, /Briefly check this project for related side effects/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);
   assert.match(server, /openai-codex\|github-copilot/);
 });
@@ -32,7 +37,7 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
   git('init'); git('config', 'user.email', 'test@example.invalid'); git('config', 'user.name', 'Test');
   await mkdir(workspace); await mkdir(sibling); await mkdir(path.join(workspace, 'linked-project')); await mkdir(path.join(workspace, 'unlisted-project')); await mkdir(path.join(workspace, 'bare-project'));
   const outside = path.join(tmpdir(), `ok-workbench-outside-${process.pid}.md`);
-  await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n\n- [Linked project](linked-project/index.md)\n');
+  await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n\n- [Linked project](linked-project/index.md)\n* [ ] Direct task\n');
   await writeFile(path.join(workspace, 'linked-project', 'index.md'), '# Linked project\n');
   await writeFile(path.join(workspace, 'linked-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'linked-project', 'log.md'), '# Log\n');
   await writeFile(path.join(workspace, 'unlisted-project', 'index.md'), '# Unlisted project\n');
@@ -62,5 +67,7 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     const page = await fetch(`http://127.0.0.1:${port}/workspace/`); const csrf = (await page.text()).match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
     const revert = await fetch(`http://127.0.0.1:${port}/api/projects/workspace/git/revert`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ token: diffBody.token }) });
     assert.equal(revert.status, 200); assert.equal(await readFile(path.join(workspace, 'tracked.md'), 'utf8'), 'before\n'); assert.equal(await readFile(path.join(sibling, 'tracked.md'), 'utf8'), 'sibling edit\n');
+    const todo = await fetch(`http://127.0.0.1:${port}/api/projects/workspace/todos`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: '/workspace/index.md', startLine: 4, endLine: 4, original: '* [ ] Direct task', replacement: '* [x] Direct task' }) });
+    assert.equal(todo.status, 200); assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /\* \[x\] Direct task/);
   } finally { child.kill(); }
 });
