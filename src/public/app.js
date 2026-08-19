@@ -19,7 +19,7 @@ function inline(value, sourcePath) {
     codeParts.push(`<code>${code}</code>`); return `\u0000${codeParts.length - 1}\u0000`;
   });
   result = result.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => `<img alt="${label}" src="${linkHref(href, sourcePath, true)}">`);
-  result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => `<a href="${linkHref(href, sourcePath)}">${label}</a>`);
+  result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => `<a href="${linkHref(href, sourcePath)}"${externalLinkAttributes(href)}>${label}</a>`);
   result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
   result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>').replace(/(?<!_)_([^_]+)_(?!_)/g, '<em>$1</em>');
   return result.replace(/\u0000(\d+)\u0000/g, (_, index) => codeParts[index]);
@@ -33,6 +33,10 @@ function linkHref(href, sourcePath, asset = false) {
   const resolved = `/${output.filter(Boolean).map(encodeURIComponent).join('/')}`.replace(/^\/workspace\/workspace/, '/workspace');
   const target = asset ? `/asset${resolved}` : resolved;
   return `${target}${hash ? `#${encodeURIComponent(hash)}` : ''}`;
+}
+
+function externalLinkAttributes(href) {
+  return /^(?:https?:)\/\//i.test(href) ? ' target="_blank" rel="noopener noreferrer"' : '';
 }
 
 const KEYWORDS = {
