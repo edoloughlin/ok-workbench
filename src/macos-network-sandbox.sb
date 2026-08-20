@@ -1,0 +1,66 @@
+; OK Workbench's Seatbelt policy for a manifest-authorized network tool.
+; This profile is used only for a separate per-tool worker when network:true.
+(version 1)
+(deny default)
+
+(allow process-exec
+  (literal (param "NODE_BINARY"))
+  (literal "/usr/bin/python3"))
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow process-info-pidinfo)
+(allow process-info-setcontrol)
+
+; A network-enabled tool may make outbound connections. Host-level egress
+; filtering is not yet available, so this grant is deliberately separate from
+; the default no-network worker profile.
+(allow network-outbound)
+
+(allow mach-lookup
+  (global-name "com.apple.logd")
+  (global-name "com.apple.diagnosticd")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.system.logger"))
+
+(allow file-read*
+  (literal "/")
+  (subpath "/System")
+  (subpath "/usr/lib")
+  (subpath "/private/var/db/dyld")
+  (literal "/dev/null")
+  (literal "/dev/urandom")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/autofs_nowait")
+  (literal "/Library/Preferences/Logging/com.apple.diagnosticd.filter.plist")
+  (literal "/etc/resolv.conf")
+  (literal "/etc/hosts")
+  (literal "/etc/nsswitch.conf")
+  (subpath "/etc/ssl/certs")
+  (subpath (param "NODE_RUNTIME")))
+(allow file-write-data
+  (literal "/dev/null")
+  (literal "/dev/dtracehelper"))
+(allow file-ioctl (literal "/dev/dtracehelper"))
+(allow file-read-metadata
+  (literal "/")
+  (literal "/etc")
+  (literal "/var")
+  (literal "/Users")
+  (subpath "/Users")
+  (literal "/private")
+  (literal "/private/var")
+  (literal "/private/var/folders")
+  (literal "/private/var/db/timezone/zoneinfo")
+  (literal "/private/etc/localtime"))
+(allow sysctl-read)
+(allow ipc-posix-shm-read-data (ipc-posix-name "apple.shm.notification_center"))
+
+; The tool can change only its selected workspace and an owner-only scratch
+; directory. The project template remains read-only.
+(allow file-read* file-write*
+  (subpath (param "WORKSPACE"))
+  (subpath (param "PRIVATE_TMP")))
+(allow file-read* (subpath (param "TEMPLATE")))

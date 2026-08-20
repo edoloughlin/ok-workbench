@@ -75,7 +75,7 @@ When tools are discovered, malformed, conflicting, or orphaned metadata is retur
 }
 ```
 
-`environment` lists variables that must already be set in the environment used to start `ok-workbench`; only that tool receives those named values. `network` defaults to `false`. Setting it to `true` permits that tool outbound network access on Linux. This is deliberately a per-tool grant, but it currently permits general outbound access rather than a host allowlist. Network-enabled workspace tools are not yet available on macOS. Keep credentials in the launching environment, not in the workspace or manifest.
+`environment` lists variables that must already be set in the environment used to start `ok-workbench`; only that tool receives those named values. `network` defaults to `false`. Setting it to `true` permits that tool outbound network access on Linux and macOS. This is deliberately a per-tool grant, but it currently permits general outbound access rather than a host allowlist. Keep credentials in the launching environment, not in the workspace or manifest.
 
 The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_BROWSER_STATE_DIR`, old CSRF headers, `/agents/`, and `AGENTS_BUNDLE_ROOT` are one-release compatibility paths. Use `ok-workbench migrate-state --yes` only after reviewing the paths: it copies legacy state only if the destination does not exist and never deletes old data. Browser `localStorage` preferences may need to be set again when the route, origin, or port changes.
 

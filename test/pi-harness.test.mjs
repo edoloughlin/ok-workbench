@@ -41,6 +41,11 @@ test('sandbox backend selection and Seatbelt arguments are platform-specific', a
     '-D', 'NODE_RUNTIME=/opt/homebrew/Cellar/node/22.19.0', '-f', path.join(root, 'dist', 'macos-sandbox.sb'),
   ]);
   assert.deepEqual(args.slice(-4), ['/opt/homebrew/Cellar/node/22.19.0/bin/node', '--input-type=commonjs', '--eval', 'startWorker();']);
+  const networkArgs = macosSandboxArgs({
+    workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template',
+    temporaryDirectory: '/private/tmp/ok-workbench-worker-123', nodeBinary: '/opt/homebrew/Cellar/node/22.19.0/bin/node', workerSource: 'startWorker();', network: true,
+  });
+  assert.ok(networkArgs.includes(path.join(root, 'dist', 'macos-network-sandbox.sb')));
   assert.deepEqual(sandboxChildEnvironment({
     platform: 'darwin', workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template', temporaryDirectory: '/private/tmp/ok-workbench-worker-123',
   }), {

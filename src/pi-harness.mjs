@@ -18,6 +18,7 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(APP_DIR, 'tool-worker.js');
 const PROJECT_TEMPLATE = path.resolve(APP_DIR, '..', 'seed', 'workspace', 'templates', 'project');
 const MACOS_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-sandbox.sb');
+const MACOS_NETWORK_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-network-sandbox.sb');
 const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
 const WORKER_READY_TIMEOUT = 5_000;
 
@@ -55,12 +56,12 @@ function nodeRuntimeRoot(nodeBinary) {
   return nodeBinary.startsWith('/usr/bin/') ? path.dirname(nodeBinary) : path.dirname(path.dirname(nodeBinary));
 }
 
-export function macosSandboxArgs({ workspace, template, temporaryDirectory, nodeBinary, workerSource }) {
+export function macosSandboxArgs({ workspace, template, temporaryDirectory, nodeBinary, workerSource, network = false }) {
   const runtime = nodeRuntimeRoot(nodeBinary);
   return [
     '-D', `WORKSPACE=${workspace}`, '-D', `TEMPLATE=${template}`,
     '-D', `PRIVATE_TMP=${temporaryDirectory}`, '-D', `NODE_BINARY=${nodeBinary}`,
-    '-D', `NODE_RUNTIME=${runtime}`, '-f', MACOS_SANDBOX_PROFILE,
+    '-D', `NODE_RUNTIME=${runtime}`, '-f', network ? MACOS_NETWORK_SANDBOX_PROFILE : MACOS_SANDBOX_PROFILE,
     nodeBinary, '--input-type=commonjs', '--eval', workerSource,
   ];
 }
@@ -143,7 +144,6 @@ export class TurnWorker {
 export async function createTurnWorker(projectRoot, { platform = process.platform, network = false, toolEnvironment = {} } = {}) {
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
-  if (network && backend === 'seatbelt') throw new Error('Network-enabled workspace tools are not yet supported on macOS');
   let configuration;
   try { configuration = await workerConfiguration(projectRoot, platform); }
   catch (error) { throw new Error(`Sandbox worker setup failed: ${error.message}`); }
@@ -157,7 +157,7 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
     if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
     for (const [name, value] of Object.entries(toolEnvironment)) args.push('--setenv', name, value);
     args.push(configuration.nodeBinary, '--input-type=commonjs', '--eval', configuration.workerSource);
-  } else args = macosSandboxArgs(configuration);
+  } else args = macosSandboxArgs({ ...configuration, network });
   const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform, toolEnvironment }) });
   const turnWorker = new TurnWorker(child, {
     cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory),

@@ -10,7 +10,7 @@ The local HTTP server binds loopback only. Its chat mutation endpoints require a
 
 - Workspace paths are lexically contained and resolved through `realpath`; served files and worker operations reject symlink escapes.
 - The worker rejects Git metadata, dotenv-style files, common private-key names, binary reads, traversal, and symbolic-link writes.
-- Mutating model tools require Bubblewrap on Linux or Seatbelt through `sandbox-exec` on macOS. The worker has no network, a cleared environment, a private temporary directory, access only to the selected workspace, and read-only access to the packaged project template.
+- Mutating model tools require Bubblewrap on Linux or Seatbelt through `sandbox-exec` on macOS. The default worker has no network, a cleared environment, a private temporary directory, access only to the selected workspace, and read-only access to the packaged project template. A manifest-authorized workspace tool runs in a separate sandbox and may receive only its named environment variables; `network: true` grants that individual tool outbound network access.
 - Git status, diff, revert, and unstage operations use a project pathspec inside the selected worktree.
 - State directories are outside the bundle and are created with owner-only permissions for chat records.
 
