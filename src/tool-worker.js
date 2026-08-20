@@ -5,12 +5,20 @@
 // shell execution here: future command execution needs a separate approval and
 // resource-control policy.
 const fs = require('node:fs/promises');
+const { spawn } = require('node:child_process');
+const { constants } = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 
 let ROOT = path.resolve(process.env.OK_WORKSPACE_ROOT || process.env.OKF_WORKSPACE_ROOT || '/workspace');
 const MAX_READ = 256 * 1024;
 const MAX_RESULTS = 200;
+const MAX_TOOL_OUTPUT = 64 * 1024;
+const MAX_TOOL_ARGUMENTS = 32;
+const MAX_TOOL_ARGUMENT_LENGTH = 4 * 1024;
+const TOOL_TIMEOUT = 30_000;
+const MAX_TOOL_MANIFEST = 16 * 1024;
+const MAX_TOOL_ENVIRONMENT = 16;
 const DENIED = new Set(['.git', 'id_rsa', 'id_ed25519', 'known_hosts', 'credentials']);
 
 function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
@@ -61,8 +69,111 @@ async function searchFiles(query) {
   }
   return matches;
 }
+function toolRuntime(shebang) {
+  const command = shebang.trim().replace(/^#!\s*/, '');
+  if (/^(?:\/usr\/bin\/env\s+)?python3(?:\s|$)/.test(command)) return 'python3';
+  if (/^(?:\/usr\/bin\/env\s+)?(?:node|nodejs)(?:\s|$)/.test(command)) return 'nodejs';
+  return null;
+}
+function toolPath(relative) {
+  const parts = safeRelative(relative).split('/');
+  const allowed = (parts.length === 2 && parts[0] === 'tools') || (parts.length === 3 && parts[1] === 'tools');
+  if (!allowed || !parts.at(-1) || parts.at(-1).startsWith('.')) throw new Error('Tools must be direct files in tools/ or <project>/tools/');
+  return parts.join('/');
+}
+async function workspaceTool(relative) {
+  const safe = toolPath(relative); const { target } = await targetFor(safe);
+  const info = await fs.lstat(target);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error('Tool is not a regular file');
+  if (!(info.mode & (constants.S_IXUSR | constants.S_IXGRP | constants.S_IXOTH))) throw new Error('Tool is not executable');
+  if (info.size > MAX_READ) throw new Error('Tool is too large');
+  const firstLine = (await fs.readFile(target, 'utf8')).split(/\r?\n/, 1)[0]; const runtime = toolRuntime(firstLine);
+  if (!runtime) throw new Error('Tool must begin with a Python 3 or Node.js shebang');
+  return { path: safe, target, runtime };
+}
+function isToolFile(relative) {
+  const parts = safeRelative(relative).split('/');
+  return (parts.length === 2 && parts[0] === 'tools') || (parts.length === 3 && parts[1] === 'tools');
+}
+function toolEnvironmentNames(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MAX_TOOL_ENVIRONMENT || value.some(name => typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) throw new Error('Tool manifest environment must be an array of up to 16 variable names');
+  return [...new Set(value)];
+}
+async function workspaceToolPolicy(relative) {
+  const tool = await workspaceTool(relative); const extension = path.posix.extname(tool.path);
+  const manifestPaths = [...new Set([`${extension ? tool.path.slice(0, -extension.length) : tool.path}.tool.json`, `${tool.path}.tool.json`])];
+  const manifests = [];
+  for (const manifestPath of manifestPaths) {
+    const { target } = await targetFor(manifestPath); const info = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (info) manifests.push({ manifestPath, target, info });
+  }
+  if (manifests.length > 1) throw new Error('Tool has conflicting manifest files');
+  const [{ target, info } = {}] = manifests;
+  if (!info) return { path: tool.path, runtime: tool.runtime, manifestPath: null, manifest: null, environment: [], network: false };
+  if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_TOOL_MANIFEST) throw new Error('Tool manifest must be a regular JSON file under 16 KiB');
+  let manifest;
+  try { manifest = JSON.parse(await fs.readFile(target, 'utf8')); } catch { throw new Error('Tool manifest is not valid JSON'); }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).some(key => key !== 'environment' && key !== 'network')) throw new Error('Tool manifest may contain only environment and network');
+  if (manifest.network !== undefined && typeof manifest.network !== 'boolean') throw new Error('Tool manifest network must be true or false');
+  return { path: tool.path, runtime: tool.runtime, manifestPath: manifests[0].manifestPath, manifest, environment: toolEnvironmentNames(manifest.environment), network: manifest.network === true };
+}
+async function listWorkspaceTools() {
+  const directories = ['tools'];
+  for (const entry of await fs.readdir(ROOT, { withFileTypes: true })) if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'tools') directories.push(path.posix.join(entry.name, 'tools'));
+  const tools = []; const diagnostics = [];
+  for (const directory of directories) {
+    const target = path.join(ROOT, directory);
+    const entries = await fs.readdir(target, { withFileTypes: true }).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
+    const metadata = entries.filter(entry => entry.isFile() && entry.name.endsWith('.tool.json'));
+    const usedMetadata = new Set();
+    for (const entry of entries) {
+      if (!entry.isFile() || entry.name.startsWith('.') || entry.name.endsWith('.tool.json')) continue;
+      const relative = path.posix.join(directory, entry.name);
+      try {
+        const tool = await workspaceToolPolicy(relative); tools.push(tool); if (tool.manifestPath) usedMetadata.add(path.posix.basename(tool.manifestPath));
+      } catch (error) {
+        try { await workspaceTool(relative); diagnostics.push({ path: relative, error: error.message }); } catch { /* Non-tools do not need a diagnostic. */ }
+      }
+    }
+    for (const entry of metadata) if (!usedMetadata.has(entry.name)) {
+      const base = entry.name.slice(0, -'.tool.json'.length);
+      const candidates = entries.filter(candidate => candidate.isFile() && !candidate.name.endsWith('.tool.json') && (candidate.name === base || candidate.name.startsWith(`${base}.`)));
+      if (candidates.length === 1) {
+        const scriptPath = path.posix.join(directory, candidates[0].name);
+        try { await workspaceTool(scriptPath); diagnostics.push({ path: path.posix.join(directory, entry.name), error: 'Tool metadata was not selected; check for a conflicting manifest' }); }
+        catch (error) { diagnostics.push({ path: path.posix.join(directory, entry.name), error: `Matching script ${candidates[0].name} is not runnable: ${error.message}` }); }
+      } else diagnostics.push({ path: path.posix.join(directory, entry.name), error: candidates.length ? 'Tool metadata matches multiple scripts in this directory' : 'Tool metadata does not match a script in this directory' });
+    }
+  }
+  return { tools: tools.slice(0, MAX_RESULTS), diagnostics: diagnostics.slice(0, MAX_RESULTS) };
+}
+function toolArguments(argumentsList) {
+  if (argumentsList === undefined) return [];
+  if (!Array.isArray(argumentsList) || argumentsList.length > MAX_TOOL_ARGUMENTS || argumentsList.some(value => typeof value !== 'string' || value.length > MAX_TOOL_ARGUMENT_LENGTH || value.includes('\0'))) throw new Error('Tool arguments must be 0–32 short strings');
+  return argumentsList;
+}
+async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
+  const tool = await workspaceTool(relative); const args = toolArguments(argumentsList);
+  const command = tool.runtime === 'python3' ? 'python3' : process.execPath;
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, [tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = ''; let stderr = ''; let timedOut = false;
+    const capture = (current, chunk) => `${current}${chunk}`.slice(0, MAX_TOOL_OUTPUT);
+    child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout = capture(stdout, chunk); });
+    child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = capture(stderr, chunk); });
+    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, TOOL_TIMEOUT);
+    child.once('error', error => { clearTimeout(timeout); reject(new Error(`Tool could not start: ${error.message}`)); });
+    child.once('close', (code, signal) => {
+      clearTimeout(timeout);
+      if (timedOut) return reject(new Error(`Tool timed out after ${TOOL_TIMEOUT / 1000} seconds`));
+      resolve({ path: tool.path, runtime: tool.runtime, arguments: args, exitCode: code, signal: signal || null, stdout, stderr, ok: code === 0 && !signal });
+    });
+  });
+}
 async function applyPatch({ path: relative, content }) {
   if (typeof content !== 'string' || content.length > 1024 * 1024) throw new Error('Replacement content is required and must be under 1 MiB');
+  if (isToolFile(relative) || safeRelative(relative).endsWith('.tool.json')) throw new Error('Workspace tools and their manifests are managed outside agent file updates');
   const { safe, target } = await targetFor(relative, true); await fs.mkdir(path.dirname(target), { recursive: true });
   let existing = null;
   try { existing = await fs.lstat(target); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -129,7 +240,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), apply_project_update: applyProjectUpdate, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // The launcher waits for this acknowledgement before exposing file tools.
   // A spawn event alone does not prove that the OS sandbox accepted the worker.
@@ -150,6 +261,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, applyPatch, applyProjectUpdate, createProject, startWorker };
+module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();

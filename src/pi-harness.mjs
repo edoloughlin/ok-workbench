@@ -33,7 +33,7 @@ export function sandboxBackend(platform = process.platform) {
   return null;
 }
 
-export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, platform }) {
+export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, platform, toolEnvironment = {} }) {
   const sandboxRoot = platform === 'linux' ? '/workspace' : workspace;
   const sandboxTemplate = platform === 'linux' ? '/ok-workbench-template' : template;
   const temporary = platform === 'linux' ? '/tmp' : temporaryDirectory;
@@ -45,7 +45,7 @@ export function sandboxChildEnvironment({ workspace, template, temporaryDirector
   // Avoid CoreFoundation falling back to ~/.CFUserTextEncoding. The worker has
   // no reason to read a user-home file just to determine a text encoding.
   if (platform === 'darwin') environment.__CF_USER_TEXT_ENCODING = `0x${process.getuid().toString(16)}:0:0`;
-  return environment;
+  return { ...environment, ...toolEnvironment };
 }
 
 function nodeRuntimeRoot(nodeBinary) {
@@ -140,9 +140,10 @@ export class TurnWorker {
   close() { this.closedByCaller = true; this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
 
-export async function createTurnWorker(projectRoot, { platform = process.platform } = {}) {
+export async function createTurnWorker(projectRoot, { platform = process.platform, network = false, toolEnvironment = {} } = {}) {
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
+  if (network && backend === 'seatbelt') throw new Error('Network-enabled workspace tools are not yet supported on macOS');
   let configuration;
   try { configuration = await workerConfiguration(projectRoot, platform); }
   catch (error) { throw new Error(`Sandbox worker setup failed: ${error.message}`); }
@@ -150,12 +151,14 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
   if (backend === 'bubblewrap') {
     // The worker source is evaluated so the sandbox never mounts the package
     // installation or seed bundle. Its only user-data mount is /workspace.
-    args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
+    args = ['--unshare-all', ...(network ? ['--share-net'] : []), '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...(network ? ['--dir', '/etc', '--dir', '/etc/ssl'] : []), '--chdir', '/workspace'];
     for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
+    if (network) for (const [source, destination] of [['/etc/resolv.conf', '/etc/resolv.conf'], ['/etc/hosts', '/etc/hosts'], ['/etc/nsswitch.conf', '/etc/nsswitch.conf'], ['/etc/ssl/certs', '/etc/ssl/certs']]) if (await exists(source)) args.push('--ro-bind', source, destination);
     if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
+    for (const [name, value] of Object.entries(toolEnvironment)) args.push('--setenv', name, value);
     args.push(configuration.nodeBinary, '--input-type=commonjs', '--eval', configuration.workerSource);
   } else args = macosSandboxArgs(configuration);
-  const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform }) });
+  const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform, toolEnvironment }) });
   const turnWorker = new TurnWorker(child, {
     cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory),
     onUnexpectedExit: details => console.error('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
@@ -266,7 +269,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const model = modelRuntime.getModel(provider, modelId); if (!model) throw new Error(`Pi does not recognise ${provider}/${modelId}`);
   const loader = new DefaultResourceLoader({
     cwd: projectRoot, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPromptOverride: () => systemPrompt || `You are an ok-workbench workspace assistant. You can access only the served workspace through the supplied tools. Use create_project to create a discoverable top-level project; it returns the canonical project ID and location, which you must report accurately. Use apply_project_update for substantive project edits: it requires the affected project's index.md, log.md, and status.md in the same update, plus an index.md for every new directory. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md). Never claim access or a completed change you do not have. Make concise, reviewable edits only when asked.${workspaceInstructions}`
+    systemPromptOverride: () => systemPrompt || `You are an ok-workbench workspace assistant. You can access only the served workspace through the supplied tools. Use list_workspace_tools before running a workspace tool. Only executable Python 3 or Node.js scripts directly in tools/ or <project>/tools/ are available; pass each argument as a separate string, never as a shell command. Use create_project to create a discoverable top-level project; it returns the canonical project ID and location, which you must report accurately. Use apply_project_update for substantive project edits: it requires the affected project's index.md, log.md, and status.md in the same update, plus an index.md for every new directory. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md). Never claim access or a completed change you do not have. Make concise, reviewable edits only when asked.${workspaceInstructions}`
   });
   await loader.reload();
   const call = async (name, params) => {
@@ -274,6 +277,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     await onTool?.({ phase: 'started', name });
     try {
       const result = await worker.call(name, params);
+      if (name === 'list_workspace_tools' && result.diagnostics?.length) console.error('[ok-workbench] workspace tool metadata diagnostics', { diagnostics: result.diagnostics });
       await onTool?.({ phase: 'completed', name, changed: name === 'apply_project_update' || name === 'create_project', result });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) {
@@ -281,10 +285,31 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
       throw error;
     }
   };
+  const runWorkspaceTool = async params => {
+    if (!worker) throw new Error('A supported sandbox is required before workspace tools can run');
+    const name = 'run_workspace_tool'; await onTool?.({ phase: 'started', name });
+    let runner;
+    try {
+      const policy = await worker.call('workspace_tool_policy', params);
+      const missing = policy.environment.filter(variable => typeof env[variable] !== 'string');
+      if (missing.length) throw new Error(`Tool requires unset environment variable${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`);
+      const toolEnvironment = Object.fromEntries(policy.environment.map(variable => [variable, env[variable]]));
+      runner = await createTurnWorker(workspaceRoot, { network: policy.network, toolEnvironment });
+      if (!runner) throw new Error('A supported sandbox is required before workspace tools can run');
+      const result = await runner.call(name, params);
+      if (result.stderr) console.error('[ok-workbench] workspace tool stderr', { path: result.path, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr, manifestPath: policy.manifestPath, manifest: policy.manifest, providedEnvironment: Object.keys(toolEnvironment) });
+      await onTool?.({ phase: 'completed', name, result });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+    } catch (error) {
+      await onTool?.({ phase: 'failed', name, error: error.message }); throw error;
+    } finally { runner?.close(); }
+  };
   const tools = noWorkspaceTools ? [] : [
     defineTool({ name: 'list_files', label: 'List files', description: 'List files in the served workspace.', parameters: Type.Object({ path: Type.Optional(Type.String()) }), execute: (_id, params) => call('list_files', params) }),
     defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file in the served workspace.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('read_file', params) }),
     defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the served workspace.', parameters: Type.Object({ query: Type.String() }), execute: (_id, params) => call('search_files', params) }),
+    defineTool({ name: 'list_workspace_tools', label: 'List workspace tools', description: 'List executable Python 3 and Node.js scripts directly inside tools/ and each top-level project’s tools/ directory, including their declared environment-variable names and network policy.', parameters: Type.Object({}), execute: (_id, params) => call('list_workspace_tools', params) }),
+    defineTool({ name: 'run_workspace_tool', label: 'Run workspace tool', description: 'Run a discovered workspace tool without a shell. Provide its exact path and each argument as a separate string. Its colocated manifest controls which server environment variables it receives and whether it may use network access. The tool runs from the workspace root with a 30-second limit.', parameters: Type.Object({ path: Type.String(), arguments: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }), execute: (_id, params) => runWorkspaceTool(params) }),
     defineTool({ name: 'apply_project_update', label: 'Apply OKF project update', description: 'Apply a reviewable batch of project files. Project updates must include the project root index.md, log.md, and status.md; each new nested directory must include its index.md.', parameters: Type.Object({ changes: Type.Array(Type.Object({ path: Type.String(), content: Type.String() }), { minItems: 1, maxItems: 64 }) }), execute: (_id, params) => call('apply_project_update', params) }),
     defineTool({ name: 'create_project', label: 'Create workspace project', description: 'Create and register a discoverable top-level project from the OKF project template. Use this instead of manually creating a project directory.', parameters: Type.Object({ id: Type.String(), title: Type.Optional(Type.String()) }), execute: async (_id, params) => {
       let git;

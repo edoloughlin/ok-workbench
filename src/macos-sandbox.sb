@@ -5,7 +5,9 @@
 (deny default)
 
 ; sandbox-exec applies this profile before it execs the Node worker.
-(allow process-exec (literal (param "NODE_BINARY")))
+(allow process-exec
+  (literal (param "NODE_BINARY"))
+  (literal "/usr/bin/python3"))
 (allow process-fork)
 (allow signal (target same-sandbox))
 ; Node queries process metadata during startup. This does not grant process
