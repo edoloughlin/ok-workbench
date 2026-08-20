@@ -538,12 +538,12 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   if (provider === 'anthropic') {
     endpoint = 'https://api.anthropic.com/v1/messages';
     headers = { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given.', messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).', messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
   } else {
     endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `${process.env.LLM_COMPATIBLE_BASE_URL.replace(/\/$/, '')}/chat/completions`;
     const apiKey = provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.LLM_COMPATIBLE_API_KEY;
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given.' }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).' }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) throw new Error(`Provider request failed (${response.status})`);

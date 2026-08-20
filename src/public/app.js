@@ -30,7 +30,8 @@ function linkHref(href, sourcePath, asset = false) {
   const [raw, hash] = href.split('#');
   const source = sourcePath.split('/').slice(0, -1);
   const output = raw.startsWith('/') ? raw.split('/') : [...source, ...raw.split('/')].reduce((parts, part) => part === '..' ? (parts.pop(), parts) : part !== '.' && part ? (parts.push(part), parts) : parts, []);
-  const resolved = `/${output.filter(Boolean).map(encodeURIComponent).join('/')}`.replace(/^\/workspace\/workspace/, '/workspace');
+  const encodePathPart = part => { try { return encodeURIComponent(decodeURIComponent(part)); } catch { return encodeURIComponent(part); } };
+  const resolved = `/${output.filter(Boolean).map(encodePathPart).join('/')}`.replace(/^\/workspace\/workspace/, '/workspace');
   const target = asset ? `/asset${resolved}` : resolved;
   return `${target}${hash ? `#${encodeURIComponent(hash)}` : ''}`;
 }
@@ -450,12 +451,16 @@ function showAuthenticationCode(provider, label, code) {
   chatUi.authDialogCode.textContent = code;
   if (!chatUi.authDialog.open) chatUi.authDialog.showModal();
 }
-function renderAssistantMarkdown(element, content) {
+function renderChatMarkdown(element, content, sourcePath) {
   // renderMarkdown escapes source text before creating markup; chat replies do
   // not accept raw HTML from a model.
   element.classList.add('chat-markdown');
-  const sourcePath = !chatProjectId || chatProjectId === 'workspace' ? '/workspace/index.md' : `/workspace/${encodeURIComponent(chatProjectId)}/index.md`;
   element.innerHTML = renderMarkdown(content, sourcePath);
+}
+function renderAssistantMarkdown(element, content) { renderChatMarkdown(element, content, '/workspace/index.md'); }
+function renderUserMarkdown(element, content) {
+  const sourcePath = !chatProjectId || chatProjectId === 'workspace' ? '/workspace/index.md' : `/workspace/${encodeURIComponent(chatProjectId)}/index.md`;
+  renderChatMarkdown(element, content, sourcePath);
 }
 function scrollChatToLatest({ force = false } = {}) {
   if (!force && !chatFollowsActivity) return;
@@ -478,13 +483,14 @@ function renderChatMessages(messages = [], threadSettings = {}) {
   for (const message of messages) {
     const node = document.createElement('article'); node.className = `chat-message ${message.role === 'user' ? 'user' : message.error ? 'error' : 'assistant'}`;
     const content = document.createElement('div');
-    if (message.role === 'assistant' && !message.error) renderAssistantMarkdown(content, message.content || '');
+    if (!message.error && message.role === 'assistant') renderAssistantMarkdown(content, message.content || '');
+    else if (!message.error && message.role === 'user') renderUserMarkdown(content, message.content || '');
     else content.textContent = message.content || '';
     node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort }), content); chatUi.messages.append(node);
   }
   scrollChatToLatest({ force: true });
 }
-function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; const body = document.createElement('div'); if (role === 'assistant' && !error) renderAssistantMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
+function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; const body = document.createElement('div'); if (!error && role === 'assistant') renderAssistantMarkdown(body, content); else if (!error && role === 'user') renderUserMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
 
 async function loadChatStatus() {
   try {
