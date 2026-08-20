@@ -715,7 +715,7 @@ const server = http.createServer(async (req, res) => {
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
         const title = titlePromise ? await titlePromise : ''; if (title) thread.title = title;
-        thread.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, createdAt: new Date().toISOString() }); await saveThread(thread); writeEvent('message.completed'); writeEvent('turn.completed');
+        thread.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(thread); writeEvent('message.completed'); writeEvent('turn.completed');
       } catch (error) { writeEvent('turn.failed', { error: abort.signal.aborted || error.name === 'AbortError' ? 'Turn cancelled' : error.message }); }
       finally { ACTIVE_TURNS.delete(turnId); }
       return res.end();

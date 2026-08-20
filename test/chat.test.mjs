@@ -32,6 +32,6 @@ test('chat coordinator streams and persists a compatible-provider turn without r
     assert.equal(created.status, 201); const thread = await created.json();
     const turn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hello', provider: 'compatible', model: 'fake-model' }) });
     assert.equal(turn.status, 200); const events = (await turn.text()).trim().split('\n').map(line => JSON.parse(line)); assert.ok(events.some(event => event.type === 'message.delta' && event.delta === 'Fake reply')); assert.ok(events.some(event => event.type === 'turn.completed'));
-    const saved = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`); const savedThread = await saved.json(); assert.equal(savedThread.messages.at(-1).content, 'Fake reply');
+    const saved = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`); const savedThread = await saved.json(); assert.equal(savedThread.messages.at(-1).content, 'Fake reply'); assert.equal(savedThread.messages.at(-1).model, 'fake-model'); assert.equal(savedThread.messages.at(-1).effort, '');
   } finally { child.kill(); await new Promise(resolve => provider.close(resolve)); }
 });

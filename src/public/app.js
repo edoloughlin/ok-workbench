@@ -466,13 +466,13 @@ function scrollChatToLatest({ force = false } = {}) {
     if (force || chatFollowsActivity) chatUi.messages.scrollTop = chatUi.messages.scrollHeight;
   });
 }
-function messageHeader(role, error, createdAt) {
+function messageHeader(role, error, createdAt, { model = '', effort = '' } = {}) {
   const header = document.createElement('header'); header.className = 'chat-message-header';
-  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? 'You' : error ? 'Error' : 'Agent';
+  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? 'You' : error ? 'Error' : `${model || 'Model unavailable'} · ${effort || 'Default effort'}`;
   const timestamp = document.createElement('time'); timestamp.className = 'message-time'; timestamp.dateTime = createdAt || ''; timestamp.textContent = formatThreadTime(createdAt);
   header.append(meta, timestamp); return header;
 }
-function renderChatMessages(messages = []) {
+function renderChatMessages(messages = [], threadSettings = {}) {
   chatUi.messages.replaceChildren();
   if (!messages.length) { const empty = document.createElement('p'); empty.className = 'chat-empty'; empty.textContent = 'Start a project-scoped conversation. Files are available only when the agent requests them.'; chatUi.messages.append(empty); return; }
   for (const message of messages) {
@@ -480,11 +480,11 @@ function renderChatMessages(messages = []) {
     const content = document.createElement('div');
     if (message.role === 'assistant' && !message.error) renderAssistantMarkdown(content, message.content || '');
     else content.textContent = message.content || '';
-    node.append(messageHeader(message.role, message.error, message.createdAt), content); chatUi.messages.append(node);
+    node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort }), content); chatUi.messages.append(node);
   }
   scrollChatToLatest({ force: true });
 }
-function addChatMessage(role, content, error = false, createdAt = new Date().toISOString()) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; const body = document.createElement('div'); if (role === 'assistant' && !error) renderAssistantMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
+function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; const body = document.createElement('div'); if (role === 'assistant' && !error) renderAssistantMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
 
 async function loadChatStatus() {
   try {
@@ -534,7 +534,7 @@ function renderThreadSelect() { setOptions(chatUi.thread, chatThreads.map(thread
 async function loadChatThread(threadId) {
   if (!threadId) { renderChatMessages([]); return; }
   const response = await chatApi(`/api/chat/threads/${encodeURIComponent(threadId)}`); if (!response.ok) throw new Error('Could not load chat thread');
-  const data = await response.json(); chatThreadId = data.id; renderChatMessages(data.messages || []);
+  const data = await response.json(); chatThreadId = data.id; renderChatMessages(data.messages || [], data);
 }
 async function createChatThread() {
   const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
@@ -570,7 +570,7 @@ async function streamChatTurn(message, { model = chatUi.model.value } = {}) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread();
   chatAbort = new AbortController(); chatTurnId = null; chatTurnUnread = false; chatUi.send.disabled = true; chatUi.stop.hidden = false; setChatStatus('Thinking…');
-  const assistantBody = addChatMessage('assistant', ''); let assistantText = ''; let projectCreated = false;
+  const assistantBody = addChatMessage('assistant', '', false, new Date().toISOString(), { model, effort: chatUi.effort.value }); let assistantText = ''; let projectCreated = false;
   try {
     const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(chatThreadId)}/turns`, { method: 'POST', signal: chatAbort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
