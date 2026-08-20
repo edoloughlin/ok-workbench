@@ -439,13 +439,16 @@ async function loadThread(id) {
 }
 async function saveThread(thread) { thread.updatedAt = new Date().toISOString(); await writeAtomic(threadFile(thread.id), thread); }
 async function listThreads(project) {
+  const startedAt = Date.now();
   try {
     const files = await fs.readdir(CHAT_STATE_DIR); const result = [];
     for (const file of files) if (file.endsWith('.json')) {
       try { const thread = JSON.parse(await fs.readFile(path.join(CHAT_STATE_DIR, file), 'utf8')); if (thread.project === project) result.push(thread); } catch { /* skip corrupt local record */ }
     }
-    return result.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map(({ messages, ...summary }) => summary);
-  } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    const threads = result.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map(({ messages, ...summary }) => summary);
+    console.log(`[ok-workbench] chat: loaded ${threads.length} thread${threads.length === 1 ? '' : 's'} for ${project} from ${files.filter(file => file.endsWith('.json')).length} saved thread file${files.filter(file => file.endsWith('.json')).length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
+    return threads;
+  } catch (error) { if (error.code === 'ENOENT') { console.log(`[ok-workbench] chat: no saved thread directory for ${project} (${Date.now() - startedAt}ms)`); return []; } throw error; }
 }
 
 async function providerCatalog() {
@@ -457,7 +460,9 @@ async function providerCatalog() {
   return configured;
 }
 async function chatStatus(provider) {
+  const startedAt = Date.now();
   const providers = await providerCatalog(); const selected = providers.find(item => item.id === provider) || providers[0];
+  console.log(`[ok-workbench] chat: discovered ${providers.length} provider${providers.length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
   return {
     enabled: providers.some(item => item.models.length > 0),
     message: providers.length ? 'Choose an authenticated provider and model.' : 'Sign in with Pi or set a supported provider API key in this server process.',
@@ -611,8 +616,9 @@ async function ensureWorkspaceGit(root) {
   return { initialized, repository: stdout.trim() };
 }
 async function gitStatus(project) {
-  const git = await gitProject(project); const { stdout } = await run('git', ['status', '--porcelain=v1', '--untracked-files=all', '--', git.pathspec], { cwd: git.repo });
+  const startedAt = Date.now(); const git = await gitProject(project); const { stdout } = await run('git', ['status', '--porcelain=v1', '--untracked-files=all', '--', git.pathspec], { cwd: git.repo });
   const files = stdout.split('\n').filter(Boolean).map(line => ({ index: line.slice(0, 1), worktree: line.slice(1, 2), path: line.slice(3) }));
+  console.log(`[ok-workbench] chat: checked Git status for ${project} (${files.length} changed file${files.length === 1 ? '' : 's'}) in ${Date.now() - startedAt}ms`);
   return { changedFiles: files.length, files };
 }
 async function gitDiff(project, source) {
@@ -627,7 +633,8 @@ async function gitDiff(project, source) {
   let { stdout: patch } = await run('git', args, { cwd: git.repo }); const status = await gitStatus(project);
   if (source !== 'staged' && source !== 'commits') for (const file of status.files.filter(file => file.index === '?' && file.worktree === '?')) {
     const candidate = path.resolve(git.repo, file.path); if (!candidate.startsWith(`${git.root}${path.sep}`)) continue;
-    const untracked = await run('git', ['diff', '--no-index', '--no-ext-diff', '--no-color', '/dev/null', candidate], { cwd: git.repo, allowExitCodes: [1] }); patch += `${patch ? '\n' : ''}${untracked.stdout}`;
+    const relative = path.relative(git.repo, candidate); if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+    const untracked = await run('git', ['diff', '--no-index', '--no-ext-diff', '--no-color', '/dev/null', relative], { cwd: git.repo, allowExitCodes: [1] }); patch += `${patch ? '\n' : ''}${untracked.stdout}`;
   }
   const token = patch && source !== 'commits' ? crypto.randomBytes(24).toString('base64url') : null;
   if (token) { DIFF_TOKENS.set(token, { project, source, patch, state: JSON.stringify(status), expiresAt: Date.now() + 5 * 60_000 }); setTimeout(() => DIFF_TOKENS.delete(token), 5 * 60_000).unref(); }

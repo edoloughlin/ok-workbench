@@ -32,6 +32,10 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(server, /event\.userCode \|\| event\.user_code/);
   assert.match(server, /openai-codex\|github-copilot/);
   assert.match(server, /workspace-relative Markdown paths/);
+  assert.match(server, /chat: discovered/);
+  assert.match(server, /chat: loaded/);
+  assert.match(server, /chat: checked Git status/);
+  assert.match(server, /path\.relative\(git\.repo, candidate\)/);
 });
 test('server serves an arbitrary bundle, redirects legacy routes, and rejects escaping symlinks', { skip: !process.env.OK_WORKBENCH_INTEGRATION }, async () => {
   const repository = await mkdtemp(path.join(tmpdir(), 'ok-workbench-server-'));
