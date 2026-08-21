@@ -21,8 +21,11 @@ const MACOS_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-sandbox.sb');
 const MACOS_NETWORK_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-network-sandbox.sb');
 const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
 const WORKER_READY_TIMEOUT = 5_000;
+const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
+  || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
 
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
+function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 
 async function exists(file, mode = constants.F_OK) { try { await access(file, mode); return true; } catch { return false; } }
 async function bwrapPath() {
@@ -144,6 +147,7 @@ export class TurnWorker {
 }
 
 export async function createTurnWorker(projectRoot, { platform = process.platform, network = false, toolEnvironment = {} } = {}) {
+  const spawnStartedAt = TURN_DIAGNOSTICS ? Date.now() : 0;
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
   let configuration;
@@ -168,7 +172,7 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
     cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory),
     onUnexpectedExit: details => logError('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
   });
-  try { await waitForSpawn(child); await turnWorker.waitForReady(); return turnWorker; }
+  try { await waitForSpawn(child); await turnWorker.waitForReady(); if (TURN_DIAGNOSTICS) log('[ok-workbench] worker-ready', { backend, network, spawnToReadyMs: Date.now() - spawnStartedAt }); return turnWorker; }
   catch (error) { turnWorker.close(); turnWorker.removeTemporaryDirectory(); throw error; }
 }
 
@@ -263,7 +267,7 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onTool, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const worker = noWorkspaceTools ? null : await createTurnWorker(workspaceRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
   const workspaceInstructions = systemPrompt ? '' : await workspaceAgentInstructions(workspaceRoot, projectRoot);
@@ -327,7 +331,18 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     } })
   ];
   const { session } = await createAgentSession({ cwd: projectRoot, agentDir, model, modelRuntime, settingsManager, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectRoot), thinkingLevel: effort || undefined, noTools: 'builtin', tools: tools.map(tool => tool.name), customTools: tools });
-  const unsubscribe = session.subscribe(event => { if (event.type === 'message_update' && event.assistantMessageEvent.type === 'text_delta') onDelta(event.assistantMessageEvent.delta); });
+  let lastStatus;
+  const reportStatus = state => { if (state !== lastStatus) { lastStatus = state; onStatus?.({ state }); } };
+  const unsubscribe = session.subscribe(event => {
+    const assistantType = event.assistantMessageEvent?.type;
+    if (TURN_DIAGNOSTICS) log('[ok-workbench] pi-session-event', { type: event.type, assistantMessageEventType: assistantType });
+    if (event.type === 'message_update' && assistantType === 'text_delta') { reportStatus('responding'); onDelta(event.assistantMessageEvent.delta); return; }
+    // These event names are part of Pi's assistant stream vocabulary. Their
+    // payloads are intentionally ignored: status proves liveness without ever
+    // exposing reasoning content.
+    if (event.type === 'message_update' && ['thinking_start', 'thinking_delta', 'reasoning_delta'].includes(assistantType)) { reportStatus('thinking'); return; }
+    if (['auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(event.type)) reportStatus('retrying');
+  });
   const abort = () => session.abort().catch(() => {}); signal?.addEventListener('abort', abort, { once: true });
   try { await session.prompt(historyPrompt(messages)); } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
 }

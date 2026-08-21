@@ -468,6 +468,7 @@ let creatingChatThread = null;
 // A turn belongs to the project and thread that started it. Turns may continue
 // independently while the user visits another project or conversation.
 const activeChatTurns = new Set();
+const recentTurns = new Map();
 const turnNotifications = [];
 let pendingChatThread = null;
 let titleModels = [];
@@ -548,19 +549,29 @@ function renderTurnNotifications() {
   chatUi.notificationsList.replaceChildren();
   if (!turnNotifications.length) { const empty = document.createElement('p'); empty.className = 'turn-notifications-empty'; empty.textContent = 'No completed turns yet.'; chatUi.notificationsList.append(empty); return; }
   for (const notification of turnNotifications) {
+    const item = document.createElement('div'); item.className = 'turn-notification-item';
     const button = document.createElement('button'); button.type = 'button'; button.className = 'turn-notification'; button.dataset.turnNotification = notification.id;
-    const title = document.createElement('strong'); title.textContent = notification.projectTitle;
-    const detail = document.createElement('span'); detail.textContent = 'Chat turn complete · Open project';
-    button.append(title, detail); chatUi.notificationsList.append(button);
+    const title = document.createElement('strong'); title.textContent = notification.promptPreview || notification.projectTitle;
+    const detail = document.createElement('span'); detail.textContent = `${notification.projectTitle} · Completed ${formatThreadTime(notification.completedAt)}`;
+    const dismiss = document.createElement('button'); dismiss.type = 'button'; dismiss.className = 'turn-notification-dismiss'; dismiss.dataset.dismissTurnNotification = notification.id; dismiss.textContent = 'Dismiss';
+    button.append(title, detail); item.append(button, dismiss); chatUi.notificationsList.append(item);
   }
 }
 function closeTurnNotifications() { chatUi.notificationsMenu.hidden = true; chatUi.notificationsButton.setAttribute('aria-expanded', 'false'); }
 function toggleTurnNotifications() { const open = chatUi.notificationsMenu.hidden; chatUi.notificationsMenu.hidden = !open; chatUi.notificationsButton.setAttribute('aria-expanded', String(open)); if (open) renderTurnNotifications(); }
-function addTurnNotification(turn) { turnNotifications.unshift({ id: crypto.randomUUID(), projectId: turn.projectId, projectTitle: turn.projectTitle, threadId: turn.threadId }); renderTurnNotifications(); }
+function addTurnNotification(turn) { turnNotifications.unshift({ id: crypto.randomUUID(), clientTurnId: turn.clientId, turnId: turn.id, projectId: turn.projectId, projectTitle: turn.projectTitle, threadId: turn.threadId, promptPreview: turn.promptPreview, status: turn.status, completedAt: turn.completedAt }); renderTurnNotifications(); }
+function dismissTurnNotification(id) { const index = turnNotifications.findIndex(item => item.id === id); if (index >= 0) turnNotifications.splice(index, 1); renderTurnNotifications(); }
+function focusTurnNotification(notification) {
+  const result = chatUi.messages.querySelector(`[data-turn-id="${notification.turnId}"]`) || chatUi.messages.querySelector(`[data-client-turn-id="${notification.clientTurnId}"]`);
+  if (!result) { setChatStatus('That completed turn is no longer available in this thread.'); return false; }
+  result.scrollIntoView({ block: 'center' }); result.classList.add('chat-turn-highlight'); setTimeout(() => result.classList.remove('chat-turn-highlight'), 1_500); return true;
+}
 async function openTurnNotification(id) {
   const notification = turnNotifications.find(item => item.id === id); if (!notification) return;
-  turnNotifications.splice(turnNotifications.indexOf(notification), 1); renderTurnNotifications(); closeTurnNotifications();
-  if (notification.projectId === chatProjectId) { chatThreadId = notification.threadId; renderThreadSelect(); await loadChatThread(chatThreadId); syncChatTurnControls(); return; }
+  if (notification.projectId === chatProjectId) {
+    chatThreadId = notification.threadId; renderThreadSelect(); await loadChatThread(chatThreadId); syncChatTurnControls();
+    if (focusTurnNotification(notification)) { dismissTurnNotification(id); closeTurnNotifications(); } return;
+  }
   pendingChatThread = notification; const projectPath = notification.projectId === 'workspace' ? '/workspace/' : `/workspace/${encodeURIComponent(notification.projectId)}/`;
   history.pushState({}, '', projectPath); await loadPage();
 }
@@ -672,18 +683,52 @@ function messageHeader(role, error, createdAt, { model = '', effort = '', initia
 }
 function renderChatMessages(messages = [], threadSettings = {}) {
   chatUi.messages.replaceChildren();
-  if (!messages.length) { const empty = document.createElement('p'); empty.className = 'chat-empty'; empty.textContent = 'Start a project-scoped conversation. Files are available only when the agent requests them.'; chatUi.messages.append(empty); return; }
+  if (!messages.length) { const empty = document.createElement('p'); empty.className = 'chat-empty'; empty.textContent = 'Start a project-scoped conversation. Files are available only when the agent requests them.'; chatUi.messages.append(empty); }
   for (const message of messages) {
     const node = document.createElement('article'); node.className = `chat-message ${message.role === 'user' ? 'user' : message.error ? 'error' : 'assistant'}`;
     const content = document.createElement('div');
     if (!message.error && message.role === 'assistant') renderAssistantMarkdown(content, message.content || '');
     else if (!message.error && message.role === 'user') renderUserMarkdown(content, message.content || '');
     else content.textContent = message.content || '';
+    if (message.turnId) node.dataset.turnId = message.turnId;
     node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort, initiator: message.initiator }), content); chatUi.messages.append(node);
   }
+  for (const turn of activeTurnsFor(chatProjectId, chatThreadId)) if (!turn.id || !chatUi.messages.querySelector(`[data-turn-id="${turn.id}"]`)) renderActiveTurn(turn);
   scrollChatToLatest({ force: true });
 }
-function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; const body = document.createElement('div'); if (!error && role === 'assistant') renderAssistantMarkdown(body, content); else if (!error && role === 'user') renderUserMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
+function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; if (settings.turnId) node.dataset.turnId = settings.turnId; if (settings.clientTurnId) node.dataset.clientTurnId = settings.clientTurnId; const body = document.createElement('div'); body.className = 'chat-message-body'; if (!error && role === 'assistant') renderAssistantMarkdown(body, content); else if (!error && role === 'user') renderUserMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
+
+function turnStatusText(turn) {
+  const elapsed = Math.floor((Date.now() - turn.startedAt) / 1000); const quiet = Math.floor((Date.now() - turn.lastEventAt) / 1000);
+  const clock = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+  const state = turn.lastActivityLabel || 'Working';
+  return `${quiet > 20 ? 'Still working — processing previous results' : state} · ${clock(elapsed)} · last activity ${clock(quiet)} ago`;
+}
+function cancelSpecificChatTurn(turn) {
+  if (turn.id) void chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}`, { method: 'DELETE' }).catch(() => {});
+  turn.abort.abort();
+}
+function renderTurnStatusLine(turn, node = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`)) {
+  if (!node) return;
+  let status = node.querySelector('.chat-turn-status');
+  if (!status) { status = document.createElement('p'); status.className = 'chat-turn-status'; node.append(status); }
+  status.replaceChildren(); status.textContent = turn.status === 'failed' ? (turn.error || 'Turn failed') : turn.status === 'cancelled' ? 'Stopped.' : turn.status === 'completed' ? 'Completed.' : turnStatusText(turn);
+  if (turn.status === 'working') { const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'chat-turn-cancel'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', () => cancelSpecificChatTurn(turn)); status.append(' ', cancel); }
+  node.append(status);
+}
+function renderActiveTurn(turn) {
+  if (chatProjectId !== turn.projectId || chatThreadId !== turn.threadId) return;
+  let node = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`);
+  if (!node) {
+    addChatMessage('assistant', '', false, new Date(turn.startedAt).toISOString(), { model: turn.model, effort: turn.effort, clientTurnId: turn.clientId, turnId: turn.id || '' });
+    node = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`);
+  }
+  if (turn.id) node.dataset.turnId = turn.id;
+  const body = node.querySelector('.chat-message-body'); renderAssistantMarkdown(body, turn.assistantText || (turn.status === 'completed' ? 'No response returned.' : ''));
+  node.querySelectorAll('.chat-turn-activity').forEach(item => item.remove());
+  for (const activity of turn.activities) { const item = document.createElement('p'); item.className = 'chat-tool-activity chat-turn-activity'; if (activity.projectLocation) { item.append('Created project: '); const link = document.createElement('a'); link.href = activity.projectLocation; link.textContent = activity.projectTitle || activity.projectLocation; item.append(link); } else item.textContent = activity.label; node.append(item); }
+  renderTurnStatusLine(turn, node); scrollChatToLatest();
+}
 
 async function loadChatStatus() {
   try {
@@ -749,7 +794,7 @@ async function createChatThread({ force = false } = {}) {
 }
 async function loadChatThreads() {
   if (!chatProjectId) return;
-  try { const response = await chatApi(`/api/chat/threads?project=${encodeURIComponent(chatProjectId)}`); if (!response.ok) throw new Error('Could not list chat threads'); const loadedThreads = await response.json(); let emptyConversationSeen = false; chatThreads = loadedThreads.filter(thread => { if (thread.title !== 'New conversation') return true; if (emptyConversationSeen) return false; emptyConversationSeen = true; return true; }); const requested = pendingChatThread?.projectId === chatProjectId ? pendingChatThread.threadId : null; if (requested && chatThreads.some(thread => thread.id === requested)) chatThreadId = requested; else if (!chatThreadId || !chatThreads.some(thread => thread.id === chatThreadId)) chatThreadId = chatThreads[0]?.id || null; if (requested) pendingChatThread = null; if (!chatThreadId) await createChatThread({ force: true }); else { renderThreadSelect(); await loadChatThread(chatThreadId); } } catch (error) { renderChatMessages([{ role: 'assistant', content: error.message, error: true }]); }
+  try { const response = await chatApi(`/api/chat/threads?project=${encodeURIComponent(chatProjectId)}`); if (!response.ok) throw new Error('Could not list chat threads'); const loadedThreads = await response.json(); let emptyConversationSeen = false; chatThreads = loadedThreads.filter(thread => { if (thread.title !== 'New conversation') return true; if (emptyConversationSeen) return false; emptyConversationSeen = true; return true; }); const requestedNotification = pendingChatThread?.projectId === chatProjectId ? pendingChatThread : null; const requested = requestedNotification?.threadId; if (requested && chatThreads.some(thread => thread.id === requested)) chatThreadId = requested; else if (!chatThreadId || !chatThreads.some(thread => thread.id === chatThreadId)) chatThreadId = chatThreads[0]?.id || null; if (requested) pendingChatThread = null; if (!chatThreadId) await createChatThread({ force: true }); else { renderThreadSelect(); await loadChatThread(chatThreadId); if (requestedNotification && focusTurnNotification(requestedNotification)) { dismissTurnNotification(requestedNotification.id); closeTurnNotifications(); } } } catch (error) { renderChatMessages([{ role: 'assistant', content: error.message, error: true }]); }
 }
 async function refreshGitStatus() {
   if (!chatProjectId) return;
@@ -772,18 +817,15 @@ async function chatProjectChanged(project) {
 async function cancelChatTurn() {
   const turn = currentChatTurn();
   if (!turn) return;
-  if (turn.id) {
-    try { await chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}`, { method: 'DELETE' }); } catch { /* Closing the local stream still aborts the turn. */ }
-  }
-  turn.abort.abort();
+  cancelSpecificChatTurn(turn);
 }
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread({ force: true });
-  const turn = { abort: new AbortController(), id: null, projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false };
+  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', activities: [], error: null };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
-  const assistantBody = addChatMessage('assistant', '', false, new Date().toISOString(), { model, effort: chatUi.effort.value }); let assistantText = ''; let projectCreated = false; let completed = false;
+  if (isVisible()) renderActiveTurn(turn); let projectCreated = false; let completed = false;
   try {
     const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
@@ -791,14 +833,23 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');
     if (initiator !== 'system') { chatThreadHasUserChat = true; updateNewThreadAvailability(); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
-    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); if (event.type === 'turn.started') turn.id = event.turn_id || null; else if (event.type === 'message.delta') { assistantText += event.delta || ''; if (isVisible()) { renderAssistantMarkdown(assistantBody, assistantText); scrollChatToLatest(); if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } } } else if (event.type === 'tool.completed') { if (event.tool === 'create_project' && event.result?.location) projectCreated = true; if (!isVisible()) continue; const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; if (event.tool === 'create_project' && event.result?.location) { activity.append('Created project: '); const link = document.createElement('a'); link.href = event.result.location; link.textContent = event.result.title || event.result.id || event.result.location; activity.append(link); } else activity.textContent = `Used ${event.tool || 'workspace tool'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'scope.granted') { if (!isVisible()) continue; const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; activity.textContent = `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'turn.failed') throw new Error(event.error || 'Turn failed'); else if (event.type === 'workspace.changed') { if (event.project === chatProjectId) refreshGitStatus(); reloadChangedDocument(event); } else if (event.type === 'usage.updated' && isVisible()) setChatStatus(event.usage || 'Working…'); } }
+    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') turn.id = event.turn_id || null;
+      else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.lastActivityLabel = 'Writing response'; if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
+      else if (event.type === 'tool.started') { turn.activities.push({ kind: 'tool', label: `Running ${event.tool || 'workspace tool'}…`, at: Date.now(), done: false }); turn.lastActivityLabel = event.tool || 'Running tool'; }
+      else if (event.type === 'tool.completed' || event.type === 'tool.failed') { if (event.tool === 'create_project' && event.result?.location) projectCreated = true; const activity = [...turn.activities].reverse().find(item => !item.done && item.kind === 'tool'); const label = event.type === 'tool.failed' ? `${event.tool || 'workspace tool'} failed` : `Used ${event.tool || 'workspace tool'}`; if (activity) { activity.done = true; activity.label = label; if (event.tool === 'create_project' && event.result?.location) { activity.projectLocation = event.result.location; activity.projectTitle = event.result.title || event.result.id || event.result.location; } } else turn.activities.push({ kind: 'tool', label, at: Date.now(), done: true, ...(event.tool === 'create_project' && event.result?.location ? { projectLocation: event.result.location, projectTitle: event.result.title || event.result.id || event.result.location } : {}) }); turn.lastActivityLabel = event.tool || 'Workspace tool'; }
+      else if (event.type === 'scope.granted') turn.activities.push({ kind: 'scope', label: `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`, at: Date.now(), done: true });
+      else if (event.type === 'turn.status') turn.lastActivityLabel = ({ thinking: 'Model is thinking', retrying: 'Provider busy — retrying', responding: 'Writing response' })[event.state] || 'Working';
+      else if (event.type === 'turn.failed') throw new Error(event.error || 'Turn failed'); else if (event.type === 'workspace.changed') { if (event.project === chatProjectId) refreshGitStatus(); reloadChangedDocument(event); } else if (event.type === 'usage.updated' && isVisible()) setChatStatus(event.usage || 'Working…');
+      if (isVisible()) renderActiveTurn(turn); }
+    }
     completed = true;
-    if (!assistantText && isVisible()) { renderAssistantMarkdown(assistantBody, 'No response returned.'); scrollChatToLatest(); }
+    turn.status = 'completed'; turn.completedAt = Date.now(); if (isVisible()) renderActiveTurn(turn);
     if (isVisible()) { setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads(); }
-  } catch (error) { if (isVisible()) { assistantBody.parentElement.classList.add('error'); assistantBody.parentElement.querySelector('.message-meta').textContent = 'Error'; assistantBody.textContent = error.name === 'AbortError' ? 'Stopped.' : error.message; setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
-  finally { const visible = isVisible(); activeChatTurns.delete(turn); if (completed) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
+  } catch (error) { turn.status = error.name === 'AbortError' ? 'cancelled' : 'failed'; turn.error = error.name === 'AbortError' ? 'Stopped.' : error.message; if (isVisible()) { renderActiveTurn(turn); setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
+  finally { const visible = isVisible(); activeChatTurns.delete(turn); recentTurns.set(turn.clientId, turn); while (recentTurns.size > 20) recentTurns.delete(recentTurns.keys().next().value); if (completed && !visible) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
   return completed;
 }
+setInterval(() => { for (const turn of activeTurnsFor()) renderTurnStatusLine(turn); }, 1_000);
 async function loadDiff() {
   if (!chatProjectId) return; chatUi.diffFiles.textContent = 'Loading…'; chatUi.diffFileTitle.textContent = ''; chatUi.diffContent.textContent = 'Loading file changes…'; chatUi.diffSummary.textContent = '';
   try { const response = await chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/git/diff?source=${encodeURIComponent(diffSource)}`); if (!response.ok) throw new Error((await response.json()).error || 'Could not load diff'); diffData = await response.json(); const selectedPath = diffFiles[selectedDiffFile]?.path; diffFiles = splitDiffFiles(diffData.patch); selectedDiffFile = Math.max(0, diffFiles.findIndex(file => file.path === selectedPath)); const latestCommit = diffSource === 'commits' && diffData.commit?.hash ? ` · ${formatThreadTime(diffData.commit.timestamp)} · ${diffData.commit.hash}` : ''; chatUi.diffSummary.textContent = diffFiles.length ? `${diffFiles.length} changed file${diffFiles.length === 1 ? '' : 's'}${latestCommit}` : (diffData.summary || 'No changes'); renderDiffFiles(); renderDiffPatch(diffFiles[selectedDiffFile]?.patch || ''); chatUi.diffRevert.hidden = diffSource !== 'unstaged' || !diffData.patch; chatUi.diffUnstage.hidden = diffSource !== 'staged' || !diffData.patch; } catch (error) { chatUi.diffFiles.textContent = ''; chatUi.diffFileTitle.textContent = ''; chatUi.diffContent.textContent = error.message; }
@@ -882,7 +933,7 @@ chatUi.input.addEventListener('keydown', event => { if (event.key !== 'Enter' ||
 chatUi.processDirty.addEventListener('click', () => { processDirtyChanges().catch(error => setChatStatus(error.message || 'Could not process project changes')); });
 chatUi.stop.addEventListener('click', () => cancelChatTurn());
 chatUi.notificationsButton.addEventListener('click', toggleTurnNotifications);
-chatUi.notificationsList.addEventListener('click', event => { const button = event.target.closest('[data-turn-notification]'); if (button) openTurnNotification(button.dataset.turnNotification).catch(error => setChatStatus(error.message)); });
+chatUi.notificationsList.addEventListener('click', event => { const dismiss = event.target.closest('[data-dismiss-turn-notification]'); if (dismiss) { dismissTurnNotification(dismiss.dataset.dismissTurnNotification); return; } const button = event.target.closest('[data-turn-notification]'); if (button) openTurnNotification(button.dataset.turnNotification).catch(error => setChatStatus(error.message)); });
 chatUi.changes.addEventListener('click', () => { chatUi.changesDialog.showModal(); loadDiff(); });
 chatUi.diffTabs.addEventListener('click', event => { const tab = event.target.closest('[data-diff-source]'); if (!tab) return; diffSource = tab.dataset.diffSource; for (const button of chatUi.diffTabs.querySelectorAll('button')) button.setAttribute('aria-selected', String(button === tab)); loadDiff(); });
 chatUi.diffFiles.addEventListener('click', event => selectDiffFile(Number(event.target.closest('[data-diff-file]')?.dataset.diffFile)));

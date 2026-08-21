@@ -9,6 +9,8 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 
 const PORT = Number(process.env.PORT || 3477);
+const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
+  || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
 // Resolve the bundle from this project's location so both `node server.js` and
 // `node ok-workbench/server.js` work from a checked-out bundle.
 const LEGACY_BUNDLE_ROOT = process.env.AGENTS_BUNDLE_ROOT;
@@ -645,9 +647,13 @@ async function startProviderLogin(provider) {
 
 function turnWriter(res, threadId, turnId) {
   let sequence = 0;
-  return (type, payload = {}) => res.write(`${JSON.stringify({ type, thread_id: threadId, turn_id: turnId, sequence: ++sequence, ...payload })}\n`);
+  return (type, payload = {}) => {
+    const event = { type, thread_id: threadId, turn_id: turnId, sequence: ++sequence, ...payload };
+    if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-event', { turnId, threadId, type, sequence: event.sequence, deltaLength: payload.delta?.length });
+    return res.write(`${JSON.stringify(event)}\n`);
+  };
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onTool, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -657,7 +663,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onTool, beforeCreateProject, systemPrompt, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -969,12 +975,14 @@ const server = http.createServer(async (req, res) => {
       const turnId = crypto.randomUUID().replace(/-/g, '');
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started');
-      let reply = ''; const abort = new AbortController(); ACTIVE_TURNS.set(turnId, { threadId: thread.id, abort }); req.on('aborted', () => abort.abort());
+      let reply = ''; const startedAt = Date.now(); const abort = new AbortController(); ACTIVE_TURNS.set(turnId, { threadId: thread.id, abort }); req.on('aborted', () => abort.abort());
+      if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
+      let outcome = 'failed';
       try {
         const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: projectRootForId(thread.project), prompt: message }).catch(() => '') : null;
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
@@ -986,9 +994,9 @@ const server = http.createServer(async (req, res) => {
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
         const title = titlePromise ? await titlePromise : '';
-        await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title || current.title === 'New conversation') current.title = title || fallbackThreadTitle(current.messages[0]); current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed');
-      } catch (error) { writeEvent('turn.failed', { error: abort.signal.aborted || error.name === 'AbortError' ? 'Turn cancelled' : error.message }); }
-      finally { ACTIVE_TURNS.delete(turnId); }
+        await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title || current.title === 'New conversation') current.title = title || fallbackThreadTitle(current.messages[0]); current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', turnId, createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed'); outcome = 'completed';
+      } catch (error) { outcome = abort.signal.aborted || error.name === 'AbortError' ? 'cancelled' : 'failed'; writeEvent('turn.failed', { error: outcome === 'cancelled' ? 'Turn cancelled' : error.message }); }
+      finally { ACTIVE_TURNS.delete(turnId); if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
       return res.end();
     }
     const gitStatusMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/status$/);
