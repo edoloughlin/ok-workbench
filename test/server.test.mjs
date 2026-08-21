@@ -7,10 +7,11 @@ import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
 test('chat UI exposes the GitHub Copilot device code outside transient status text', async () => {
-  const [html, script, server] = await Promise.all([
+  const [html, script, server, harness] = await Promise.all([
     readFile(path.join(root, 'src', 'public', 'index.html'), 'utf8'),
     readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8'),
     readFile(path.join(root, 'src', 'server.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'pi-harness.mjs'), 'utf8'),
   ]);
   assert.match(html, /id="chat-copilot-login"/);
   assert.match(html, /id="chat-auth-code"/);
@@ -43,6 +44,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(server, /chat: discovered/);
   assert.match(server, /chat: loaded/);
   assert.match(server, /chat: checked Git status/);
+  assert.match(harness, /workspace tool timed out/);
   assert.match(server, /path\.relative\(git\.repo, candidate\)/);
 });
 test('server serves an arbitrary bundle, redirects legacy routes, and rejects escaping symlinks', { skip: !process.env.OK_WORKBENCH_INTEGRATION }, async () => {

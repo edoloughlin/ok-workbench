@@ -16,7 +16,8 @@ const MAX_RESULTS = 200;
 const MAX_TOOL_OUTPUT = 64 * 1024;
 const MAX_TOOL_ARGUMENTS = 32;
 const MAX_TOOL_ARGUMENT_LENGTH = 4 * 1024;
-const TOOL_TIMEOUT = 30_000;
+const DEFAULT_TOOL_TIMEOUT_SECONDS = 30;
+const MAX_TOOL_TIMEOUT_SECONDS = 600;
 const MAX_TOOL_MANIFEST = 16 * 1024;
 const MAX_TOOL_ENVIRONMENT = 16;
 const DENIED = new Set(['.git', 'id_rsa', 'id_ed25519', 'known_hosts', 'credentials']);
@@ -100,6 +101,11 @@ function toolEnvironmentNames(value) {
   if (!Array.isArray(value) || value.length > MAX_TOOL_ENVIRONMENT || value.some(name => typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) throw new Error('Tool manifest environment must be an array of up to 16 variable names');
   return [...new Set(value)];
 }
+function toolTimeoutSeconds(value) {
+  if (value === undefined) return DEFAULT_TOOL_TIMEOUT_SECONDS;
+  if (!Number.isInteger(value) || value < 1 || value > MAX_TOOL_TIMEOUT_SECONDS) throw new Error(`Tool manifest timeoutSeconds must be an integer from 1 to ${MAX_TOOL_TIMEOUT_SECONDS}`);
+  return value;
+}
 async function workspaceToolPolicy(relative) {
   const tool = await workspaceTool(relative); const extension = path.posix.extname(tool.path);
   const manifestPaths = [...new Set([`${extension ? tool.path.slice(0, -extension.length) : tool.path}.tool.json`, `${tool.path}.tool.json`])];
@@ -110,13 +116,13 @@ async function workspaceToolPolicy(relative) {
   }
   if (manifests.length > 1) throw new Error('Tool has conflicting manifest files');
   const [{ target, info } = {}] = manifests;
-  if (!info) return { path: tool.path, runtime: tool.runtime, manifestPath: null, manifest: null, environment: [], network: false };
+  if (!info) return { path: tool.path, runtime: tool.runtime, manifestPath: null, manifest: null, environment: [], network: false, timeoutSeconds: DEFAULT_TOOL_TIMEOUT_SECONDS };
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_TOOL_MANIFEST) throw new Error('Tool manifest must be a regular JSON file under 16 KiB');
   let manifest;
   try { manifest = JSON.parse(await fs.readFile(target, 'utf8')); } catch { throw new Error('Tool manifest is not valid JSON'); }
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).some(key => key !== 'environment' && key !== 'network')) throw new Error('Tool manifest may contain only environment and network');
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).some(key => key !== 'environment' && key !== 'network' && key !== 'timeoutSeconds')) throw new Error('Tool manifest may contain only environment, network, and timeoutSeconds');
   if (manifest.network !== undefined && typeof manifest.network !== 'boolean') throw new Error('Tool manifest network must be true or false');
-  return { path: tool.path, runtime: tool.runtime, manifestPath: manifests[0].manifestPath, manifest, environment: toolEnvironmentNames(manifest.environment), network: manifest.network === true };
+  return { path: tool.path, runtime: tool.runtime, manifestPath: manifests[0].manifestPath, manifest, environment: toolEnvironmentNames(manifest.environment), network: manifest.network === true, timeoutSeconds: toolTimeoutSeconds(manifest.timeoutSeconds) };
 }
 async function listWorkspaceTools() {
   const directories = ['tools'];
@@ -154,7 +160,7 @@ function toolArguments(argumentsList) {
   return argumentsList;
 }
 async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
-  const tool = await workspaceTool(relative); const args = toolArguments(argumentsList);
+  const tool = await workspaceToolPolicy(relative); const args = toolArguments(argumentsList);
   const command = tool.runtime === 'python3' ? 'python3' : process.execPath;
   return new Promise((resolve, reject) => {
     const child = spawn(command, [tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -162,11 +168,11 @@ async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
     const capture = (current, chunk) => `${current}${chunk}`.slice(0, MAX_TOOL_OUTPUT);
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout = capture(stdout, chunk); });
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = capture(stderr, chunk); });
-    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, TOOL_TIMEOUT);
+    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, tool.timeoutSeconds * 1000);
     child.once('error', error => { clearTimeout(timeout); reject(new Error(`Tool could not start: ${error.message}`)); });
     child.once('close', (code, signal) => {
       clearTimeout(timeout);
-      if (timedOut) return reject(new Error(`Tool timed out after ${TOOL_TIMEOUT / 1000} seconds`));
+      if (timedOut) return reject(new Error(`Tool timed out after ${tool.timeoutSeconds} seconds`));
       resolve({ path: tool.path, runtime: tool.runtime, arguments: args, exitCode: code, signal: signal || null, stdout, stderr, ok: code === 0 && !signal });
     });
   });

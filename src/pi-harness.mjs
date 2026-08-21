@@ -288,9 +288,9 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const runWorkspaceTool = async params => {
     if (!worker) throw new Error('A supported sandbox is required before workspace tools can run');
     const name = 'run_workspace_tool'; await onTool?.({ phase: 'started', name });
-    let runner;
+    let runner; let policy;
     try {
-      const policy = await worker.call('workspace_tool_policy', params);
+      policy = await worker.call('workspace_tool_policy', params);
       const missing = policy.environment.filter(variable => typeof env[variable] !== 'string');
       if (missing.length) throw new Error(`Tool requires unset environment variable${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`);
       const toolEnvironment = Object.fromEntries(policy.environment.map(variable => [variable, env[variable]]));
@@ -301,6 +301,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
       await onTool?.({ phase: 'completed', name, result });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) {
+      if (/^Tool timed out after \d+ seconds$/.test(error.message)) console.error('[ok-workbench] workspace tool timed out', { path: policy?.path || params.path, timeoutSeconds: policy?.timeoutSeconds, manifestPath: policy?.manifestPath, manifest: policy?.manifest });
       await onTool?.({ phase: 'failed', name, error: error.message }); throw error;
     } finally { runner?.close(); }
   };
@@ -308,8 +309,8 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     defineTool({ name: 'list_files', label: 'List files', description: 'List files in the served workspace.', parameters: Type.Object({ path: Type.Optional(Type.String()) }), execute: (_id, params) => call('list_files', params) }),
     defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file in the served workspace.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('read_file', params) }),
     defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the served workspace.', parameters: Type.Object({ query: Type.String() }), execute: (_id, params) => call('search_files', params) }),
-    defineTool({ name: 'list_workspace_tools', label: 'List workspace tools', description: 'List executable Python 3 and Node.js scripts directly inside tools/ and each top-level project’s tools/ directory, including their declared environment-variable names and network policy.', parameters: Type.Object({}), execute: (_id, params) => call('list_workspace_tools', params) }),
-    defineTool({ name: 'run_workspace_tool', label: 'Run workspace tool', description: 'Run a discovered workspace tool without a shell. Provide its exact path and each argument as a separate string. Its colocated manifest controls which server environment variables it receives and whether it may use network access. The tool runs from the workspace root with a 30-second limit.', parameters: Type.Object({ path: Type.String(), arguments: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }), execute: (_id, params) => runWorkspaceTool(params) }),
+    defineTool({ name: 'list_workspace_tools', label: 'List workspace tools', description: 'List executable Python 3 and Node.js scripts directly inside tools/ and each top-level project’s tools/ directory, including their declared environment-variable names, network policy, and timeout.', parameters: Type.Object({}), execute: (_id, params) => call('list_workspace_tools', params) }),
+    defineTool({ name: 'run_workspace_tool', label: 'Run workspace tool', description: 'Run a discovered workspace tool without a shell. Provide its exact path and each argument as a separate string. Its colocated manifest controls which server environment variables it receives, whether it may use network access, and its timeout (30 seconds by default; up to 10 minutes).', parameters: Type.Object({ path: Type.String(), arguments: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }), execute: (_id, params) => runWorkspaceTool(params) }),
     defineTool({ name: 'apply_project_update', label: 'Apply OKF project update', description: 'Apply a reviewable batch of project files. Project updates must include the project root index.md, log.md, and status.md; each new nested directory must include its index.md.', parameters: Type.Object({ changes: Type.Array(Type.Object({ path: Type.String(), content: Type.String() }), { minItems: 1, maxItems: 64 }) }), execute: (_id, params) => call('apply_project_update', params) }),
     defineTool({ name: 'create_project', label: 'Create workspace project', description: 'Create and register a discoverable top-level project from the OKF project template. Use this instead of manually creating a project directory.', parameters: Type.Object({ id: Type.String(), title: Type.Optional(Type.String()) }), execute: async (_id, params) => {
       let git;
