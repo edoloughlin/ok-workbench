@@ -52,6 +52,7 @@ const CHAT_CSRF = crypto.randomBytes(32).toString('base64url');
 const DIFF_TOKENS = new Map();
 const GIT_RECOVERY = new Map();
 const ACTIVE_TURNS = new Map();
+const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
 let ignoreRulesPromise;
 
@@ -421,6 +422,13 @@ async function loadThread(id) {
   try { return JSON.parse(await fs.readFile(threadFile(id), 'utf8')); } catch (error) { if (error.code === 'ENOENT') throw new Error('Chat thread not found'); throw error; }
 }
 async function saveThread(thread) { thread.updatedAt = new Date().toISOString(); await writeAtomic(threadFile(thread.id), thread); }
+async function withThreadWrite(id, work) {
+  const previous = THREAD_WRITES.get(id) || Promise.resolve(); let release;
+  const finished = new Promise(resolve => { release = resolve; }); const tail = previous.then(() => finished);
+  THREAD_WRITES.set(id, tail); await previous;
+  try { return await work(); }
+  finally { release(); if (THREAD_WRITES.get(id) === tail) THREAD_WRITES.delete(id); }
+}
 async function listThreads(project) {
   const startedAt = Date.now();
   try {
@@ -684,8 +692,10 @@ const server = http.createServer(async (req, res) => {
     const turnMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns$/);
     if (turnMatch && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const message = String(body.message || '').trim(); if (!message) throw new Error('A chat message is required'); if (message.length > 50_000) throw new Error('Chat message is too long');
-      const thread = await loadThread(turnMatch[1]); const provider = body.provider || thread.provider; const model = body.model || thread.model; const effort = body.effort || thread.effort;
-      thread.provider = provider; thread.model = model; thread.effort = effort || ''; thread.titleProvider = body.titleProvider || thread.titleProvider || provider; thread.titleModel = body.titleModel || thread.titleModel || model; thread.titleEffort = body.titleEffort || thread.titleEffort || ''; thread.messages.push({ id: crypto.randomUUID(), role: 'user', content: message, createdAt: new Date().toISOString() }); await saveThread(thread);
+      const thread = await withThreadWrite(turnMatch[1], async () => {
+        const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
+        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', content: message, createdAt: new Date().toISOString() }); await saveThread(current); return current;
+      }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
       const turnId = crypto.randomUUID().replace(/-/g, '');
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started');
@@ -705,8 +715,8 @@ const server = http.createServer(async (req, res) => {
           writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
-        const title = titlePromise ? await titlePromise : ''; if (title) thread.title = title;
-        thread.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(thread); writeEvent('message.completed'); writeEvent('turn.completed');
+        const title = titlePromise ? await titlePromise : '';
+        await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title) current.title = title; current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed');
       } catch (error) { writeEvent('turn.failed', { error: abort.signal.aborted || error.name === 'AbortError' ? 'Turn cancelled' : error.message }); }
       finally { ACTIVE_TURNS.delete(turnId); }
       return res.end();

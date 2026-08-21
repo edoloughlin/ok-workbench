@@ -14,6 +14,10 @@
       <div class="project-summary"><span id="project-name">Loading</span><span class="stats" id="stats"></span></div>
       <div class="topbar-actions">
         <button class="chat-toggle" id="chat-toggle" type="button" aria-expanded="true" aria-controls="chat-pane">Chat</button>
+        <div class="turn-notifications">
+          <button id="turn-notifications-button" class="turn-notifications-button" type="button" aria-label="Turn notifications" aria-expanded="false" aria-haspopup="true" aria-controls="turn-notifications-menu" title="Turn notifications"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg><span id="turn-notifications-count" class="turn-notifications-count" hidden></span></button>
+          <div id="turn-notifications-menu" class="turn-notifications-menu" role="menu" aria-label="Completed chat turns" hidden><p class="turn-notifications-title">Turn updates</p><div id="turn-notifications-list" class="turn-notifications-list"></div></div>
+        </div>
         <label class="project-picker">Project <select id="project-select" aria-label="Select project"></select></label>
       </div>
     </header>
