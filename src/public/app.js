@@ -463,6 +463,8 @@ let dirtyProjectItems = {};
 let chatProjectId = null;
 let chatThreadId = null;
 let chatThreads = [];
+let chatThreadHasUserChat = false;
+let creatingChatThread = null;
 // A turn belongs to the project and thread that started it. Turns may continue
 // independently while the user visits another project or conversation.
 const activeChatTurns = new Set();
@@ -727,20 +729,27 @@ function formatThreadTime(value) {
   const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
   return `${date.getDate()} ${month}${date.getFullYear() === new Date().getFullYear() ? '' : ` ${date.getFullYear()}`}, ${time}`;
 }
+function updateNewThreadAvailability() { chatUi.newThread.disabled = !chatThreadHasUserChat || Boolean(creatingChatThread); }
 function renderThreadSelect() { setOptions(chatUi.thread, chatThreads.map(thread => { const title = thread.title || 'New conversation'; return { id: thread.id, label: title === 'New conversation' ? title : `${title} · ${formatThreadTime(thread.updatedAt || thread.createdAt)}` }; }), chatThreadId); }
 async function loadChatThread(threadId) {
-  if (!threadId) { renderChatMessages([]); return; }
+  if (!threadId) { chatThreadHasUserChat = false; updateNewThreadAvailability(); renderChatMessages([]); return; }
   const response = await chatApi(`/api/chat/threads/${encodeURIComponent(threadId)}`); if (!response.ok) throw new Error('Could not load chat thread');
-  const data = await response.json(); chatThreadId = data.id; renderChatMessages(data.messages || [], data); syncChatTurnControls();
+  const data = await response.json(); chatThreadId = data.id; chatThreadHasUserChat = (data.messages || []).some(message => message.role === 'user' && message.initiator !== 'system'); updateNewThreadAvailability(); renderChatMessages(data.messages || [], data); syncChatTurnControls();
 }
-async function createChatThread() {
-  const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
-  if (!response.ok) throw new Error((await response.json()).error || 'Could not create chat thread');
-  const thread = await response.json(); chatThreads.unshift(thread); chatThreadId = thread.id; renderThreadSelect(); renderChatMessages([]); syncChatTurnControls(); return thread;
+async function createChatThread({ force = false } = {}) {
+  if (creatingChatThread) return creatingChatThread;
+  if (!force && chatThreadId && !chatThreadHasUserChat) return chatThreads.find(thread => thread.id === chatThreadId) || null;
+  creatingChatThread = (async () => {
+    const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    if (!response.ok) throw new Error((await response.json()).error || 'Could not create chat thread');
+    const thread = await response.json(); chatThreads.unshift(thread); chatThreadId = thread.id; chatThreadHasUserChat = false; renderThreadSelect(); renderChatMessages([]); updateNewThreadAvailability(); syncChatTurnControls(); return thread;
+  })();
+  updateNewThreadAvailability();
+  try { return await creatingChatThread; } finally { creatingChatThread = null; updateNewThreadAvailability(); }
 }
 async function loadChatThreads() {
   if (!chatProjectId) return;
-  try { const response = await chatApi(`/api/chat/threads?project=${encodeURIComponent(chatProjectId)}`); if (!response.ok) throw new Error('Could not list chat threads'); chatThreads = await response.json(); const requested = pendingChatThread?.projectId === chatProjectId ? pendingChatThread.threadId : null; if (requested && chatThreads.some(thread => thread.id === requested)) chatThreadId = requested; else if (!chatThreadId || !chatThreads.some(thread => thread.id === chatThreadId)) chatThreadId = chatThreads[0]?.id || null; if (requested) pendingChatThread = null; if (!chatThreadId) await createChatThread(); else { renderThreadSelect(); await loadChatThread(chatThreadId); } } catch (error) { renderChatMessages([{ role: 'assistant', content: error.message, error: true }]); }
+  try { const response = await chatApi(`/api/chat/threads?project=${encodeURIComponent(chatProjectId)}`); if (!response.ok) throw new Error('Could not list chat threads'); const loadedThreads = await response.json(); let emptyConversationSeen = false; chatThreads = loadedThreads.filter(thread => { if (thread.title !== 'New conversation') return true; if (emptyConversationSeen) return false; emptyConversationSeen = true; return true; }); const requested = pendingChatThread?.projectId === chatProjectId ? pendingChatThread.threadId : null; if (requested && chatThreads.some(thread => thread.id === requested)) chatThreadId = requested; else if (!chatThreadId || !chatThreads.some(thread => thread.id === chatThreadId)) chatThreadId = chatThreads[0]?.id || null; if (requested) pendingChatThread = null; if (!chatThreadId) await createChatThread({ force: true }); else { renderThreadSelect(); await loadChatThread(chatThreadId); } } catch (error) { renderChatMessages([{ role: 'assistant', content: error.message, error: true }]); }
 }
 async function refreshGitStatus() {
   if (!chatProjectId) return;
@@ -749,7 +758,7 @@ async function refreshGitStatus() {
 }
 async function chatProjectChanged(project) {
   if (!project?.name || project.name === chatProjectId) return;
-  chatProjectId = project.name; chatThreadId = null; chatUi.project.textContent = project.title || project.name; setChatStatus('Loading project chat…');
+  chatProjectId = project.name; chatThreadId = null; chatThreadHasUserChat = false; updateNewThreadAvailability(); chatUi.project.textContent = project.title || project.name; setChatStatus('Loading project chat…');
   renderDirtyProcessPrompt();
   chatUi.messages.replaceChildren(); const loading = document.createElement('p'); loading.className = 'chat-empty loading'; loading.textContent = 'Loading chat history…'; chatUi.messages.append(loading);
   chatUi.input.disabled = true; chatUi.send.disabled = true;
@@ -770,7 +779,7 @@ async function cancelChatTurn() {
 }
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   saveProjectChatPreference();
-  if (!chatThreadId) await createChatThread();
+  if (!chatThreadId) await createChatThread({ force: true });
   const turn = { abort: new AbortController(), id: null, projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
@@ -780,6 +789,7 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     let response = await requestTurn();
     if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');
+    if (initiator !== 'system') { chatThreadHasUserChat = true; updateNewThreadAvailability(); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
     for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); if (event.type === 'turn.started') turn.id = event.turn_id || null; else if (event.type === 'message.delta') { assistantText += event.delta || ''; if (isVisible()) { renderAssistantMarkdown(assistantBody, assistantText); scrollChatToLatest(); if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } } } else if (event.type === 'tool.completed') { if (event.tool === 'create_project' && event.result?.location) projectCreated = true; if (!isVisible()) continue; const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; if (event.tool === 'create_project' && event.result?.location) { activity.append('Created project: '); const link = document.createElement('a'); link.href = event.result.location; link.textContent = event.result.title || event.result.id || event.result.location; activity.append(link); } else activity.textContent = `Used ${event.tool || 'workspace tool'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'scope.granted') { if (!isVisible()) continue; const activity = document.createElement('p'); activity.className = 'chat-tool-activity'; activity.textContent = `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`; chatUi.messages.append(activity); scrollChatToLatest(); } else if (event.type === 'turn.failed') throw new Error(event.error || 'Turn failed'); else if (event.type === 'workspace.changed') { if (event.project === chatProjectId) refreshGitStatus(); reloadChangedDocument(event); } else if (event.type === 'usage.updated' && isVisible()) setChatStatus(event.usage || 'Working…'); } }
     completed = true;

@@ -44,6 +44,8 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /Briefly check this project for related side effects/);
   assert.match(html, /Changes detected, click to process/);
   assert.match(script, /initiator: 'system'/);
+  assert.match(script, /function updateNewThreadAvailability\(\)/);
+  assert.match(script, /if \(!force && chatThreadId && !chatThreadHasUserChat\)/);
   assert.match(script, /Discover and run relevant available project checks/);
   assert.match(script, /If you cannot resolve a reported error/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);

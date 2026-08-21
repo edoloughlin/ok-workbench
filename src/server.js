@@ -693,6 +693,11 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
 function cleanThreadTitle(value) {
   return String(value || '').replace(/^\s*(?:title\s*:\s*)?/i, '').replace(/["'`]/g, '').replace(/\s+/g, ' ').trim().slice(0, 96);
 }
+function fallbackThreadTitle(message) {
+  const firstLine = String(message?.content || '').split(/\r?\n/).map(line => line.trim()).find(Boolean) || 'Project update';
+  const title = cleanThreadTitle(firstLine).replace(/[.!?]+$/, '').trim();
+  return title.length > 72 ? `${title.slice(0, 69).replace(/\s+\S*$/, '')}…` : title;
+}
 async function generateThreadTitle({ provider, model, effort, projectRoot, prompt }) {
   let output = '';
   await providerStream({
@@ -981,7 +986,7 @@ const server = http.createServer(async (req, res) => {
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
         const title = titlePromise ? await titlePromise : '';
-        await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title) current.title = title; current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed');
+        await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title || current.title === 'New conversation') current.title = title || fallbackThreadTitle(current.messages[0]); current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed');
       } catch (error) { writeEvent('turn.failed', { error: abort.signal.aborted || error.name === 'AbortError' ? 'Turn cancelled' : error.message }); }
       finally { ACTIVE_TURNS.delete(turnId); }
       return res.end();
