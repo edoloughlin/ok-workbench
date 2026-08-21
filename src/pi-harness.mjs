@@ -153,7 +153,10 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
     // installation or seed bundle. Its only user-data mount is /workspace.
     args = ['--unshare-all', ...(network ? ['--share-net'] : []), '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', ...(network ? ['--dir', '/etc', '--dir', '/etc/ssl'] : []), '--chdir', '/workspace'];
     for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
-    if (network) for (const [source, destination] of [['/etc/resolv.conf', '/etc/resolv.conf'], ['/etc/hosts', '/etc/hosts'], ['/etc/nsswitch.conf', '/etc/nsswitch.conf'], ['/etc/ssl/certs', '/etc/ssl/certs']]) if (await exists(source)) args.push('--ro-bind', source, destination);
+    // Network clients such as ssh resolve the effective UID before opening a
+    // connection. Preserve only the account databases they need, rather than
+    // mounting /etc wholesale into a network-authorized tool sandbox.
+    if (network) for (const [source, destination] of [['/etc/passwd', '/etc/passwd'], ['/etc/group', '/etc/group'], ['/etc/resolv.conf', '/etc/resolv.conf'], ['/etc/hosts', '/etc/hosts'], ['/etc/nsswitch.conf', '/etc/nsswitch.conf'], ['/etc/ssl/certs', '/etc/ssl/certs']]) if (await exists(source)) args.push('--ro-bind', source, destination);
     if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
     for (const [name, value] of Object.entries(toolEnvironment)) args.push('--setenv', name, value);
     args.push(configuration.nodeBinary, '--input-type=commonjs', '--eval', configuration.workerSource);
