@@ -1,6 +1,8 @@
 # OK Workbench
 
-OK Workbench is a local, LLM-assisted project workspace. It serves a portable `workspace/` bundle of durable project knowledge: OKF-structured indexes, project status, logs, a supplied workflow, templates, and assistant instructions. Browsing works with no provider credentials; chat is optional and remains project-scoped.
+OK Workbench is a local, multi-project knowledge base and wiki where an AI does the filing. Instead of editing notes by hand, you talk to a project-scoped assistant that reads and writes your Markdown documents for you: it keeps each project's status current, maintains a dated log, manages todos, and makes sure related files are updated together so the workspace doesn't drift. It works well as a planning or coaching aid — sit down, ask "where was I?", and the assistant orients itself from the same files you can read — or simply as a wiki you browse in the local web UI with no AI involved at all.
+
+Everything lives in a portable `workspace/` bundle of plain Markdown, structured with OKF (indexes, frontmatter, and standard links) so the assistant can reliably discover what's related to what. Edits arrive as reviewable, Git-backed batches that must keep the project index, log, and status consistent; file-changing tools run in a platform sandbox and fail closed without it. Non-Markdown sources (PDF, DOCX, PPTX, XLSX, ODT/ODP/ODS) can be stored alongside your notes, and the assistant can extract their text — naively, text only — to fold into the knowledge base. Browsing needs no provider credentials; chat is optional and remains project-scoped. See the [overview](docs/OVERVIEW.md) for a longer tour.
 
 ## Status and scope
 
