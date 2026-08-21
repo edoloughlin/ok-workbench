@@ -404,7 +404,7 @@ const chatUi = {
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
   input: document.querySelector('#chat-input'), send: document.querySelector('#chat-send'), stop: document.querySelector('#chat-stop'), authCode: document.querySelector('#chat-auth-code'), authDialog: document.querySelector('#chat-auth-dialog'), authDialogCode: document.querySelector('#chat-auth-dialog-code'),
-  status: document.querySelector('#chat-status'), changes: document.querySelector('#chat-changes'), changeCount: document.querySelector('#chat-change-count'),
+  status: document.querySelector('#chat-status'), processDirty: document.querySelector('#chat-process-dirty'), changes: document.querySelector('#chat-changes'), changeCount: document.querySelector('#chat-change-count'),
   changesDialog: document.querySelector('#changes-dialog'), diffSummary: document.querySelector('#diff-summary'),
   diffFiles: document.querySelector('#diff-files'), diffFileTitle: document.querySelector('#diff-file-title'), diffContent: document.querySelector('#diff-content'), diffTabs: document.querySelector('#diff-source-tabs'),
   diffLayout: document.querySelector('#diff-layout'), diffPalette: document.querySelector('#diff-palette'),
@@ -459,6 +459,7 @@ let chatSettings = { ...defaultChatSettings };
 try { chatSettings = { ...defaultChatSettings, ...JSON.parse(localStorage.getItem(chatStorageKey) || '{}') }; } catch { /* ignore corrupt local preference */ }
 let chatProjectPreferences = {};
 try { chatProjectPreferences = JSON.parse(localStorage.getItem(chatProjectPreferencesKey) || '{}'); } catch { /* ignore corrupt local preference */ }
+let dirtyProjectItems = {};
 let chatProjectId = null;
 let chatThreadId = null;
 let chatThreads = [];
@@ -477,6 +478,8 @@ let diffRecoveryOperation = null;
 let chatModels = [];
 let chatFollowsActivity = true;
 let chatScrollFrame = null;
+let dirtyAuditSequence = 0;
+let processingDirtyChanges = false;
 
 function persistChatSettings() { localStorage.setItem(chatStorageKey, JSON.stringify(chatSettings)); }
 let chatCsrf = document.querySelector('meta[name="ok-workbench-csrf"]')?.content || '';
@@ -498,6 +501,41 @@ async function chatApi(path, options = {}) {
   return response;
 }
 function setChatStatus(message) { chatUi.status.textContent = message; }
+function dirtyItemsFor(project = chatProjectId) { return Array.isArray(dirtyProjectItems[project]) ? dirtyProjectItems[project] : []; }
+function renderDirtyProcessPrompt() {
+  const items = dirtyItemsFor(); chatUi.processDirty.hidden = items.length === 0;
+  chatUi.processDirty.disabled = processingDirtyChanges;
+  if (!items.length) { chatUi.processDirty.removeAttribute('title'); return; }
+  chatUi.processDirty.title = `These items were changed:\n\n${items.map(item => `• ${item.path}`).join('\n')}\n\nClick to have AI assess and update related files.`;
+}
+function setDirtyItems(items) {
+  if (!chatProjectId) return;
+  dirtyProjectItems[chatProjectId] = Array.isArray(items) ? items : [];
+  renderDirtyProcessPrompt();
+}
+async function refreshDirtyStatus() {
+  if (!chatProjectId || chatProjectId === 'workspace') { renderDirtyProcessPrompt(); return; }
+  const request = ++dirtyAuditSequence;
+  try {
+    const response = await chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/dirty`); if (!response.ok) throw new Error(); const state = await response.json();
+    if (request === dirtyAuditSequence) setDirtyItems(state.items || []);
+  } catch { if (request === dirtyAuditSequence) renderDirtyProcessPrompt(); }
+}
+async function processDirtyChanges() {
+  const project = chatProjectId; const items = dirtyItemsFor(project); if (processingDirtyChanges || !project || !items.length) return;
+  processingDirtyChanges = true; renderDirtyProcessPrompt();
+  const message = `Review this accumulated batch of filesystem changes and bring the project state up to date.\n\nChanged items:\n${items.map(item => `- ${item.path}`).join('\n')}\n\nUpdate every related index.md, including affected directory indexes, and update the project status.md and log.md. Inspect the project for impacts on other files. Make only changes that are genuinely needed. Discover and run relevant available project checks (for example /tools/mdcheck when present). If a check reports an actionable error, investigate it, make a careful repair, and rerun the check. If you cannot resolve a reported error, do not claim success: explain clearly what failed, what you tried, and what the user should do next. Summarize the result.`;
+  try {
+    const model = smallModel(chatModels); addChatMessage('user', message, false, new Date().toISOString(), { initiator: 'system' });
+    const completed = await streamChatTurn(message, { model, initiator: 'system' });
+    if (completed) {
+      const response = await chatApi(`/api/projects/${encodeURIComponent(project)}/dirty`, { method: 'POST' });
+      const state = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(state.error || 'Could not mark project changes as processed');
+      dirtyProjectItems[project] = state.items || [];
+    }
+  } finally { processingDirtyChanges = false; renderDirtyProcessPrompt(); await refreshDirtyStatus(); }
+}
 function activeTurnsFor(projectId = chatProjectId, threadId = chatThreadId) { return [...activeChatTurns].filter(turn => turn.projectId === projectId && turn.threadId === threadId); }
 function activeTurnFor(projectId = chatProjectId, threadId = chatThreadId) { return activeTurnsFor(projectId, threadId).at(-1) || null; }
 function currentChatTurn() { return activeTurnFor(); }
@@ -707,10 +745,12 @@ async function loadChatThreads() {
 async function refreshGitStatus() {
   if (!chatProjectId) return;
   try { const response = await chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/git/status`); if (!response.ok) throw new Error(); const status = await response.json(); chatUi.changeCount.textContent = String(status.changedFiles || 0); } catch { chatUi.changeCount.textContent = '–'; }
+  finally { void refreshDirtyStatus(); }
 }
 async function chatProjectChanged(project) {
   if (!project?.name || project.name === chatProjectId) return;
   chatProjectId = project.name; chatThreadId = null; chatUi.project.textContent = project.title || project.name; setChatStatus('Loading project chat…');
+  renderDirtyProcessPrompt();
   chatUi.messages.replaceChildren(); const loading = document.createElement('p'); loading.className = 'chat-empty loading'; loading.textContent = 'Loading chat history…'; chatUi.messages.append(loading);
   chatUi.input.disabled = true; chatUi.send.disabled = true;
   try { await Promise.all([loadChatStatus(), loadChatThreads(), refreshGitStatus()]); }
@@ -746,7 +786,8 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     if (!assistantText && isVisible()) { renderAssistantMarkdown(assistantBody, 'No response returned.'); scrollChatToLatest(); }
     if (isVisible()) { setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads(); }
   } catch (error) { if (isVisible()) { assistantBody.parentElement.classList.add('error'); assistantBody.parentElement.querySelector('.message-meta').textContent = 'Error'; assistantBody.textContent = error.name === 'AbortError' ? 'Stopped.' : error.message; setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
-  finally { const visible = isVisible(); activeChatTurns.delete(turn); if (completed) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) setChatStatus('Ready'); } }
+  finally { const visible = isVisible(); activeChatTurns.delete(turn); if (completed) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
+  return completed;
 }
 async function loadDiff() {
   if (!chatProjectId) return; chatUi.diffFiles.textContent = 'Loading…'; chatUi.diffFileTitle.textContent = ''; chatUi.diffContent.textContent = 'Loading file changes…'; chatUi.diffSummary.textContent = '';
@@ -828,6 +869,7 @@ chatUi.newThread.addEventListener('click', () => createChatThread().catch(error 
 chatUi.thread.addEventListener('change', () => loadChatThread(chatUi.thread.value).catch(error => setChatStatus(error.message)));
 chatUi.composer.addEventListener('submit', event => { event.preventDefault(); const message = chatUi.input.value.trim(); if (!message) return; chatUi.input.value = ''; addChatMessage('user', message); streamChatTurn(message); });
 chatUi.input.addEventListener('keydown', event => { if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return; event.preventDefault(); chatUi.composer.requestSubmit(); });
+chatUi.processDirty.addEventListener('click', () => { processDirtyChanges().catch(error => setChatStatus(error.message || 'Could not process project changes')); });
 chatUi.stop.addEventListener('click', () => cancelChatTurn());
 chatUi.notificationsButton.addEventListener('click', toggleTurnNotifications);
 chatUi.notificationsList.addEventListener('click', event => { const button = event.target.closest('[data-turn-notification]'); if (button) openTurnNotification(button.dataset.turnNotification).catch(error => setChatStatus(error.message)); });
@@ -855,6 +897,7 @@ chatUi.splitter.addEventListener('pointermove', event => {
 chatUi.splitter.addEventListener('pointerup', () => { resizeState = null; });
 chatUi.splitter.addEventListener('keydown', event => { if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return; event.preventDefault(); const delta = event.shiftKey ? 32 : 12; const direction = event.key === 'ArrowLeft' ? delta : -delta; chatSettings.rightSize = clampChatSize(chatSize() + direction); applyChatLayout(); });
 addEventListener('focus', refreshGitStatus);
+setInterval(() => { if (document.visibilityState === 'visible') void refreshDirtyStatus(); }, 20_000);
 addEventListener('resize', applyChatLayout);
 document.documentElement.dataset.diffPalette = chatSettings.diffPalette;
 chatUi.diffLayout.textContent = chatSettings.diffLayout === 'side-by-side' ? 'Side by side' : 'Inline';

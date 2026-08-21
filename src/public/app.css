@@ -351,10 +351,13 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-composer { flex: none; padding: 11px 14px 13px; border-top: 1px solid var(--rule); background: var(--panel); }
 .chat-composer textarea { display: block; resize: vertical; width: 100%; min-height: 58px; max-height: 180px; padding: 8px 10px; border: 1px solid var(--rule-strong); border-radius: 8px; color: var(--ink); background: var(--paper); font: 13px/1.4 var(--font-ui); }
 .chat-composer textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
-.chat-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; }
+.chat-composer-actions { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; gap: 8px; margin-top: 7px; }
 .chat-composer-actions span { overflow: hidden; color: var(--muted); font: 11px var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
-.chat-composer-actions div { display: flex; gap: 5px; }
+.chat-composer-actions div { display: flex; justify-self: end; gap: 5px; }
+.chat-composer-actions #chat-process-dirty[hidden] + div { grid-column: 3; }
 .chat-composer button { padding: 6px 12px; }
+.chat-composer #chat-process-dirty { padding: 0; border: 0; border-radius: 0; color: var(--link); background: transparent; font: 500 11px var(--font-ui); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.chat-composer #chat-process-dirty:hover, .chat-composer #chat-process-dirty:focus-visible { color: var(--accent); outline: 0; }
 .chat-composer #chat-send { border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600; }
 .chat-composer #chat-send:hover { color: #fff; background: color-mix(in srgb, var(--accent) 85%, black); }
 .chat-restore { position: fixed; z-index: 8; top: calc(var(--topbar-h) + 16px); right: 0; padding: 8px 10px 8px 12px; border: 1px solid var(--rule); border-right: 0; border-radius: 8px 0 0 8px; color: var(--ink); background: var(--panel); box-shadow: var(--shadow-pop); font: 500 12px var(--font-ui); cursor: pointer; }

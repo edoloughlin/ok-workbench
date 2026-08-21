@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -17,6 +17,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(html, /id="chat-auth-code"/);
   assert.match(html, /id="chat-auth-dialog-code"/);
   assert.match(html, /id="todo-popover"/);
+  assert.match(html, /id="chat-process-dirty"/);
   assert.match(script, /showAuthenticationCode\(provider, label, data\.user_code\)/);
   assert.match(script, /chatUi\.authDialog\.showModal\(\)/);
   assert.match(script, /Loading workspace…/);
@@ -41,6 +42,10 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(html, /Check side effects with LLM/);
   assert.match(html, /id="todo-use-llm" type="checkbox" checked/);
   assert.match(script, /Briefly check this project for related side effects/);
+  assert.match(html, /Changes detected, click to process/);
+  assert.match(script, /initiator: 'system'/);
+  assert.match(script, /Discover and run relevant available project checks/);
+  assert.match(script, /If you cannot resolve a reported error/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);
   assert.match(server, /openai-codex\|github-copilot/);
   assert.match(server, /workspace-relative Markdown paths/);
@@ -77,6 +82,20 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     const projectBody = await project.json(); assert.ok(projectBody.projects.some(item => item.name === 'linked-project' && item.path === '/workspace/linked-project')); assert.ok(projectBody.projects.some(item => item.name === 'unlisted-project' && item.path === '/workspace/unlisted-project')); assert.ok(projectBody.projects.some(item => item.name === 'bare-project' && item.path === '/workspace/bare-project'));
     const escaped = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/escape.md`);
     assert.equal(escaped.status, 404);
+    const dirtyPage = await fetch(`http://127.0.0.1:${port}/workspace/`); const dirtyCsrf = (await dirtyPage.text()).match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(dirtyCsrf);
+    await writeFile(path.join(workspace, 'linked-project', 'brief.md'), '# Brief\n');
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const dirty = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`); const dirtyBody = await dirty.json(); assert.equal(dirtyBody.dirty, true); assert.ok(dirtyBody.items.some(item => item.path === 'brief.md'));
+    const processed = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`, { method: 'POST', headers: { 'x-ok-workbench-csrf': dirtyCsrf } }); assert.equal(processed.status, 200); assert.equal((await processed.json()).dirty, false);
+    await writeFile(path.join(workspace, 'linked-project', 'follow-up.md'), '# Follow-up\n');
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const accumulated = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`); const accumulatedBody = await accumulated.json(); assert.equal(accumulatedBody.dirty, true); assert.ok(accumulatedBody.items.some(item => item.path === 'follow-up.md'));
+    const processedAgain = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`, { method: 'POST', headers: { 'x-ok-workbench-csrf': dirtyCsrf } }); assert.equal(processedAgain.status, 200); assert.equal((await processedAgain.json()).dirty, false);
+    await writeFile(path.join(workspace, 'linked-project', 'retired.md'), '# Retired\n'); await writeFile(path.join(workspace, 'linked-project', 'index.md'), '# Linked project\n'); await writeFile(path.join(workspace, 'linked-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'linked-project', 'log.md'), '# Log\n');
+    await new Promise(resolve => setTimeout(resolve, 350));
+    const settled = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`, { method: 'POST', headers: { 'x-ok-workbench-csrf': dirtyCsrf } }); assert.equal((await settled.json()).dirty, false);
+    await rm(path.join(workspace, 'linked-project', 'retired.md')); await new Promise(resolve => setTimeout(resolve, 350));
+    const deleted = await fetch(`http://127.0.0.1:${port}/api/projects/linked-project/dirty`); const deletedBody = await deleted.json(); assert.equal(deletedBody.dirty, true); assert.ok(deletedBody.items.some(item => item.kind === 'deleted' && item.path === 'retired.md (deleted)'));
     const legacy = await fetch(`http://127.0.0.1:${port}/agents/`, { redirect: 'manual' });
     assert.equal(legacy.status, 308); assert.equal(legacy.headers.get('location'), '/workspace/');
     await writeFile(path.join(workspace, 'tracked.md'), 'workspace edit\n');

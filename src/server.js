@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const http = require('node:http');
+const fsNative = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -55,7 +56,12 @@ const ENTRY_RENAMES = new Map();
 const ACTIVE_TURNS = new Map();
 const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
+const DIRTY_PROJECT_STATE = new Map();
+const DIRTY_PROJECT_SNAPSHOTS = new Map();
+const DIRTY_WATCHERS = new Map();
 let ignoreRulesPromise;
+let dirtyMonitorTimer = null;
+let dirtyMonitorRun = null;
 
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
@@ -95,6 +101,7 @@ function safePath(routePath) {
 
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
 async function isDirectory(file) { try { return (await fs.stat(file)).isDirectory(); } catch { return false; } }
+async function isFile(file) { try { return (await fs.stat(file)).isFile(); } catch { return false; } }
 async function bundlePath(target) {
   try {
     const [root, resolved] = await Promise.all([fs.realpath(BUNDLE_ROOT), fs.realpath(target)]);
@@ -734,6 +741,134 @@ async function gitStatus(project) {
   log(`[ok-workbench] chat: checked Git status for ${project} (${files.length} changed file${files.length === 1 ? '' : 's'}) in ${Date.now() - startedAt}ms`);
   return { changedFiles: files.length, files };
 }
+async function projectDirtyState(project) {
+  const root = await fs.realpath(projectRootForId(project));
+  const coreNames = ['index.md', 'status.md', 'log.md'];
+  const core = await Promise.all(coreNames.map(async name => ({ name, stat: await fs.stat(path.join(root, name)).catch(() => null) })));
+  const items = new Map();
+  const add = (target, kind = 'file') => {
+    const relative = path.relative(root, target).split(path.sep).join('/') || '.';
+    items.set(`${kind}:${relative}`, { path: kind === 'directory' && relative !== '.' ? `${relative}/` : relative, kind });
+  };
+  const rootStateIsOlder = stat => core.some(item => !item.stat || item.stat.mtimeMs < stat.mtimeMs);
+  async function audit(directory) {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    const nested = directory !== root;
+    let hasDirtyDescendant = false;
+    const directoryIndex = path.join(directory, 'index.md'); const directoryIndexStat = await fs.stat(directoryIndex).catch(() => null);
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__pycache__' || entry.isSymbolicLink()) continue;
+      const target = path.join(directory, entry.name); if (await isIgnored(target)) continue;
+      if (entry.isDirectory()) { hasDirtyDescendant = (await audit(target)) || hasDirtyDescendant; continue; }
+      if (!entry.isFile()) continue;
+      const stat = await fs.stat(target); const isRootCore = directory === root && coreNames.includes(entry.name);
+      if (isRootCore) continue;
+      const directoryStateIsOlder = entry.name === 'index.md' ? false : !directoryIndexStat || directoryIndexStat.mtimeMs < stat.mtimeMs;
+      if (rootStateIsOlder(stat) || directoryStateIsOlder) { add(target); hasDirtyDescendant = true; }
+    }
+    if (nested) {
+      const directoryStat = await fs.stat(directory);
+      const hasIndex = Boolean(directoryIndexStat); const hasContent = entries.some(entry => !entry.name.startsWith('.') && entry.name !== 'index.md' && entry.name !== 'node_modules' && entry.name !== '__pycache__');
+      if ((!hasIndex || rootStateIsOlder(directoryStat)) && (!hasContent || !hasDirtyDescendant)) { add(directory, 'directory'); hasDirtyDescendant = true; }
+    }
+    if (directoryIndexStat) {
+      const indexText = await fs.readFile(directoryIndex, 'utf8').catch(() => '');
+      for (const link of linksFromIndex(indexText, directory)) {
+        const target = safePath(link.path); if (target && !(await exists(target))) { items.set(`missing:${link.path}`, { path: `${path.relative(root, directory).split(path.sep).join('/') || '.'}/index.md → ${link.label}`, kind: 'missing' }); hasDirtyDescendant = true; }
+      }
+    }
+    return hasDirtyDescendant;
+  }
+  await audit(root);
+  return { dirty: items.size > 0, items: [...items.values()] };
+}
+function storedDirtyState(project) {
+  const state = DIRTY_PROJECT_STATE.get(project);
+  return state ? { dirty: state.items.size > 0, items: [...state.items.values()], scannedAt: state.scannedAt } : { dirty: false, items: [], scannedAt: null };
+}
+async function dirtyProjectRoots() {
+  const entries = await fs.readdir(BUNDLE_ROOT, { withFileTypes: true }); const projects = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+    const target = path.join(BUNDLE_ROOT, entry.name); if (await isProjectDirectory(target)) projects.push({ name: entry.name, root: target });
+  }
+  return projects;
+}
+async function dirtyProjectSnapshot(root) {
+  const entries = new Map(); const rootCore = new Set(['index.md', 'status.md', 'log.md']);
+  async function collect(directory) {
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__pycache__' || entry.isSymbolicLink()) continue;
+      const target = path.join(directory, entry.name); if (await isIgnored(target)) continue;
+      const relative = path.relative(root, target).split(path.sep).join('/');
+      if (entry.isDirectory()) { entries.set(`directory:${relative}`, { path: relative, kind: 'directory' }); await collect(target); continue; }
+      if (entry.isFile() && !(directory === root && rootCore.has(entry.name))) entries.set(`file:${relative}`, { path: relative, kind: 'file' });
+    }
+  }
+  await collect(root); return entries;
+}
+async function touchProjectCoreFiles(project) {
+  const root = await fs.realpath(projectRootForId(project)); const now = new Date();
+  async function touchIndexes(directory) {
+    const index = path.join(directory, 'index.md');
+    if (await isFile(index)) await fs.utimes(index, now, now);
+    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__pycache__' || entry.isSymbolicLink()) continue;
+      const target = path.join(directory, entry.name); if (await isIgnored(target)) continue;
+      await touchIndexes(target);
+    }
+  }
+  await touchIndexes(root);
+  for (const name of ['status.md', 'log.md']) {
+    const target = path.join(root, name); if (await isFile(target)) await fs.utimes(target, now, now);
+  }
+}
+async function dirtyWatchDirectories(directory, directories) {
+  directories.add(directory);
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '__pycache__' || entry.isSymbolicLink()) continue;
+    const target = path.join(directory, entry.name); if (await isIgnored(target)) continue;
+    await dirtyWatchDirectories(target, directories);
+  }
+}
+function scheduleDirtyMonitor() {
+  if (dirtyMonitorTimer) clearTimeout(dirtyMonitorTimer);
+  dirtyMonitorTimer = setTimeout(() => { dirtyMonitorTimer = null; void refreshDirtyMonitor(); }, 180);
+}
+function reconcileDirtyWatchers(directories) {
+  for (const [directory, watcher] of DIRTY_WATCHERS) if (!directories.has(directory)) { watcher.close(); DIRTY_WATCHERS.delete(directory); }
+  for (const directory of directories) if (!DIRTY_WATCHERS.has(directory)) {
+    try {
+      const watcher = fsNative.watch(directory, { persistent: false }, () => scheduleDirtyMonitor());
+      watcher.on('error', () => scheduleDirtyMonitor()); DIRTY_WATCHERS.set(directory, watcher);
+    } catch { scheduleDirtyMonitor(); }
+  }
+}
+async function refreshDirtyMonitor() {
+  if (dirtyMonitorRun) return dirtyMonitorRun;
+  dirtyMonitorRun = (async () => {
+    const projects = await dirtyProjectRoots(); const directories = new Set([BUNDLE_ROOT]);
+    for (const project of projects) {
+      const audit = await projectDirtyState(project.name); let state = DIRTY_PROJECT_STATE.get(project.name);
+      if (!state) { state = { items: new Map(), scannedAt: null }; DIRTY_PROJECT_STATE.set(project.name, state); }
+      for (const item of audit.items) state.items.set(`${item.kind}:${item.path}`, item);
+      const snapshot = await dirtyProjectSnapshot(project.root); const previous = DIRTY_PROJECT_SNAPSHOTS.get(project.name);
+      if (previous) for (const [key, item] of previous) if (!snapshot.has(key)) state.items.set(`deleted:${key}`, { path: `${item.path}${item.kind === 'directory' ? '/' : ''} (deleted)`, kind: 'deleted' });
+      DIRTY_PROJECT_SNAPSHOTS.set(project.name, snapshot);
+      state.scannedAt = new Date().toISOString(); await dirtyWatchDirectories(project.root, directories);
+    }
+    const known = new Set(projects.map(project => project.name));
+    for (const project of DIRTY_PROJECT_STATE.keys()) if (!known.has(project)) { DIRTY_PROJECT_STATE.delete(project); DIRTY_PROJECT_SNAPSHOTS.delete(project); }
+    reconcileDirtyWatchers(directories);
+  })();
+  try { await dirtyMonitorRun; } finally { dirtyMonitorRun = null; }
+}
+async function markDirtyProjectProcessed(project) {
+  const state = DIRTY_PROJECT_STATE.get(project) || { items: new Map(), scannedAt: null }; state.items.clear(); DIRTY_PROJECT_STATE.set(project, state);
+  await touchProjectCoreFiles(project);
+  const audit = await projectDirtyState(project); for (const item of audit.items) state.items.set(`${item.kind}:${item.path}`, item); DIRTY_PROJECT_SNAPSHOTS.set(project, await dirtyProjectSnapshot(projectRootForId(project))); state.scannedAt = new Date().toISOString();
+  return storedDirtyState(project);
+}
 async function gitDiff(project, source) {
   if (!['unstaged', 'staged', 'commits'].includes(source)) throw new Error('Invalid diff source');
   const git = await gitProject(project); let args; let commit = null;
@@ -794,6 +929,9 @@ const server = http.createServer(async (req, res) => {
     const entryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries$/);
     if (entryMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
     if (entryMatch && req.method === 'PATCH') { assertChatRequest(req); return json(res, 200, await renameProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
+    const dirtyMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/dirty$/);
+    if (dirtyMatch && req.method === 'GET') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, storedDirtyState(project)); }
+    if (dirtyMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, await markDirtyProjectProcessed(project)); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     const authMatch = url.pathname.match(/^\/api\/chat\/auth\/(openai-codex|github-copilot)\/start$/);
@@ -869,5 +1007,8 @@ const server = http.createServer(async (req, res) => {
 
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
+  await refreshDirtyMonitor();
+  const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
+  dirtyReconciliation.unref();
   server.listen(PORT, '127.0.0.1', () => log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`));
 }).catch(error => { logError(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1; });
