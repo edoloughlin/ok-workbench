@@ -62,12 +62,18 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(harness, /spawnToReadyMs/);
   assert.match(harness, /pi-session-event/);
   assert.match(harness, /onStatus/);
+  assert.match(harness, /onThinking/);
+  assert.match(server, /turn\.thinking/);
   assert.match(script, /const recentTurns = new Map/);
   assert.match(script, /function renderActiveTurn/);
   assert.match(script, /data-client-turn-id/);
   assert.match(script, /Still working — processing previous results/);
   assert.match(script, /data-dismiss-turn-notification/);
   assert.match(script, /turn\.assistantText/);
+  assert.match(script, /turn\.thinkingText = ''/);
+  assert.match(script, /event\.type === 'turn\.thinking'/);
+  assert.match(script, /toggle\.append\(input, ' Show thinking'\)/);
+  assert.match(script, /showThinking: true/);
   assert.match(harness, /workspace tool timed out/);
   assert.match(server, /path\.relative\(git\.repo, candidate\)/);
 });

@@ -454,7 +454,7 @@ document.addEventListener('pointerdown', event => { if (!todoUi.popover.hidden &
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && !todoUi.popover.hidden) closeTodo(); });
 const chatStorageKey = 'ok-workbench.chat-pane.v1';
 const chatProjectPreferencesKey = 'ok-workbench.chat-project-preferences.v1';
-const defaultChatSettings = { collapsed: false, rightSize: 420, diffLayout: 'side-by-side', diffPalette: 'green', titleProvider: '', titleModel: '', titleEffort: '' };
+const defaultChatSettings = { collapsed: false, rightSize: 420, diffLayout: 'side-by-side', diffPalette: 'green', titleProvider: '', titleModel: '', titleEffort: '', showThinking: true };
 let chatSettings = { ...defaultChatSettings };
 try { chatSettings = { ...defaultChatSettings, ...JSON.parse(localStorage.getItem(chatStorageKey) || '{}') }; } catch { /* ignore corrupt local preference */ }
 let chatProjectPreferences = {};
@@ -485,6 +485,8 @@ let dirtyAuditSequence = 0;
 let processingDirtyChanges = false;
 
 function persistChatSettings() { localStorage.setItem(chatStorageKey, JSON.stringify(chatSettings)); }
+function applyThinkingVisibility() { for (const turn of activeTurnsFor()) renderActiveTurn(turn); }
+function setShowThinking(showThinking) { chatSettings.showThinking = Boolean(showThinking); persistChatSettings(); applyThinkingVisibility(); }
 let chatCsrf = document.querySelector('meta[name="ok-workbench-csrf"]')?.content || '';
 async function refreshChatCsrf() {
   const response = await fetch('/api/chat/session', { headers: { accept: 'application/json' } });
@@ -713,6 +715,7 @@ function renderTurnStatusLine(turn, node = chatUi.messages.querySelector(`[data-
   let status = node.querySelector('.chat-turn-status');
   if (!status) { status = document.createElement('p'); status.className = 'chat-turn-status'; node.append(status); }
   status.replaceChildren(); status.textContent = turn.status === 'failed' ? (turn.error || 'Turn failed') : turn.status === 'cancelled' ? 'Stopped.' : turn.status === 'completed' ? 'Completed.' : turnStatusText(turn);
+  if (turn.status === 'working' && turn.lastActivityLabel === 'Model is thinking') { const toggle = document.createElement('label'); toggle.className = 'chat-thinking-toggle'; const input = document.createElement('input'); input.type = 'checkbox'; input.checked = Boolean(chatSettings.showThinking); input.addEventListener('change', () => setShowThinking(input.checked)); toggle.append(input, ' Show thinking'); status.append(' ', toggle); }
   if (turn.status === 'working') { const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'chat-turn-cancel'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', () => cancelSpecificChatTurn(turn)); status.append(' ', cancel); }
   node.append(status);
 }
@@ -725,7 +728,8 @@ function renderActiveTurn(turn) {
   }
   if (turn.id) node.dataset.turnId = turn.id;
   const body = node.querySelector('.chat-message-body'); renderAssistantMarkdown(body, turn.assistantText || (turn.status === 'completed' ? 'No response returned.' : ''));
-  node.querySelectorAll('.chat-turn-activity').forEach(item => item.remove());
+  node.querySelectorAll('.chat-turn-activity, .chat-turn-thinking').forEach(item => item.remove());
+  if (chatSettings.showThinking && turn.thinkingText) { const thinking = document.createElement('p'); thinking.className = 'chat-turn-thinking'; thinking.textContent = turn.thinkingText; node.append(thinking); }
   for (const activity of turn.activities) { const item = document.createElement('p'); item.className = 'chat-tool-activity chat-turn-activity'; if (activity.projectLocation) { item.append('Created project: '); const link = document.createElement('a'); link.href = activity.projectLocation; link.textContent = activity.projectTitle || activity.projectLocation; item.append(link); } else item.textContent = activity.label; node.append(item); }
   renderTurnStatusLine(turn, node); scrollChatToLatest();
 }
@@ -822,7 +826,7 @@ async function cancelChatTurn() {
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread({ force: true });
-  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', activities: [], error: null };
+  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
   if (isVisible()) renderActiveTurn(turn); let projectCreated = false; let completed = false;
@@ -834,7 +838,8 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     if (initiator !== 'system') { chatThreadHasUserChat = true; updateNewThreadAvailability(); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
     for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') turn.id = event.turn_id || null;
-      else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.lastActivityLabel = 'Writing response'; if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
+      else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.thinkingText = ''; turn.lastActivityLabel = 'Writing response'; if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
+      else if (event.type === 'turn.thinking') { turn.thinkingText += event.delta || ''; turn.lastActivityLabel = 'Model is thinking'; }
       else if (event.type === 'tool.started') { turn.activities.push({ kind: 'tool', label: `Running ${event.tool || 'workspace tool'}…`, at: Date.now(), done: false }); turn.lastActivityLabel = event.tool || 'Running tool'; }
       else if (event.type === 'tool.completed' || event.type === 'tool.failed') { if (event.tool === 'create_project' && event.result?.location) projectCreated = true; const activity = [...turn.activities].reverse().find(item => !item.done && item.kind === 'tool'); const label = event.type === 'tool.failed' ? `${event.tool || 'workspace tool'} failed` : `Used ${event.tool || 'workspace tool'}`; if (activity) { activity.done = true; activity.label = label; if (event.tool === 'create_project' && event.result?.location) { activity.projectLocation = event.result.location; activity.projectTitle = event.result.title || event.result.id || event.result.location; } } else turn.activities.push({ kind: 'tool', label, at: Date.now(), done: true, ...(event.tool === 'create_project' && event.result?.location ? { projectLocation: event.result.location, projectTitle: event.result.title || event.result.id || event.result.location } : {}) }); turn.lastActivityLabel = event.tool || 'Workspace tool'; }
       else if (event.type === 'scope.granted') turn.activities.push({ kind: 'scope', label: `Attached ${event.grants?.map(grant => `@${grant.project}/${grant.path}`).join(', ') || 'project context'}`, at: Date.now(), done: true });
@@ -843,7 +848,7 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
       if (isVisible()) renderActiveTurn(turn); }
     }
     completed = true;
-    turn.status = 'completed'; turn.completedAt = Date.now(); if (isVisible()) renderActiveTurn(turn);
+    turn.status = 'completed'; turn.thinkingText = ''; turn.completedAt = Date.now(); if (isVisible()) renderActiveTurn(turn);
     if (isVisible()) { setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads(); }
   } catch (error) { turn.status = error.name === 'AbortError' ? 'cancelled' : 'failed'; turn.error = error.name === 'AbortError' ? 'Stopped.' : error.message; if (isVisible()) { renderActiveTurn(turn); setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
   finally { const visible = isVisible(); activeChatTurns.delete(turn); recentTurns.set(turn.clientId, turn); while (recentTurns.size > 20) recentTurns.delete(recentTurns.keys().next().value); if (completed && !visible) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
@@ -963,4 +968,5 @@ addEventListener('resize', applyChatLayout);
 document.documentElement.dataset.diffPalette = chatSettings.diffPalette;
 chatUi.diffLayout.textContent = chatSettings.diffLayout === 'side-by-side' ? 'Side by side' : 'Inline';
 chatUi.diffPalette.textContent = chatSettings.diffPalette === 'green' ? 'Red / green' : 'Red / blue';
+applyThinkingVisibility();
 applyChatLayout();

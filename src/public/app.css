@@ -294,6 +294,8 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .chat-kicker { display: block; color: var(--muted); font: 600 10px var(--font-ui); text-transform: uppercase; letter-spacing: 0.07em; }
 .chat-header-actions { display: flex; gap: 4px; }
+.chat-thinking-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 5px 2px; color: var(--muted); font: 11px var(--font-ui); white-space: nowrap; cursor: pointer; }
+.chat-thinking-toggle input { margin: 0; accent-color: var(--accent); }
 
 /* Shared control styling */
 .chat-header button, .chat-controls select, .chat-thread-bar button, .chat-composer button, .changes-toolbar button, .changes-actions button { border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 500 12px var(--font-ui); cursor: pointer; }
@@ -351,6 +353,7 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-markdown blockquote { padding-left: 9px; border-left: 2px solid var(--accent); color: var(--muted); }
 .chat-markdown a { color: var(--link); }
 .chat-tool-activity { margin: 0; padding: 4px 8px; color: var(--muted); border-left: 2px solid var(--accent); font: 11px var(--font-mono); }
+.chat-turn-thinking { margin: 7px 0 0; padding: 7px 9px; color: var(--muted); border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 5%, transparent); font: 12px/1.45 var(--font-ui); font-style: italic; white-space: pre-wrap; }
 .chat-turn-status { display: flex; align-items: center; gap: 5px; margin: 7px 0 0; color: var(--muted); font: 11px var(--font-ui); }
 .chat-turn-cancel { padding: 2px 6px; border: 1px solid var(--rule); border-radius: 4px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
 .chat-turn-cancel:hover, .chat-turn-cancel:focus-visible { color: var(--danger); border-color: var(--danger); outline: 0; }

@@ -653,7 +653,7 @@ function turnWriter(res, threadId, turnId) {
     return res.write(`${JSON.stringify(event)}\n`);
   };
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -663,7 +663,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -982,7 +982,7 @@ const server = http.createServer(async (req, res) => {
         const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: projectRootForId(thread.project), prompt: message }).catch(() => '') : null;
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;

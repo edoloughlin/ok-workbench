@@ -267,7 +267,7 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const worker = noWorkspaceTools ? null : await createTurnWorker(workspaceRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
   const workspaceInstructions = systemPrompt ? '' : await workspaceAgentInstructions(workspaceRoot, projectRoot);
@@ -340,7 +340,11 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     // These event names are part of Pi's assistant stream vocabulary. Their
     // payloads are intentionally ignored: status proves liveness without ever
     // exposing reasoning content.
-    if (event.type === 'message_update' && ['thinking_start', 'thinking_delta', 'reasoning_delta'].includes(assistantType)) { reportStatus('thinking'); return; }
+    if (event.type === 'message_update' && ['thinking_start', 'thinking_delta', 'reasoning_delta'].includes(assistantType)) {
+      reportStatus('thinking');
+      if (typeof event.assistantMessageEvent.delta === 'string' && event.assistantMessageEvent.delta) onThinking?.(event.assistantMessageEvent.delta);
+      return;
+    }
     if (['auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(event.type)) reportStatus('retrying');
   });
   const abort = () => session.abort().catch(() => {}); signal?.addEventListener('abort', abort, { once: true });
