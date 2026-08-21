@@ -108,7 +108,7 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .document a { color: var(--link); text-decoration: none; }
 .document a:hover { text-decoration: underline; text-underline-offset: 3px; }
 .document code { padding: 2px 5px; color: var(--ink); background: var(--code-bg); border-radius: 4px; font: 13px var(--font-mono); }
-.document pre { overflow: auto; padding: 16px 18px; color: var(--ink); border-radius: 8px; border: 1px solid var(--rule); background: var(--code-bg); }
+.document pre { display: block; overflow: auto; width: fit-content; min-width: min(72ch, 100%); max-width: 100%; padding: 16px 18px; color: var(--ink); border-radius: 8px; border: 1px solid var(--rule); background: var(--code-bg); }
 .document pre code { padding: 0; color: inherit; background: transparent; }
 .document blockquote { margin: 24px 0; padding: 2px 18px; border-left: 3px solid var(--rule-strong); color: var(--muted); }
 .document ul.task-list { padding-left: 0; list-style: none; }
