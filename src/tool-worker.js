@@ -160,7 +160,7 @@ function toolArguments(argumentsList) {
   return argumentsList;
 }
 async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
-  const tool = await workspaceToolPolicy(relative); const args = toolArguments(argumentsList);
+  const [tool, policy] = await Promise.all([workspaceTool(relative), workspaceToolPolicy(relative)]); const args = toolArguments(argumentsList);
   const command = tool.runtime === 'python3' ? 'python3' : process.execPath;
   return new Promise((resolve, reject) => {
     const child = spawn(command, [tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
@@ -168,11 +168,11 @@ async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
     const capture = (current, chunk) => `${current}${chunk}`.slice(0, MAX_TOOL_OUTPUT);
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout = capture(stdout, chunk); });
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = capture(stderr, chunk); });
-    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, tool.timeoutSeconds * 1000);
+    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, policy.timeoutSeconds * 1000);
     child.once('error', error => { clearTimeout(timeout); reject(new Error(`Tool could not start: ${error.message}`)); });
     child.once('close', (code, signal) => {
       clearTimeout(timeout);
-      if (timedOut) return reject(new Error(`Tool timed out after ${tool.timeoutSeconds} seconds`));
+      if (timedOut) return reject(new Error(`Tool timed out after ${policy.timeoutSeconds} seconds`));
       resolve({ path: tool.path, runtime: tool.runtime, arguments: args, exitCode: code, signal: signal || null, stdout, stderr, ok: code === 0 && !signal });
     });
   });
