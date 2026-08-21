@@ -18,7 +18,10 @@
           <button id="turn-notifications-button" class="turn-notifications-button" type="button" aria-label="Turn notifications" aria-expanded="false" aria-haspopup="true" aria-controls="turn-notifications-menu" title="Turn notifications"><svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg><span id="turn-notifications-count" class="turn-notifications-count" hidden></span></button>
           <div id="turn-notifications-menu" class="turn-notifications-menu" role="menu" aria-label="Completed chat turns" hidden><p class="turn-notifications-title">Turn updates</p><div id="turn-notifications-list" class="turn-notifications-list"></div></div>
         </div>
-        <label class="project-picker">Project <select id="project-select" aria-label="Select project"></select></label>
+        <div class="project-controls">
+          <label class="project-picker">Project <select id="project-select" aria-label="Select project"></select></label>
+          <button id="create-project-button" class="create-project-button" type="button" title="Create project" aria-label="Create project" aria-haspopup="dialog" aria-controls="create-project-dialog">+</button>
+        </div>
       </div>
     </header>
     <div class="layout" id="app-layout">
@@ -65,6 +68,18 @@
         </aside>
       </div>
     </div>
+    <dialog id="create-project-dialog" class="create-project-dialog" aria-labelledby="create-project-title">
+      <form id="create-project-form">
+        <header class="create-project-header"><div><span class="chat-kicker">Workspace</span><h2 id="create-project-title">Create project</h2></div><button type="button" value="cancel" aria-label="Close create project">×</button></header>
+        <p class="create-project-intro">Start with the standard project structure and a linked workspace entry.</p>
+        <label>Project name<input id="create-project-name" name="title" type="text" maxlength="120" autocomplete="off" required placeholder="e.g. Website refresh"></label>
+        <label>Project ID<input id="create-project-id" name="id" type="text" maxlength="64" pattern="[A-Za-z][A-Za-z0-9_-]{0,63}" autocomplete="off" required placeholder="e.g. website-refresh" aria-describedby="create-project-id-help"></label>
+        <span id="create-project-id-help" class="create-project-help">Letters, numbers, hyphens, and underscores only.</span>
+        <label>Description <textarea id="create-project-description" name="description" rows="2" maxlength="280" placeholder="A brief statement of the project’s purpose"></textarea></label>
+        <p id="create-project-error" class="create-project-error" role="alert" hidden></p>
+        <footer><button id="create-project-cancel" type="button">Cancel</button><button id="create-project-submit" type="submit">Create project</button></footer>
+      </form>
+    </dialog>
     <dialog id="chat-auth-dialog" class="chat-auth-dialog" aria-labelledby="chat-auth-dialog-title">
       <form method="dialog">
         <p id="chat-auth-dialog-title" class="chat-auth-dialog-title">GitHub Copilot sign-in</p>

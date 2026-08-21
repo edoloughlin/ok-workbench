@@ -56,6 +56,9 @@ const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
 let ignoreRulesPromise;
 
+function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
+function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
+
 function respond(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
   res.end(body);
@@ -383,6 +386,48 @@ function projectRootForId(projectId) {
   return root;
 }
 
+function newProjectId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) throw new Error('Project ID must start with a letter and use only letters, numbers, hyphens, or underscores');
+  return value;
+}
+function newProjectTitle(value, id) {
+  if (value === undefined || value === null || value === '') return id;
+  if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\r\n\[\]]/.test(value)) throw new Error('Project name must be a short single line without brackets');
+  return value.trim();
+}
+function newProjectDescription(value) {
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value !== 'string' || value.length > 280 || /[\r\n]/.test(value)) throw new Error('Project description must be a single line of 280 characters or fewer');
+  return value.trim();
+}
+async function createWorkspaceProject({ id: requestedId, title: requestedTitle, description: requestedDescription }) {
+  const id = newProjectId(requestedId); const title = newProjectTitle(requestedTitle, id); const description = newProjectDescription(requestedDescription);
+  const target = path.join(BUNDLE_ROOT, id);
+  if (await fs.lstat(target).then(() => true).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error))) throw new Error(`Project already exists: ${id}`);
+  const rootIndex = path.join(BUNDLE_ROOT, 'index.md'); const link = `- [${title}](${id}/)`;
+  let index = await fs.readFile(rootIndex, 'utf8').catch(error => error.code === 'ENOENT' ? '# Workspace\n' : Promise.reject(error));
+  if (new RegExp(`\\]\\(${id.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}/?\\)`).test(index)) throw new Error(`Project is already registered: ${id}`);
+  const template = path.join(__dirname, '..', 'seed', 'workspace', 'templates', 'project');
+  if (!(await isDirectory(template))) throw new Error('OKF project template is unavailable');
+  try {
+    await fs.cp(template, target, { recursive: true, errorOnExist: true });
+    const entries = await fs.readdir(target, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const file = path.join(target, entry.name); const content = await fs.readFile(file, 'utf8');
+      let updated = content.replaceAll('<Project>', title);
+      if (description && entry.name === 'index.md') updated = updated.replace('description: One-line description of this project and its durable knowledge.', `description: ${JSON.stringify(description)}`);
+      if (updated !== content) await fs.writeFile(file, updated, 'utf8');
+    }
+    index = `${index.replace(/\s*$/, '')}\n\n${link}\n`;
+    await fs.writeFile(rootIndex, index, 'utf8');
+  } catch (error) {
+    await fs.rm(target, { recursive: true, force: true });
+    throw error;
+  }
+  return { id, path: id, location: `/workspace/${encodeURIComponent(id)}`, title, description, structure: 'OKF 0.2 project template' };
+}
+
 async function explicitProjectContext(message, primaryProject) {
   const references = [...String(message).matchAll(/@([A-Za-z][A-Za-z0-9_-]*)(?:\/([^\s,;:()\]\[}]+))?/g)].slice(0, 4);
   const attached = [];
@@ -437,9 +482,9 @@ async function listThreads(project) {
       try { const thread = JSON.parse(await fs.readFile(path.join(CHAT_STATE_DIR, file), 'utf8')); if (thread.project === project) result.push(thread); } catch { /* skip corrupt local record */ }
     }
     const threads = result.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map(({ messages, ...summary }) => summary);
-    console.log(`[ok-workbench] chat: loaded ${threads.length} thread${threads.length === 1 ? '' : 's'} for ${project} from ${files.filter(file => file.endsWith('.json')).length} saved thread file${files.filter(file => file.endsWith('.json')).length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
+    log(`[ok-workbench] chat: loaded ${threads.length} thread${threads.length === 1 ? '' : 's'} for ${project} from ${files.filter(file => file.endsWith('.json')).length} saved thread file${files.filter(file => file.endsWith('.json')).length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
     return threads;
-  } catch (error) { if (error.code === 'ENOENT') { console.log(`[ok-workbench] chat: no saved thread directory for ${project} (${Date.now() - startedAt}ms)`); return []; } throw error; }
+  } catch (error) { if (error.code === 'ENOENT') { log(`[ok-workbench] chat: no saved thread directory for ${project} (${Date.now() - startedAt}ms)`); return []; } throw error; }
 }
 
 async function providerCatalog() {
@@ -453,7 +498,7 @@ async function providerCatalog() {
 async function chatStatus(provider) {
   const startedAt = Date.now();
   const providers = await providerCatalog(); const selected = providers.find(item => item.id === provider) || providers[0];
-  console.log(`[ok-workbench] chat: discovered ${providers.length} provider${providers.length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
+  log(`[ok-workbench] chat: discovered ${providers.length} provider${providers.length === 1 ? '' : 's'} in ${Date.now() - startedAt}ms`);
   return {
     enabled: providers.some(item => item.models.length > 0),
     message: providers.length ? 'Choose an authenticated provider and model.' : 'Sign in with Pi or set a supported provider API key in this server process.',
@@ -609,7 +654,7 @@ async function ensureWorkspaceGit(root) {
 async function gitStatus(project) {
   const startedAt = Date.now(); const git = await gitProject(project); const { stdout } = await run('git', ['status', '--porcelain=v1', '--untracked-files=all', '--', git.pathspec], { cwd: git.repo });
   const files = stdout.split('\n').filter(Boolean).map(line => ({ index: line.slice(0, 1), worktree: line.slice(1, 2), path: line.slice(3) }));
-  console.log(`[ok-workbench] chat: checked Git status for ${project} (${files.length} changed file${files.length === 1 ? '' : 's'}) in ${Date.now() - startedAt}ms`);
+  log(`[ok-workbench] chat: checked Git status for ${project} (${files.length} changed file${files.length === 1 ? '' : 's'}) in ${Date.now() - startedAt}ms`);
   return { changedFiles: files.length, files };
 }
 async function gitDiff(project, source) {
@@ -668,6 +713,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/app.js') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.js')), 'text/javascript; charset=utf-8');
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
+    if (url.pathname === '/api/projects' && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createWorkspaceProject(await readJson(req))); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     const authMatch = url.pathname.match(/^\/api\/chat\/auth\/(openai-codex|github-copilot)\/start$/);
@@ -711,7 +757,7 @@ const server = http.createServer(async (req, res) => {
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
           if (tool.result?.location) diagnostic.location = tool.result.location;
           if (tool.result?.path) diagnostic.path = tool.result.path;
-          if (tool.error) console.error(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
+          if (tool.error) logError(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
           const type = tool.phase === 'started' ? 'tool.started' : tool.phase === 'failed' ? 'tool.failed' : 'tool.completed';
           writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
@@ -743,5 +789,5 @@ const server = http.createServer(async (req, res) => {
 
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
-  server.listen(PORT, '127.0.0.1', () => console.log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`));
-}).catch(error => { console.error(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1; });
+  server.listen(PORT, '127.0.0.1', () => log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`));
+}).catch(error => { logError(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1; });

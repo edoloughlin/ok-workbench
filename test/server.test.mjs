@@ -87,5 +87,9 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.equal(revert.status, 200); assert.equal(await readFile(path.join(workspace, 'tracked.md'), 'utf8'), 'before\n'); assert.equal(await readFile(path.join(sibling, 'tracked.md'), 'utf8'), 'sibling edit\n');
     const todo = await fetch(`http://127.0.0.1:${port}/api/projects/workspace/todos`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: '/workspace/index.md', startLine: 4, endLine: 4, original: '* [ ] Direct task', replacement: '* [x] Direct task' }) });
     assert.equal(todo.status, 200); assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /\* \[x\] Direct task/);
+    const created = await fetch(`http://127.0.0.1:${port}/api/projects`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ id: 'new-project', title: 'New project', description: 'Created from the project dialog.' }) });
+    assert.equal(created.status, 201); assert.deepEqual(await created.json(), { id: 'new-project', path: 'new-project', location: '/workspace/new-project', title: 'New project', description: 'Created from the project dialog.', structure: 'OKF 0.2 project template' });
+    assert.match(await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8'), /description: "Created from the project dialog\."/);
+    assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /\[New project\]\(new-project\/\)/);
   } finally { child.kill(); }
 });

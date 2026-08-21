@@ -67,8 +67,11 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .project-summary { min-width: 0; padding: 8px 20px; display: flex; align-items: baseline; gap: 12px; }
 .project-summary > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; font-size: 14px; }
 .stats { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.project-picker { height: var(--topbar-h); padding: 0 16px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.project-controls { align-self: stretch; display: flex; align-items: center; }
+.project-picker { height: var(--topbar-h); padding: 0 8px 0 16px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); font-weight: 500; }
 .project-picker select { width: 160px; padding: 5px 8px; border: 1px solid var(--rule-strong); background: var(--paper); color: var(--ink); font: 500 12px var(--font-ui); border-radius: 6px; }
+.create-project-button { display: grid; place-items: center; width: 27px; height: 27px; margin-right: 16px; padding: 0; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 400 20px/1 var(--font-ui); cursor: pointer; }
+.create-project-button:hover, .create-project-button:focus-visible { border-color: var(--accent); color: var(--accent); outline: 0; }
 
 /* ---------------- Layout ---------------- */
 .layout { --chat-size: 420px; display: grid; grid-template-columns: 240px minmax(0,1fr); align-items: start; }
@@ -183,12 +186,34 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
   .topbar { grid-template-columns: 1fr auto; }
   .brand { grid-row: 1; }
   .project-summary { display: none; }
-  .project-picker { padding: 0 10px; }
+  .project-picker { padding: 0 6px 0 10px; }
   .project-picker select { width: 120px; }
+  .create-project-button { margin-right: 10px; }
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: relative; top: 0; height: auto; max-height: 32vh; border-right: 0; border-bottom: 1px solid var(--rule); }
   .document { width: 100%; min-height: 0; padding: 36px 24px 70px; }
 }
+
+/* ---------------- Project creation ---------------- */
+.create-project-dialog { width: min(440px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--rule); border-radius: 12px; color: var(--ink); background: var(--paper); box-shadow: var(--shadow-pop); }
+.create-project-dialog::backdrop { background: rgba(0, 0, 0, 0.35); }
+.create-project-dialog form { display: grid; gap: 13px; padding: 20px; }
+.create-project-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.create-project-header h2 { margin: 1px 0 0; font-size: 21px; letter-spacing: -0.025em; }
+.create-project-header button { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; font-size: 24px; line-height: 1; cursor: pointer; }
+.create-project-header button:hover, .create-project-header button:focus-visible { color: var(--accent); background: var(--accent-soft); outline: 0; }
+.create-project-intro { margin: -4px 0 2px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.create-project-dialog label { display: grid; gap: 5px; color: var(--muted); font: 600 10px var(--font-ui); letter-spacing: .05em; text-transform: uppercase; }
+.create-project-dialog input, .create-project-dialog textarea { width: 100%; padding: 8px 9px; border: 1px solid var(--rule-strong); border-radius: 7px; color: var(--ink); background: var(--paper); font: 13px/1.4 var(--font-ui); letter-spacing: normal; text-transform: none; }
+.create-project-dialog textarea { resize: vertical; }
+.create-project-dialog input:focus, .create-project-dialog textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
+.create-project-help { margin-top: -8px; color: var(--muted); font-size: 11px; }
+.create-project-error { margin: -2px 0 0; color: var(--danger); font-size: 12px; }
+.create-project-dialog footer { display: flex; justify-content: flex-end; gap: 7px; padding-top: 3px; }
+.create-project-dialog footer button { padding: 6px 12px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 500 12px var(--font-ui); cursor: pointer; }
+.create-project-dialog footer button:hover, .create-project-dialog footer button:focus-visible { border-color: var(--accent); color: var(--accent); outline: 0; }
+.create-project-dialog footer #create-project-submit { border-color: var(--accent); color: #fff; background: var(--accent); font-weight: 600; }
+.create-project-dialog footer #create-project-submit:disabled { opacity: .65; cursor: wait; }
 
 /* ---------------- Changes dialog / diff viewer ---------------- */
 .diff-workspace { display: grid; grid-template-columns: minmax(210px, .31fr) minmax(0,1fr); min-height: 360px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }

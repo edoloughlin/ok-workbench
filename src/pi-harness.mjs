@@ -22,6 +22,8 @@ const MACOS_NETWORK_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-network-sandbox.
 const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
 const WORKER_READY_TIMEOUT = 5_000;
 
+function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
+
 async function exists(file, mode = constants.F_OK) { try { await access(file, mode); return true; } catch { return false; } }
 async function bwrapPath() {
   for (const candidate of ['/usr/bin/bwrap', '/bin/bwrap']) if (await exists(candidate, constants.X_OK)) return candidate;
@@ -164,7 +166,7 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
   const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, cwd: platform === 'darwin' ? configuration.temporaryDirectory : undefined, env: sandboxChildEnvironment({ ...configuration, platform, toolEnvironment }) });
   const turnWorker = new TurnWorker(child, {
     cleanup: () => cleanupTemporaryDirectory(configuration.temporaryDirectory),
-    onUnexpectedExit: details => console.error('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
+    onUnexpectedExit: details => logError('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
   });
   try { await waitForSpawn(child); await turnWorker.waitForReady(); return turnWorker; }
   catch (error) { turnWorker.close(); turnWorker.removeTemporaryDirectory(); throw error; }
@@ -280,7 +282,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     await onTool?.({ phase: 'started', name });
     try {
       const result = await worker.call(name, params);
-      if (name === 'list_workspace_tools' && result.diagnostics?.length) console.error('[ok-workbench] workspace tool metadata diagnostics', { diagnostics: result.diagnostics });
+      if (name === 'list_workspace_tools' && result.diagnostics?.length) logError('[ok-workbench] workspace tool metadata diagnostics', { diagnostics: result.diagnostics });
       await onTool?.({ phase: 'completed', name, changed: name === 'apply_project_update' || name === 'create_project', result });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) {
@@ -300,11 +302,11 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
       runner = await createTurnWorker(workspaceRoot, { network: policy.network, toolEnvironment });
       if (!runner) throw new Error('A supported sandbox is required before workspace tools can run');
       const result = await runner.call(name, params);
-      if (result.stderr) console.error('[ok-workbench] workspace tool stderr', { path: result.path, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr, manifestPath: policy.manifestPath, manifest: policy.manifest, providedEnvironment: Object.keys(toolEnvironment) });
+      if (result.stderr) logError('[ok-workbench] workspace tool stderr', { path: result.path, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr, manifestPath: policy.manifestPath, manifest: policy.manifest, providedEnvironment: Object.keys(toolEnvironment) });
       await onTool?.({ phase: 'completed', name, result });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) {
-      if (/^Tool timed out after \d+ seconds$/.test(error.message)) console.error('[ok-workbench] workspace tool timed out', { path: policy?.path || params.path, timeoutSeconds: policy?.timeoutSeconds, manifestPath: policy?.manifestPath, manifest: policy?.manifest });
+      if (/^Tool timed out after \d+ seconds$/.test(error.message)) logError('[ok-workbench] workspace tool timed out', { path: policy?.path || params.path, timeoutSeconds: policy?.timeoutSeconds, manifestPath: policy?.manifestPath, manifest: policy?.manifest });
       await onTool?.({ phase: 'failed', name, error: error.message }); throw error;
     } finally { runner?.close(); }
   };

@@ -1,6 +1,11 @@
 const documentPane = document.querySelector('#document');
 const nav = document.querySelector('#file-nav');
 const picker = document.querySelector('#project-select');
+const createProjectUi = {
+  button: document.querySelector('#create-project-button'), dialog: document.querySelector('#create-project-dialog'), form: document.querySelector('#create-project-form'),
+  name: document.querySelector('#create-project-name'), id: document.querySelector('#create-project-id'), description: document.querySelector('#create-project-description'),
+  cancel: document.querySelector('#create-project-cancel'), close: document.querySelector('.create-project-header button'), submit: document.querySelector('#create-project-submit'), error: document.querySelector('#create-project-error')
+};
 let displayedDocument = null;
 let pageLoadSequence = 0;
 
@@ -315,6 +320,26 @@ document.addEventListener('click', navigate);
 documentPane.addEventListener('click', handleTableInteraction);
 documentPane.addEventListener('keydown', handleTableInteraction);
 picker.addEventListener('change', () => { history.pushState({}, '', `${picker.value}/`); loadPage().catch(showError); });
+function suggestedProjectId(title) { return title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 64); }
+function closeCreateProject() { createProjectUi.dialog.close(); }
+function openCreateProject() {
+  createProjectUi.form.reset(); delete createProjectUi.id.dataset.edited; createProjectUi.error.hidden = true; createProjectUi.submit.disabled = false;
+  createProjectUi.dialog.showModal(); requestAnimationFrame(() => createProjectUi.name.focus());
+}
+createProjectUi.button.addEventListener('click', openCreateProject);
+createProjectUi.name.addEventListener('input', () => { if (!createProjectUi.id.dataset.edited) createProjectUi.id.value = suggestedProjectId(createProjectUi.name.value); });
+createProjectUi.id.addEventListener('input', () => { createProjectUi.id.dataset.edited = 'true'; });
+createProjectUi.cancel.addEventListener('click', closeCreateProject); createProjectUi.close.addEventListener('click', closeCreateProject);
+createProjectUi.form.addEventListener('submit', async event => {
+  event.preventDefault(); if (!createProjectUi.form.reportValidity()) return;
+  createProjectUi.submit.disabled = true; createProjectUi.error.hidden = true;
+  try {
+    const response = await chatApi('/api/projects', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: createProjectUi.id.value, title: createProjectUi.name.value, description: createProjectUi.description.value }) });
+    const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not create project');
+    closeCreateProject(); history.pushState({}, '', `${data.location}/`); await loadPage();
+  } catch (error) { createProjectUi.error.textContent = error.message; createProjectUi.error.hidden = false; }
+  finally { createProjectUi.submit.disabled = false; }
+});
 addEventListener('popstate', () => loadPage().catch(showError));
 loadPage().catch(showError);
 
