@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { chmod, cp, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { deflateRawSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
 const worker = createRequire(import.meta.url)(path.join(root, 'dist', 'tool-worker.js'));
+function zipArchive(files) {
+  const local = []; const central = []; let offset = 0;
+  for (const [name, content] of Object.entries(files)) {
+    const filename = Buffer.from(name); const source = Buffer.from(content); const compressed = deflateRawSync(source); const header = Buffer.alloc(30); header.writeUInt32LE(0x04034b50, 0); header.writeUInt16LE(20, 4); header.writeUInt16LE(8, 8); header.writeUInt32LE(compressed.length, 18); header.writeUInt32LE(source.length, 22); header.writeUInt16LE(filename.length, 26);
+    local.push(header, filename, compressed);
+    const entry = Buffer.alloc(46); entry.writeUInt32LE(0x02014b50, 0); entry.writeUInt16LE(20, 4); entry.writeUInt16LE(20, 6); entry.writeUInt16LE(8, 10); entry.writeUInt32LE(compressed.length, 20); entry.writeUInt32LE(source.length, 24); entry.writeUInt16LE(filename.length, 28); entry.writeUInt32LE(offset, 42); central.push(entry, filename); offset += header.length + filename.length + compressed.length;
+  }
+  const directory = Buffer.concat(central); const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16); return Buffer.concat([...local, directory, end]);
+}
 test('worker rejects traversal, private names, and symlink escapes while allowing scoped edits', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-worker-'));
   const outside = await mkdtemp(path.join(tmpdir(), 'ok-workbench-outside-'));
@@ -21,6 +31,27 @@ test('worker rejects traversal, private names, and symlink escapes while allowin
   await assert.rejects(worker.applyPatch({ path: 'outside/new.md', content: 'nope' }));
   await worker.applyPatch({ path: 'notes/new.md', content: 'safe' });
   assert.equal(await readFile(path.join(workspace, 'notes', 'new.md'), 'utf8'), 'safe');
+});
+test('worker extracts text from PDF and Office documents without exposing binary reads', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-documents-'));
+  await writeFile(path.join(workspace, 'report.pdf'), '%PDF-1.4\nBT\n(Quarterly report) Tj\n<4865782074657874> Tj\nET\n');
+  await writeFile(path.join(workspace, 'note.md'), '# Note\n');
+  await writeFile(path.join(workspace, 'report.docx'), zipArchive({ 'word/document.xml': '<w:document><w:body><w:p><w:r><w:t>Project brief</w:t></w:r></w:p></w:body></w:document>' }));
+  await writeFile(path.join(workspace, 'slides.pptx'), zipArchive({ 'ppt/slides/slide1.xml': '<p:sld><a:p><a:r><a:t>Roadmap</a:t></a:r></a:p></p:sld>' }));
+  await writeFile(path.join(workspace, 'numbers.xlsx'), zipArchive({ 'xl/sharedStrings.xml': '<sst><si><t>Revenue</t></si></sst>', 'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row></sheetData></worksheet>' }));
+  await writeFile(path.join(workspace, 'report.odt'), zipArchive({ 'content.xml': '<office:document-content><text:h>Project report</text:h><text:p>OpenDocument text</text:p></office:document-content>' }));
+  await writeFile(path.join(workspace, 'slides.odp'), zipArchive({ 'content.xml': '<office:document-content><draw:page><text:p>OpenDocument slide</text:p></draw:page></office:document-content>' }));
+  await writeFile(path.join(workspace, 'numbers.ods'), zipArchive({ 'content.xml': '<office:document-content><table:table table:name="Budget"><table:table-row><table:table-cell><text:p>Cost</text:p></table:table-cell><table:table-cell><text:p>10</text:p></table:table-cell></table:table-row></table:table></office:document-content>' }));
+  worker.setWorkspaceRoot(workspace);
+  assert.match((await worker.extractDocument('report.pdf')).content, /Quarterly report Hex text/);
+  assert.match((await worker.extractDocument('report.docx')).content, /Project brief/);
+  assert.match((await worker.extractDocument('slides.pptx')).content, /Roadmap/);
+  assert.match((await worker.extractDocument('numbers.xlsx')).content, /A1: Revenue.*B1: 42/);
+  assert.match((await worker.extractDocument('report.odt')).content, /Project report[\s\S]*OpenDocument text/);
+  assert.match((await worker.extractDocument('slides.odp')).content, /OpenDocument slide/);
+  assert.match((await worker.extractDocument('numbers.ods')).content, /Budget[\s\S]*Cost \| 10/);
+  await assert.rejects(worker.extractDocument('../report.pdf'));
+  await assert.rejects(worker.extractDocument('note.md'), /Supported document types/);
 });
 test('worker discovers only executable Python or Node workspace tools in the permitted directories', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-tools-'));

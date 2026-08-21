@@ -9,9 +9,13 @@ const { spawn } = require('node:child_process');
 const { constants } = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+const zlib = require('node:zlib');
 
 let ROOT = path.resolve(process.env.OK_WORKSPACE_ROOT || process.env.OKF_WORKSPACE_ROOT || '/workspace');
 const MAX_READ = 256 * 1024;
+const MAX_DOCUMENT_READ = 25 * 1024 * 1024;
+const MAX_DOCUMENT_TEXT = 256 * 1024;
+const MAX_ZIP_ENTRIES = 10_000;
 const MAX_RESULTS = 200;
 const MAX_TOOL_OUTPUT = 64 * 1024;
 const MAX_TOOL_ARGUMENTS = 32;
@@ -60,6 +64,94 @@ async function readFile(relative) {
   const { safe, target } = await targetFor(relative); const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Path is not a file'); if (stat.size > MAX_READ) throw new Error('File is too large to read');
   const content = await fs.readFile(target, 'utf8'); if (content.includes('\0')) throw new Error('Binary files are not available'); return { path: safe, content };
+}
+function cappedDocumentText(value) {
+  const text = String(value || '').replace(/\u0000/g, '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { content: text.slice(0, MAX_DOCUMENT_TEXT), truncated: text.length > MAX_DOCUMENT_TEXT };
+}
+function decodeXml(value) {
+  return String(value || '').replace(/<[^>]*>/g, '').replace(/&(?:amp|lt|gt|quot|apos);/g, entity => ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" })[entity]).replace(/&#(x[\da-f]+|\d+);/gi, (_match, code) => String.fromCodePoint(code[0].toLowerCase() === 'x' ? parseInt(code.slice(1), 16) : Number(code)));
+}
+function zipEntries(buffer) {
+  let end = -1;
+  for (let offset = Math.max(0, buffer.length - 65_557); offset <= buffer.length - 22; offset++) if (buffer.readUInt32LE(offset) === 0x06054b50) end = offset;
+  if (end < 0) throw new Error('Office document is not a valid ZIP container');
+  const entries = buffer.readUInt16LE(end + 10); const directoryOffset = buffer.readUInt32LE(end + 16); if (entries > MAX_ZIP_ENTRIES || directoryOffset >= buffer.length) throw new Error('Office document has an unsupported ZIP directory');
+  const result = new Map(); let offset = directoryOffset; let total = 0;
+  for (let index = 0; index < entries; index++) {
+    if (offset + 46 > buffer.length || buffer.readUInt32LE(offset) !== 0x02014b50) throw new Error('Office document has an invalid ZIP entry');
+    const flags = buffer.readUInt16LE(offset + 8); const method = buffer.readUInt16LE(offset + 10); const compressed = buffer.readUInt32LE(offset + 20); const size = buffer.readUInt32LE(offset + 24); const nameLength = buffer.readUInt16LE(offset + 28); const extraLength = buffer.readUInt16LE(offset + 30); const commentLength = buffer.readUInt16LE(offset + 32); const localOffset = buffer.readUInt32LE(offset + 42); const name = buffer.subarray(offset + 46, offset + 46 + nameLength).toString(flags & 0x800 ? 'utf8' : 'utf8');
+    offset += 46 + nameLength + extraLength + commentLength;
+    if (!name || name.endsWith('/') || name.includes('..') || name.startsWith('/')) continue;
+    total += size; if (total > MAX_DOCUMENT_READ * 4) throw new Error('Office document expands beyond the extraction limit');
+    if (localOffset + 30 > buffer.length || buffer.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('Office document has an invalid ZIP member');
+    const localName = buffer.readUInt16LE(localOffset + 26); const localExtra = buffer.readUInt16LE(localOffset + 28); const start = localOffset + 30 + localName + localExtra; const source = buffer.subarray(start, start + compressed); if (source.length !== compressed) throw new Error('Office document is truncated');
+    let content; if (method === 0) content = source; else if (method === 8) content = zlib.inflateRawSync(source, { maxOutputLength: MAX_DOCUMENT_READ * 4 }); else continue;
+    if (content.length !== size || content.length > MAX_DOCUMENT_READ * 4) throw new Error('Office document has an invalid ZIP member size'); result.set(name, content.toString('utf8'));
+  }
+  return result;
+}
+function xmlParagraphs(xml, paragraphTag) {
+  const paragraphs = []; const matcher = new RegExp(`<${paragraphTag}\\b[\\s\\S]*?<\\/${paragraphTag}>`, 'g');
+  for (const paragraph of String(xml || '').match(matcher) || []) { const text = decodeXml(paragraph).replace(/\s+/g, ' ').trim(); if (text) paragraphs.push(text); }
+  return paragraphs;
+}
+function extractDocx(entries) {
+  const names = [...entries.keys()].filter(name => /^word\/(?:document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(name)).sort();
+  return names.flatMap(name => xmlParagraphs(entries.get(name), 'w:p')).join('\n\n');
+}
+function extractPptx(entries) {
+  const names = [...entries.keys()].filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+  return names.map((name, index) => `Slide ${index + 1}\n${xmlParagraphs(entries.get(name), 'a:p').join('\n')}`).join('\n\n');
+}
+function extractXlsx(entries) {
+  const sharedStrings = xmlParagraphs(entries.get('xl/sharedStrings.xml'), 'si'); const names = [...entries.keys()].filter(name => /^xl\/worksheets\/sheet\d+\.xml$/.test(name)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+  return names.map((name, index) => {
+    const rows = []; for (const row of String(entries.get(name) || '').match(/<row\b[\s\S]*?<\/row>/g) || []) {
+      const cells = []; for (const cell of row.match(/<c\b[\s\S]*?<\/c>|<c\b[^>]*\/>/g) || []) { const reference = cell.match(/\br="([^"]+)"/)?.[1] || ''; const type = cell.match(/\bt="([^"]+)"/)?.[1]; const value = decodeXml(cell.match(/<v[^>]*>([\s\S]*?)<\/v>/)?.[1] || cell.match(/<t[^>]*>([\s\S]*?)<\/t>/)?.[1] || ''); const text = type === 's' ? sharedStrings[Number(value)] || '' : value; if (text) cells.push(`${reference}: ${text}`); }
+      if (cells.length) rows.push(cells.join(' | '));
+    }
+    return `Sheet ${index + 1}\n${rows.join('\n')}`;
+  }).join('\n\n');
+}
+function extractOdt(entries) {
+  return xmlParagraphs(entries.get('content.xml'), 'text:(?:h|p)').join('\n\n');
+}
+function extractOdp(entries) {
+  const pages = String(entries.get('content.xml') || '').match(/<draw:page\b[\s\S]*?<\/draw:page>/g) || [];
+  return pages.map((page, index) => `Slide ${index + 1}\n${xmlParagraphs(page, 'text:(?:h|p)').join('\n')}`).join('\n\n');
+}
+function extractOds(entries) {
+  const sheets = String(entries.get('content.xml') || '').match(/<table:table\b[\s\S]*?<\/table:table>/g) || [];
+  return sheets.map((sheet, index) => {
+    const name = sheet.match(/\btable:name="([^"]+)"/)?.[1] || `Sheet ${index + 1}`; const rows = [];
+    for (const row of sheet.match(/<table:table-row\b[\s\S]*?<\/table:table-row>/g) || []) {
+      const cells = []; for (const cell of row.match(/<table:table-cell\b[\s\S]*?<\/table:table-cell>|<table:table-cell\b[^>]*\/>/g) || []) { const text = decodeXml(cell).replace(/\s+/g, ' ').trim(); const repeated = Math.min(Number(cell.match(/\btable:number-columns-repeated="(\d+)"/)?.[1]) || 1, 100); if (text) for (let repeat = 0; repeat < repeated; repeat++) cells.push(text); }
+      if (cells.length) rows.push(cells.join(' | '));
+    }
+    return `${name}\n${rows.join('\n')}`;
+  }).join('\n\n');
+}
+function pdfLiteral(value) {
+  let output = ''; for (let index = 0; index < value.length; index++) { const char = value[index]; if (char !== '\\') { output += char; continue; } const next = value[++index] || ''; if (/[0-7]/.test(next)) { const digits = `${next}${value[index + 1] || ''}${value[index + 2] || ''}`.match(/^[0-7]{1,3}/)[0]; output += String.fromCharCode(parseInt(digits, 8)); index += digits.length - 1; } else output += ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' })[next] || next; }
+  return output;
+}
+function pdfHex(value) {
+  const source = String(value || '').replace(/\s/g, ''); if (!/^(?:[\da-f]{2})+$/i.test(source)) return '';
+  const bytes = Buffer.from(source, 'hex');
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) { let output = ''; for (let index = 2; index + 1 < bytes.length; index += 2) output += String.fromCodePoint(bytes.readUInt16BE(index)); return output; }
+  return bytes.toString('latin1');
+}
+function extractPdf(buffer) {
+  const sources = [buffer.toString('latin1')]; const raw = buffer.toString('latin1'); const stream = /<<(.*?)>>\s*stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  for (const match of raw.matchAll(stream)) if (/\/FlateDecode/.test(match[1])) try { sources.push(zlib.inflateSync(Buffer.from(match[2], 'latin1')).toString('latin1')); } catch { /* Some PDF streams are not text streams. */ }
+  const strings = []; for (const source of sources) { for (const match of source.matchAll(/\((?:\\.|[^\\()])*\)\s*(?:Tj|'|")/g)) strings.push(pdfLiteral(match[0].replace(/\)\s*(?:Tj|'|")[\s\S]*$/, '').slice(1))); for (const match of source.matchAll(/<([\da-f\s]+)>\s*Tj/gi)) strings.push(pdfHex(match[1])); for (const match of source.matchAll(/\[([\s\S]*?)\]\s*TJ/g)) for (const part of match[1].matchAll(/\((?:\\.|[^\\()])*\)|<([\da-f\s]+)>/g)) strings.push(part[1] === undefined ? pdfLiteral(part[0].slice(1, -1)) : pdfHex(part[1])); }
+  return strings.join(' ').replace(/\s+/g, ' ').trim();
+}
+async function extractDocument(relative) {
+  const { safe, target } = await targetFor(relative); const info = await fs.stat(target); if (!info.isFile()) throw new Error('Path is not a file'); if (info.size > MAX_DOCUMENT_READ) throw new Error('Document is too large to extract');
+  const extension = path.extname(safe).toLowerCase(); if (!['.pdf', '.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods'].includes(extension)) throw new Error('Supported document types are PDF, DOCX, PPTX, XLSX, ODT, ODP, and ODS'); const buffer = await fs.readFile(target);
+  const content = extension === '.pdf' ? extractPdf(buffer) : (() => { const entries = zipEntries(buffer); if (extension === '.docx') return extractDocx(entries); if (extension === '.pptx') return extractPptx(entries); if (extension === '.xlsx') return extractXlsx(entries); if (extension === '.odt') return extractOdt(entries); if (extension === '.odp') return extractOdp(entries); return extractOds(entries); })(); const result = cappedDocumentText(content); if (!result.content) throw new Error('No extractable text was found in this document'); return { path: safe, format: extension.slice(1), ...result };
 }
 async function searchFiles(query) {
   if (typeof query !== 'string' || !query.trim() || query.length > 256) throw new Error('A short search query is required');
@@ -246,7 +338,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), search_files: ({ query }) => searchFiles(query), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query }) => searchFiles(query), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // The launcher waits for this acknowledgement before exposing file tools.
   // A spawn event alone does not prove that the OS sandbox accepted the worker.
@@ -267,6 +359,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, searchFiles, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
+module.exports = { setWorkspaceRoot, listFiles, readFile, extractDocument, searchFiles, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();
