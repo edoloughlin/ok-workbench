@@ -13,25 +13,26 @@ with or without an AI in the loop.
 Most note systems fail in one of two ways. Either you maintain everything
 yourself and the structure decays as soon as life gets busy, or an AI
 "remembers" things in an opaque store you can't inspect or trust. OK Workbench
-takes a third path:
+takes another path:
 
 - **The AI is the primary editor.** You describe what happened or what you
   want; the assistant updates the right documents. You review the changes as
   ordinary Git diffs before accepting them.
 - **The files are the source of truth.** The workspace is a portable folder of
-  Markdown. No database, no lock-in, no hidden state mixed into your content.
+  Markdown, avoiding databases or other opaque state.
 - **Structure keeps the AI honest.** The workspace follows OKF (Open Knowledge
   Format), a lightweight convention of `index.md` files, YAML frontmatter, and
   standard Markdown links. This gives the assistant a reliable map of the
   workspace, so it can *discover* related documents and update them together
   instead of leaving stale copies behind.
 
-That last point is the design goal that shapes everything else: **aid
+That last point is the fundamental design goal: **aid
 discoverability so related files stay consistent and drift is minimised.**
 Every directory has an index; every concept document declares its type and a
 one-line description; every substantive change updates the project's index,
-log, and status in the same batch. The assistant is required — by the tooling,
-not just by prompting — to keep these in sync.
+log, and status (things can drift, but the system monitors and can help getting
+things back on track). The assistant is required by the tooling -
+not just by prompting - to keep these in sync.
 
 ## A planning and coaching aid
 
@@ -39,8 +40,8 @@ OK Workbench's primary role is as a **planning partner or coach**. Each
 project carries a small set of living documents that the assistant maintains
 for you:
 
-- **`status.md`** — exactly one *next action*, the *last completed* outcome,
-  current *blockers*, and a short ordered backlog. When you sit down, you
+- **`status.md`** — one *next action*, the *last completed* outcome,
+  current *blockers*, and a short ordered backlog. The goal is that you
   always know where you left off and what to do next.
 - **`log.md`** — a durable, dated history of what actually happened, in ISO
   `YYYY-MM-DD` entries. The status stays terse; the log keeps the detail.
@@ -48,10 +49,11 @@ for you:
   (with the reason stated), `[x]` complete.
 
 You can end a session by saying "log what we did and update the status," and
-the assistant does the bookkeeping. Next session, it orients itself from the
-same files. Because the state is explicit and reviewable, the assistant is
-also required to *flag gaps rather than invent history* — if the log and
-status disagree, you hear about it instead of getting a plausible fiction.
+the assistant does the bookkeeping (or you can let them accumulate and click on
+the '*Changes detected...*' reminder to put things back in order). Next session,
+it orients itself from the same files. Because the state is explicit and reviewable,
+the assistant is also required to *flag gaps rather than invent history* — if the log
+and status disagree, you hear about it instead of getting a plausible fiction.
 
 ## A simple wiki and knowledge base
 
@@ -66,6 +68,9 @@ Under the planning layer, OK Workbench is a perfectly good general wiki:
 - **Progressive disclosure.** Indexes link to concepts; concepts link to
   evidence in `references/` directories. You (or the assistant) can go from
   "what projects exist" to a specific captured log file in a few hops.
+
+*(We don't have in-place editing - yet - but you can edit files in other tools 
+and the system will detect this and help you get things consistent again.)*
 
 ## Working with non-Markdown sources
 
@@ -111,6 +116,8 @@ credentials in your content.
   the assistant knows about your projects is in files you can read.
 - **Anyone who wants a local, durable wiki** that happens to have an unusually
   diligent librarian.
+- **Neurodivergents** who start multiple projects and can never
+  figure out how to finish them.
 
 ## Getting started
 
