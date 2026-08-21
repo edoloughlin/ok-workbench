@@ -673,6 +673,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (url.pathname === '/app.css') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.css')), 'text/css; charset=utf-8');
+    if (url.pathname === '/favicon.svg' || url.pathname === '/favicon.ico') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/favicon.svg')), 'image/svg+xml');
     if (url.pathname === '/app.js') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.js')), 'text/javascript; charset=utf-8');
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
