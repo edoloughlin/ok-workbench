@@ -190,8 +190,61 @@ function normalizedRoute(path) { return path.replace(/\/index\.md$/i, '').replac
 function active(path) { return normalizedRoute(path) === normalizedRoute(routePath()); }
 function navLink(item) { return `<a class="nav-link ${active(item.path) ? 'active' : ''}" href="${item.path}">${escapeHtml(item.label)}</a>`; }
 function containsCurrent(path) { const directory = normalizedRoute(path); const current = normalizedRoute(routePath()); return current === directory || current.startsWith(`${directory}/`); }
+
+const NAV_ICONS = {
+  project: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5h6l1.7 2h9.3v9.8a1.7 1.7 0 0 1-1.7 1.7H5.2a1.7 1.7 0 0 1-1.7-1.7z"/><path d="M3.5 7.5V5.7A1.7 1.7 0 0 1 5.2 4h4.1l1.8 2h7.7a1.7 1.7 0 0 1 1.7 1.7v1.8"/></svg>',
+  document: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h6"/></svg>',
+  terminal: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>',
+  config: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h4"/><path d="M16.5 12.5h.01"/></svg>',
+  spreadsheet: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M8.5 12h7M8.5 15.5h7M12 10v7"/></svg>',
+  presentation: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="12" rx="1.5"/><path d="M12 16v4M8.5 20h7M8 8h8M8 11h5"/></svg>',
+  image: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="16" rx="2"/><circle cx="9" cy="9" r="1.4"/><path d="m5.5 17 4.5-4 3.1 2.8 2.2-2 3.2 3.2"/></svg>',
+  archive: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14v12H5zM4 3.5h16v3H4zM10 11h4"/></svg>',
+  code: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m8.5 8-4 4 4 4M15.5 8l4 4-4 4M13.5 5.5l-3 13"/></svg>',
+  instructions: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.2 5.8L5 10l5.8 1.2L12 17l1.2-5.8L19 10l-5.8-1.2z"/><path d="m5 16-.6 2.4L2 19l2.4.6L5 22l.6-2.4L8 19l-2.4-.6z"/></svg>',
+  activity: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 1 0 2.35-5.65L4 8.7"/><path d="M4 4v4.7h4.7M12 7v5l3.3 2"/></svg>',
+  status: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.7-4.7"/></svg>',
+  overview: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12h6M9 15.5h4"/></svg>',
+  readme: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.5A3.5 3.5 0 0 1 8 3h4v16H8a3.5 3.5 0 0 0-3.5 2zM19.5 5.5A3.5 3.5 0 0 0 16 3h-4v16h4a3.5 3.5 0 0 1 3.5 2z"/></svg>'
+};
+
+const CORE_DOCUMENTS = {
+  'AGENTS.md': { title: 'Instructions', subtitle: 'System prompt', icon: 'instructions' },
+  'log.md': { title: 'Activity', subtitle: 'Operation log', icon: 'activity' },
+  'status.md': { title: 'Status', subtitle: 'Current project state', icon: 'status' },
+  'index.md': { title: 'Overview', subtitle: 'Project index', icon: 'overview' },
+  'README.md': { title: 'Read me', subtitle: 'Project guide', icon: 'readme' }
+};
+
+function coreDocumentLink(item) {
+  const document = CORE_DOCUMENTS[item.label] || { title: item.label, subtitle: 'Core document', icon: 'document' };
+  return `<a class="core-document ${active(item.path) ? 'active' : ''}" href="${item.path}"><span class="nav-icon core-icon">${NAV_ICONS[document.icon]}</span><span class="core-document-copy"><span class="core-document-title">${escapeHtml(document.title)}</span><span class="core-document-subtitle">${escapeHtml(document.subtitle)}</span></span></a>`;
+}
+
+function projectLink(item) {
+  return `<a class="nav-link project-link ${active(item.path) ? 'active' : ''}" href="${item.path}"><span class="nav-icon project-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)}</span></a>`;
+}
+
+function fileIcon(path) {
+  const name = path.split('/').pop().toLowerCase();
+  const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';
+  const types = {
+    sh: ['terminal', 'shell'], bash: ['terminal', 'shell'], zsh: ['terminal', 'shell'], fish: ['terminal', 'shell'], ps1: ['terminal', 'shell'],
+    conf: ['config', 'config'], cfg: ['config', 'config'], ini: ['config', 'config'], toml: ['config', 'config'], yaml: ['config', 'config'], yml: ['config', 'config'], json: ['config', 'config'], env: ['config', 'config'],
+    xlsx: ['spreadsheet', 'spreadsheet'], xls: ['spreadsheet', 'spreadsheet'], csv: ['spreadsheet', 'spreadsheet'], ods: ['spreadsheet', 'spreadsheet'],
+    pptx: ['presentation', 'presentation'], ppt: ['presentation', 'presentation'], odp: ['presentation', 'presentation'], key: ['presentation', 'presentation'],
+    png: ['image', 'image'], jpg: ['image', 'image'], jpeg: ['image', 'image'], gif: ['image', 'image'], webp: ['image', 'image'], svg: ['image', 'image'],
+    zip: ['archive', 'archive'], gz: ['archive', 'archive'], tgz: ['archive', 'archive'], bz2: ['archive', 'archive'], xz: ['archive', 'archive'], tar: ['archive', 'archive'],
+    js: ['code', 'code'], mjs: ['code', 'code'], cjs: ['code', 'code'], ts: ['code', 'code'], tsx: ['code', 'code'], jsx: ['code', 'code'], py: ['code', 'code'], rb: ['code', 'code'], go: ['code', 'code'], rs: ['code', 'code'], java: ['code', 'code'], c: ['code', 'code'], h: ['code', 'code'], cpp: ['code', 'code'], hpp: ['code', 'code'], css: ['code', 'code'], html: ['code', 'code'], sql: ['code', 'code']
+  };
+  const [icon, kind] = types[extension] || ['document', extension === 'md' ? 'markdown' : 'generic'];
+  return `<span class="nav-icon page-icon file-icon-${kind}">${NAV_ICONS[icon]}</span>`;
+}
+
 function treeNode(item) {
-  if (item.type === 'file') return `<a class="nav-link tree-link ${active(item.path) ? 'active' : ''}" href="${item.path}">${escapeHtml(item.label)}</a>`;
+  if (item.type === 'file') {
+    return `<a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}">${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a>`;
+  }
   return `<details class="tree-directory" ${containsCurrent(item.path) ? 'open' : ''}><summary><a href="${item.path}">${escapeHtml(item.label)}</a></summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
 }
 
@@ -226,9 +279,9 @@ async function loadPage() {
   document.querySelector('#stats').textContent = `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
   picker.innerHTML = data.projects.map(item => `<option value="${item.path}" ${item.path === data.project.path ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
   const navigation = data.catalog.length
-    ? `<p class="nav-label">Projects</p>${data.catalog.map(navLink).join('')}`
-    : `<p class="nav-label">Project tree</p><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
-  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p>${data.common.map(navLink).join('')}<hr class="nav-rule">${navigation}`;
+    ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
+    : `<p class="nav-label">Project pages</p><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
+  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
   const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
   const kicker = `${contextLabel} / ${documentData.name}`;
   documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);

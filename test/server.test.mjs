@@ -26,6 +26,14 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /function renderUserMarkdown\(element, content\)/);
   assert.match(script, /renderChatMarkdown\(element, content, '\/workspace\/index\.md'\)/);
   assert.match(script, /encodeURIComponent\(decodeURIComponent\(part\)\)/);
+  assert.match(script, /Project pages/);
+  assert.match(script, /Instructions', subtitle: 'System prompt'/);
+  assert.match(script, /Activity', subtitle: 'Operation log'/);
+  assert.match(script, /function projectLink\(item\)/);
+  assert.match(script, /class="nav-icon project-icon"/);
+  assert.match(script, /function fileIcon\(path\)/);
+  assert.match(script, /pptx: \['presentation', 'presentation'\]/);
+  assert.match(script, /xlsx: \['spreadsheet', 'spreadsheet'\]/);
   assert.match(html, /Check side effects with LLM/);
   assert.match(html, /id="todo-use-llm" type="checkbox" checked/);
   assert.match(script, /Briefly check this project for related side effects/);
