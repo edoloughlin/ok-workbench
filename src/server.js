@@ -694,7 +694,8 @@ const server = http.createServer(async (req, res) => {
       assertChatRequest(req); const body = await readJson(req); const message = String(body.message || '').trim(); if (!message) throw new Error('A chat message is required'); if (message.length > 50_000) throw new Error('Chat message is too long');
       const thread = await withThreadWrite(turnMatch[1], async () => {
         const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
-        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', content: message, createdAt: new Date().toISOString() }); await saveThread(current); return current;
+        const initiator = body.initiator === 'system' ? 'system' : 'user';
+        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, createdAt: new Date().toISOString() }); await saveThread(current); return current;
       }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
       const turnId = crypto.randomUUID().replace(/-/g, '');
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });

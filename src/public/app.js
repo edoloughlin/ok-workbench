@@ -370,7 +370,7 @@ async function applyTodo() {
     const sideEffectCheck = todoUi.useLlm.checked;
     const prompt = `I updated the task in ${activeTodo.path} (lines ${activeTodo.startLine}-${activeTodo.endLine}) to:\n\n${replacement}\n\nBriefly check this project for related side effects. Update only any task, status, or log items that genuinely need to stay consistent, then summarize what you found.${todoUi.prompt.value.trim() ? `\n\nAdditional instruction: ${todoUi.prompt.value.trim()}` : ''}`;
     closeTodo(); await loadPage(); refreshGitStatus();
-    if (sideEffectCheck) await streamChatTurn(prompt, { model: todoUi.model.value });
+    if (sideEffectCheck) { addChatMessage('user', prompt, false, new Date().toISOString(), { initiator: 'system' }); await streamChatTurn(prompt, { model: todoUi.model.value, initiator: 'system' }); }
   } catch (error) { alert(error.message || 'Could not update task'); }
   finally { todoUi.apply.disabled = false; }
 }
@@ -553,9 +553,9 @@ function scrollChatToLatest({ force = false } = {}) {
     if (force || chatFollowsActivity) chatUi.messages.scrollTop = chatUi.messages.scrollHeight;
   });
 }
-function messageHeader(role, error, createdAt, { model = '', effort = '' } = {}) {
+function messageHeader(role, error, createdAt, { model = '', effort = '', initiator = 'user' } = {}) {
   const header = document.createElement('header'); header.className = 'chat-message-header';
-  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? 'You' : error ? 'Error' : `${model || 'Model unavailable'} · ${effort || 'Default effort'}`;
+  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? (initiator === 'system' ? 'System' : 'You') : error ? 'Error' : `${model || 'Model unavailable'} · ${effort || 'Default effort'}`;
   const timestamp = document.createElement('time'); timestamp.className = 'message-time'; timestamp.dateTime = createdAt || ''; timestamp.textContent = formatThreadTime(createdAt);
   header.append(meta, timestamp); return header;
 }
@@ -568,7 +568,7 @@ function renderChatMessages(messages = [], threadSettings = {}) {
     if (!message.error && message.role === 'assistant') renderAssistantMarkdown(content, message.content || '');
     else if (!message.error && message.role === 'user') renderUserMarkdown(content, message.content || '');
     else content.textContent = message.content || '';
-    node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort }), content); chatUi.messages.append(node);
+    node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort, initiator: message.initiator }), content); chatUi.messages.append(node);
   }
   scrollChatToLatest({ force: true });
 }
@@ -657,7 +657,7 @@ async function cancelChatTurn() {
   }
   turn.abort.abort();
 }
-async function streamChatTurn(message, { model = chatUi.model.value } = {}) {
+async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread();
   const turn = { abort: new AbortController(), id: null, projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false };
@@ -665,7 +665,7 @@ async function streamChatTurn(message, { model = chatUi.model.value } = {}) {
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
   const assistantBody = addChatMessage('assistant', '', false, new Date().toISOString(), { model, effort: chatUi.effort.value }); let assistantText = ''; let projectCreated = false; let completed = false;
   try {
-    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
     if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');

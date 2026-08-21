@@ -282,9 +282,9 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-messages { min-height: 0; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; background: var(--paper); }
 .chat-empty { margin: auto 0; color: var(--muted); text-align: center; font-size: 12px; overflow-wrap: anywhere; }
 .chat-message { max-width: 92%; padding: 9px 12px; border: 1px solid var(--rule); border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-message.user { align-self: flex-end; border-color: transparent; background: var(--accent); color: #fff; }
-.chat-message.user a { color: #fff; text-decoration: underline; }
-.chat-message.user .message-meta, .chat-message.user .message-time { color: rgba(255,255,255,0.8); }
+.chat-message.user { align-self: flex-end; border-color: rgb(216, 227, 239); background: rgb(241, 246, 252); color: #000; }
+.chat-message.user a { color: #000; text-decoration: underline; }
+.chat-message.user .message-meta, .chat-message.user .message-time { color: #000; }
 .chat-message.assistant { align-self: flex-start; background: var(--panel); }
 .chat-message.error { align-self: stretch; color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 8%, var(--paper)); }
 .chat-message-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 4px; }
