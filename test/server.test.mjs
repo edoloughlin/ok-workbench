@@ -35,6 +35,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /data-create-entry="page"/);
   assert.match(script, /data-create-entry="directory"/);
   assert.match(script, /pendingEntryRename/);
+  assert.match(script, /form\.dataset\.saving = 'true'; pendingEntryRename = null; void loadPage\(\)/);
   assert.match(script, /class="nav-icon project-icon"/);
   assert.match(script, /function fileIcon\(path\)/);
   assert.match(script, /pptx: \['presentation', 'presentation'\]/);
