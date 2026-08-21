@@ -217,44 +217,27 @@ async function navigationTree(folder, isRoot = false, depth = 0) {
     if (await isIgnored(fullPath)) continue;
     const route = publicPath(fullPath);
     const exactIndex = indexedLinks.findIndex(link => link.path === route);
-    const descendantIndex = entry.isDirectory() ? indexedLinks.findIndex(link => link.path.startsWith(`${route}/`)) : -1;
-    const sourceIndex = exactIndex >= 0 ? exactIndex : descendantIndex;
-    const commonIndex = entry.isFile() ? COMMON_FILES.indexOf(entry.name) : -1;
 
     if (entry.isDirectory()) {
       candidates.push({
         type: 'directory',
         label: navigationLabel(exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name, 'directory'),
         path: route,
-        children: await navigationTree(fullPath, false, depth + 1),
-        commonIndex,
-        sourceIndex
+        children: await navigationTree(fullPath, false, depth + 1)
       });
     } else if (entry.isFile()) {
       candidates.push({
         type: 'file',
         label: exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name,
-        path: route,
-        commonIndex,
-        sourceIndex
+        path: route
       });
     }
   }
 
   return candidates.sort((a, b) => {
-    if (a.commonIndex >= 0 || b.commonIndex >= 0) {
-      if (a.commonIndex < 0) return 1;
-      if (b.commonIndex < 0) return -1;
-      return a.commonIndex - b.commonIndex;
-    }
-    if (a.sourceIndex >= 0 || b.sourceIndex >= 0) {
-      if (a.sourceIndex < 0) return 1;
-      if (b.sourceIndex < 0) return -1;
-      return a.sourceIndex - b.sourceIndex;
-    }
-    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+    if (a.type !== b.type) return a.type === 'file' ? -1 : 1;
     return a.label.localeCompare(b.label);
-  }).map(({ commonIndex, sourceIndex, ...item }) => item);
+  });
 }
 
 async function isProjectDirectory(directory) {
