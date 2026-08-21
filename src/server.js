@@ -51,6 +51,7 @@ const CHAT_STATE_DIR = chatStateDir();
 const CHAT_CSRF = crypto.randomBytes(32).toString('base64url');
 const DIFF_TOKENS = new Map();
 const GIT_RECOVERY = new Map();
+const ENTRY_RENAMES = new Map();
 const ACTIVE_TURNS = new Map();
 const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
@@ -428,6 +429,82 @@ async function createWorkspaceProject({ id: requestedId, title: requestedTitle, 
   return { id, path: id, location: `/workspace/${encodeURIComponent(id)}`, title, description, structure: 'OKF 0.2 project template' };
 }
 
+function entryTitle(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\r\n\[\]]/.test(value)) throw new Error('Name must be a short single line without brackets');
+  return value.trim();
+}
+function entrySlug(title) {
+  const slug = title.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80).replace(/-+$/, '');
+  if (!slug || !/^[a-z]/.test(slug)) throw new Error('Name must begin with a letter');
+  return slug;
+}
+function entryDocument(type, title) {
+  return `---\ntype: ${type === 'directory' ? 'Index' : 'Page'}\ntitle: ${JSON.stringify(title)}\ndescription: ${JSON.stringify(type === 'directory' ? `Index for ${title}.` : `Notes for ${title}.`)}\ntags: []\n---\n\n# ${title}\n`;
+}
+function retitleEntryDocument(content, title) {
+  return content.replace(/^title:.*$/m, `title: ${JSON.stringify(title)}`).replace(/^#\s+.*$/m, `# ${title}`);
+}
+function escapedRegex(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+async function projectEntryParent(project, requestedPath) {
+  if (project === 'workspace') throw new Error('Select a project before creating pages');
+  const root = await fs.realpath(projectRootForId(project));
+  const unresolved = safePath(String(requestedPath || '')); const parent = unresolved && await bundlePath(unresolved);
+  if (!parent || !(await isDirectory(parent)) || (parent !== root && !parent.startsWith(`${root}${path.sep}`))) throw new Error('Destination is outside the selected project');
+  const index = path.join(parent, 'index.md'); if (!(await exists(index))) throw new Error('Destination directory has no index.md');
+  return { root, parent, index };
+}
+async function createProjectEntry(project, body) {
+  const type = body.type; if (!['page', 'directory'].includes(type)) throw new Error('Choose a page or directory');
+  const { root, parent, index: parentIndex } = await projectEntryParent(project, body.parentPath);
+  const defaultTitle = type === 'directory' ? 'Untitled folder' : 'Untitled page'; const base = entrySlug(defaultTitle);
+  let slug = base; let target;
+  for (let suffix = 2; ; suffix++) {
+    target = path.join(parent, type === 'page' ? `${slug}.md` : slug);
+    if (!(await exists(target))) break;
+    slug = `${base}-${suffix}`;
+  }
+  const parentContent = await fs.readFile(parentIndex, 'utf8'); const linkTarget = type === 'page' ? `${slug}.md` : `${slug}/`;
+  try {
+    if (type === 'directory') { await fs.mkdir(target); await fs.writeFile(path.join(target, 'index.md'), entryDocument(type, defaultTitle), { encoding: 'utf8', flag: 'wx' }); }
+    else await fs.writeFile(target, entryDocument(type, defaultTitle), { encoding: 'utf8', flag: 'wx' });
+    await fs.writeFile(parentIndex, `${parentContent.replace(/\s*$/, '')}\n\n- [${defaultTitle}](${linkTarget})\n`, 'utf8');
+  } catch (error) { await fs.rm(target, { recursive: true, force: true }); throw error; }
+  const location = publicPath(target); const renameToken = crypto.randomBytes(18).toString('base64url');
+  ENTRY_RENAMES.set(renameToken, { project, location, type, expiresAt: Date.now() + 10 * 60_000 }); setTimeout(() => ENTRY_RENAMES.delete(renameToken), 10 * 60_000).unref();
+  return { type, title: defaultTitle, location, path: path.relative(root, target).split(path.sep).join('/'), renameToken };
+}
+async function renameProjectEntry(project, body) {
+  let saved = body.renameToken ? ENTRY_RENAMES.get(body.renameToken) : null;
+  if (body.renameToken && (!saved || saved.project !== project || saved.location !== body.path || saved.expiresAt < Date.now())) throw new Error('This item can no longer be renamed inline');
+  const title = entryTitle(body.name); const slug = entrySlug(title); const root = await fs.realpath(projectRootForId(project));
+  const unresolved = safePath(String(saved?.location || body.path || '')); const target = unresolved && await bundlePath(unresolved);
+  if (!target || (target !== root && !target.startsWith(`${root}${path.sep}`))) throw new Error('Item is outside the selected project');
+  if (!saved) {
+    const stat = await fs.stat(target); const type = stat.isDirectory() ? 'directory' : 'page';
+    if ((type === 'directory' && target === root) || (type === 'page' && (path.extname(target).toLowerCase() !== '.md' || path.basename(target) === 'index.md'))) throw new Error('This project item cannot be renamed');
+    saved = { project, location: publicPath(target), type };
+  }
+  const parent = path.dirname(target); const parentIndex = path.join(parent, 'index.md'); const oldName = path.basename(target); const extension = saved.type === 'page' ? '.md' : '';
+  const newName = `${slug}${extension}`; const renamed = path.join(parent, newName);
+  if (renamed !== target && await exists(renamed)) throw new Error(`An item named ${newName} already exists`);
+  const documentPath = saved.type === 'directory' ? path.join(target, 'index.md') : target; const originalDocument = await fs.readFile(documentPath, 'utf8'); const originalParent = await fs.readFile(parentIndex, 'utf8');
+  const oldLink = saved.type === 'directory' ? `${oldName}/` : oldName; const newLink = saved.type === 'directory' ? `${newName}/` : newName;
+  const linkPattern = new RegExp(`\\[[^\\]\\n]*\\]\\(${escapedRegex(oldLink)}\\)`);
+  let moved = false;
+  try {
+    if (renamed !== target) { await fs.rename(target, renamed); moved = true; }
+    const renamedDocument = saved.type === 'directory' ? path.join(renamed, 'index.md') : renamed;
+    await fs.writeFile(renamedDocument, retitleEntryDocument(originalDocument, title), 'utf8');
+    await fs.writeFile(parentIndex, linkPattern.test(originalParent) ? originalParent.replace(linkPattern, `[${title}](${newLink})`) : originalParent, 'utf8');
+  } catch (error) {
+    if (moved) await fs.rename(renamed, target).catch(() => {});
+    await fs.writeFile(documentPath, originalDocument, 'utf8').catch(() => {}); await fs.writeFile(parentIndex, originalParent, 'utf8').catch(() => {});
+    throw error;
+  }
+  if (body.renameToken) ENTRY_RENAMES.delete(body.renameToken);
+  return { type: saved.type, title, location: publicPath(renamed), path: path.relative(root, renamed).split(path.sep).join('/') };
+}
+
 async function explicitProjectContext(message, primaryProject) {
   const references = [...String(message).matchAll(/@([A-Za-z][A-Za-z0-9_-]*)(?:\/([^\s,;:()\]\[}]+))?/g)].slice(0, 4);
   const attached = [];
@@ -714,6 +791,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
     if (url.pathname === '/api/projects' && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createWorkspaceProject(await readJson(req))); }
+    const entryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries$/);
+    if (entryMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
+    if (entryMatch && req.method === 'PATCH') { assertChatRequest(req); return json(res, 200, await renameProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     const authMatch = url.pathname.match(/^\/api\/chat\/auth\/(openai-codex|github-copilot)\/start$/);

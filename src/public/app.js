@@ -8,6 +8,7 @@ const createProjectUi = {
 };
 let displayedDocument = null;
 let pageLoadSequence = 0;
+let pendingEntryRename = null;
 
 function routePath() {
   const clean = decodeURIComponent(location.pathname).replace(/\/+$/, '');
@@ -213,6 +214,16 @@ const NAV_ICONS = {
   readme: '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.5A3.5 3.5 0 0 1 8 3h4v16H8a3.5 3.5 0 0 0-3.5 2zM19.5 5.5A3.5 3.5 0 0 0 16 3h-4v16h4a3.5 3.5 0 0 1 3.5 2z"/></svg>'
 };
 
+const ENTRY_ACTION_ICONS = {
+  page: '<span class="entry-action-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 1.75h5l3 3v9.5h-8z"/><path d="M8.5 1.75v3h3"/></svg><span class="entry-action-plus">+</span></span>',
+  directory: '<span class="entry-action-icon" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M1.75 4.25h4l1.35 1.5h7.15v8H1.75z"/><path d="M1.75 4.25V2.75h4l1.35 1.5h7.15v1.5"/></svg><span class="entry-action-plus">+</span></span>'
+};
+
+function entryCreationActions(parentPath) {
+  const parent = escapeHtml(parentPath);
+  return `<span class="entry-creation-actions"><button type="button" data-create-entry="page" data-entry-parent="${parent}" title="Create page" aria-label="Create page">${ENTRY_ACTION_ICONS.page}</button><button type="button" data-create-entry="directory" data-entry-parent="${parent}" title="Create directory" aria-label="Create directory">${ENTRY_ACTION_ICONS.directory}</button></span>`;
+}
+
 const CORE_DOCUMENTS = {
   'AGENTS.md': { title: 'Instructions', subtitle: 'System prompt', icon: 'instructions' },
   'log.md': { title: 'Activity', subtitle: 'Operation log', icon: 'activity' },
@@ -248,9 +259,13 @@ function fileIcon(path) {
 
 function treeNode(item) {
   if (item.type === 'file') {
-    return `<a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}">${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a>`;
+    if (pendingEntryRename?.path === item.path) return `<form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}">${fileIcon(item.path)}<input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Page name"><span class="tree-inline-extension" aria-hidden="true">.md</span></form>`;
+    const renamable = item.path.split('/').pop() !== 'index.md';
+    return `<a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}" ${renamable ? 'data-entry-type="page"' : ''}>${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a>`;
   }
-  return `<details class="tree-directory" ${containsCurrent(item.path) ? 'open' : ''}><summary><a href="${item.path}">${escapeHtml(item.label)}</a></summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
+  if (pendingEntryRename?.path === item.path) return `<div class="tree-inline-directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}"><input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Directory name"></form></div>`;
+  const containsPendingEntry = pendingEntryRename?.path.startsWith(`${item.path}/`);
+  return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-entry-type="directory">${escapeHtml(item.label)}</a>${entryCreationActions(item.path)}</summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
 }
 
 function formatBytes(bytes) {
@@ -285,8 +300,9 @@ async function loadPage() {
   picker.innerHTML = data.projects.map(item => `<option value="${item.path}" ${item.path === data.project.path ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
   const navigation = data.catalog.length
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
-    : `<p class="nav-label">Project pages</p><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
+    : `<div class="nav-section-heading"><p class="nav-label">Project pages</p>${data.project.name === 'workspace' ? '' : entryCreationActions(data.project.path)}</div><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
   nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
+  if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
   const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
   const kicker = `${contextLabel} / ${documentData.name}`;
   documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
@@ -320,6 +336,36 @@ document.addEventListener('click', navigate);
 documentPane.addEventListener('click', handleTableInteraction);
 documentPane.addEventListener('keydown', handleTableInteraction);
 picker.addEventListener('change', () => { history.pushState({}, '', `${picker.value}/`); loadPage().catch(showError); });
+async function createProjectEntry(button) {
+  button.disabled = true;
+  try {
+    const response = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: button.dataset.createEntry, parentPath: button.dataset.entryParent }) });
+    const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not create item');
+    pendingEntryRename = { path: data.location, type: data.type, renameToken: data.renameToken }; await loadPage(); refreshGitStatus();
+  } catch (error) { button.disabled = false; alert(error.message || 'Could not create item'); }
+}
+async function beginEntryRename(anchor) {
+  pendingEntryRename = { path: anchor.getAttribute('href'), type: anchor.dataset.entryType }; await loadPage();
+}
+async function commitEntryRename(form) {
+  if (form.dataset.saving === 'true') return; const input = form.querySelector('input'); const name = input.value.trim();
+  if (!name) { pendingEntryRename = null; await loadPage(); return; }
+  form.dataset.saving = 'true'; input.disabled = true;
+  try {
+    const response = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: form.dataset.entryPath, name, renameToken: pendingEntryRename?.renameToken }) });
+    const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not rename item');
+    pendingEntryRename = null; await loadPage(); refreshGitStatus();
+  } catch (error) { form.dataset.saving = 'false'; input.disabled = false; alert(error.message || 'Could not rename item'); input.focus(); input.select(); }
+}
+nav.addEventListener('click', event => {
+  const button = event.target.closest('[data-create-entry]');
+  if (button) { event.preventDefault(); event.stopPropagation(); void createProjectEntry(button); return; }
+  const entry = event.target.closest('[data-entry-type].active');
+  if (entry) { event.preventDefault(); event.stopPropagation(); void beginEntryRename(entry); }
+});
+nav.addEventListener('submit', event => { const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); void commitEntryRename(form); });
+nav.addEventListener('keydown', event => { if (event.key !== 'Escape') return; const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });
+nav.addEventListener('focusout', event => { const form = event.target.closest('.tree-inline-rename'); if (!form || form.dataset.saving === 'true' || event.relatedTarget && form.contains(event.relatedTarget)) return; void commitEntryRename(form); });
 function suggestedProjectId(title) { return title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 64); }
 function closeCreateProject() { createProjectUi.dialog.close(); }
 function openCreateProject() {

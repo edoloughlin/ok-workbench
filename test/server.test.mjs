@@ -31,6 +31,9 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /Instructions', subtitle: 'System prompt'/);
   assert.match(script, /Activity', subtitle: 'Operation log'/);
   assert.match(script, /function projectLink\(item\)/);
+  assert.match(script, /data-create-entry="page"/);
+  assert.match(script, /data-create-entry="directory"/);
+  assert.match(script, /pendingEntryRename/);
   assert.match(script, /class="nav-icon project-icon"/);
   assert.match(script, /function fileIcon\(path\)/);
   assert.match(script, /pptx: \['presentation', 'presentation'\]/);
@@ -91,5 +94,23 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.equal(created.status, 201); assert.deepEqual(await created.json(), { id: 'new-project', path: 'new-project', location: '/workspace/new-project', title: 'New project', description: 'Created from the project dialog.', structure: 'OKF 0.2 project template' });
     assert.match(await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8'), /description: "Created from the project dialog\."/);
     assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /\[New project\]\(new-project\/\)/);
+    const untitledPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'page', parentPath: '/workspace/new-project' }) });
+    assert.equal(untitledPage.status, 201); const untitledPageBody = await untitledPage.json(); assert.equal(untitledPageBody.location, '/workspace/new-project/untitled-page.md'); assert.ok(untitledPageBody.renameToken);
+    const renamedPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: untitledPageBody.location, name: 'Research notes', renameToken: untitledPageBody.renameToken }) });
+    assert.equal(renamedPage.status, 200); assert.equal((await renamedPage.json()).location, '/workspace/new-project/research-notes.md');
+    assert.match(await readFile(path.join(workspace, 'new-project', 'research-notes.md'), 'utf8'), /# Research notes/);
+    const renamedExistingPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: '/workspace/new-project/research-notes.md', name: 'Collected research' }) });
+    assert.equal(renamedExistingPage.status, 200); assert.equal((await renamedExistingPage.json()).location, '/workspace/new-project/collected-research.md');
+    assert.match(await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8'), /\[Collected research\]\(collected-research\.md\)/);
+    const untitledDirectory = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'directory', parentPath: '/workspace/new-project' }) });
+    assert.equal(untitledDirectory.status, 201); const untitledDirectoryBody = await untitledDirectory.json();
+    const renamedDirectory = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: untitledDirectoryBody.location, name: 'Reference material', renameToken: untitledDirectoryBody.renameToken }) });
+    assert.equal(renamedDirectory.status, 200); assert.equal((await renamedDirectory.json()).location, '/workspace/new-project/reference-material');
+    assert.match(await readFile(path.join(workspace, 'new-project', 'reference-material', 'index.md'), 'utf8'), /# Reference material/);
+    assert.match(await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8'), /\[Reference material\]\(reference-material\/\)/);
+    const renamedExistingDirectory = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: '/workspace/new-project/reference-material', name: 'Source material' }) });
+    assert.equal(renamedExistingDirectory.status, 200); assert.equal((await renamedExistingDirectory.json()).location, '/workspace/new-project/source-material');
+    const nestedPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'page', parentPath: '/workspace/new-project/source-material' }) });
+    assert.equal(nestedPage.status, 201); assert.equal((await nestedPage.json()).location, '/workspace/new-project/source-material/untitled-page.md');
   } finally { child.kill(); }
 });
