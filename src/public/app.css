@@ -146,7 +146,8 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .tree-inline-extension { flex: none; margin-left: -4px; color: var(--muted); font: 500 12px var(--font-mono); }
 
 /* ---------------- Document ---------------- */
-.document { width: min(1200px, calc(100vw - 240px)); min-height: calc(100vh - var(--topbar-h)); padding: 52px clamp(40px, 7vw, 72px) 100px; background: var(--paper); }
+.document { width: min(1200px, calc(100vw - 240px)); min-height: calc(100vh - var(--topbar-h)); padding: 0 clamp(40px, 7vw, 72px) 100px; background: var(--paper); }
+.document::before { display: block; height: 52px; content: ''; }
 .document > :first-child { margin-top: 0; }
 .loading { color: var(--muted); }
 .doc-kicker { margin: 0 0 20px; color: var(--accent); font: 600 11px var(--font-ui); text-transform: uppercase; letter-spacing: 0.08em; }
@@ -172,7 +173,7 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .document .task-completed .task-content, .document .task-canceled .task-content { color: var(--muted); }
 .document .task-canceled .task-content { text-decoration: line-through; text-decoration-color: var(--rule-strong); }
 .document table { width: 100%; margin: 24px 0; border-collapse: collapse; font-size: 14px; }
-.document th { text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; user-select: none; position: relative; padding-right: 24px; }
+.document th { position: sticky; z-index: 2; top: var(--topbar-h); padding-right: 24px; color: var(--muted); background: var(--panel); box-shadow: inset 0 -1px var(--rule-strong); text-align: left; font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; }
 .document th::after { content: '⇅'; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 10px; line-height: 1; }
 .document th[aria-sort="ascending"]::after { content: '↑'; color: var(--accent); }
 .document th[aria-sort="descending"]::after { content: '↓'; color: var(--accent); }
@@ -210,7 +211,8 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
   .create-project-button { margin-right: 10px; }
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: relative; top: 0; height: auto; max-height: 32vh; border-right: 0; border-bottom: 1px solid var(--rule); }
-  .document { width: 100%; min-height: 0; padding: 36px 24px 70px; }
+  .document { width: 100%; min-height: 0; padding: 0 24px 70px; }
+  .document::before { height: 36px; }
 }
 
 /* ---------------- Project creation ---------------- */
@@ -382,6 +384,7 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
   .sidebar { position: relative; top: auto; height: auto; min-height: 0; }
   .workspace { height: 100%; min-height: 0; }
   .workspace > .document { height: 100%; min-height: 0; overflow: auto; }
+  .document th { top: 0; }
   /* The right dock is viewport-anchored. Dragging its splitter changes only
      this width, never the position of its right edge. */
   #app-layout:not(.chat-collapsed) { --right-chat-size: clamp(320px, var(--chat-size), 720px); }
