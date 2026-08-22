@@ -5,6 +5,14 @@ the filing up to date**. You talk to a project-scoped assistant; it reads,
 writes, and cross-links the relevant documents while keeping current status and
 history aligned.
 
+**OK Workbench is for**
+
+- **Solo builders and researchers** juggling several long-running projects.
+- **People who want AI leverage without opaque AI memory.** Everything durable
+  stays in files they can inspect.
+- **Anyone who wants a local wiki with an unusually diligent librarian.** Chat
+  is helpful, but the knowledge remains useful without it.
+
 The knowledge itself remains ordinary Markdown on your machine. You can browse
 it without configuring an AI, edit it in any text editor, version it with Git,
 and move the whole workspace without exporting from a proprietary database.
@@ -29,29 +37,30 @@ project-scoped chat on the right.*
 | **Custom local tools** | Add policy-controlled Python or Node.js scripts for integrations and repeatable workflows. |
 | **Sandboxed writes** | File-changing tools fail closed unless the platform isolation backend is available. |
 
-## A workspace that tells you where to resume
+## Resume work from one clear next action
 
 OK Workbench is designed as a planning partner or coach. Each project has a
 small set of living core documents:
 
 - **`index.md`** maps the project and links to its important concepts.
-- **`status.md`** answers “what should I do next?” without making you reconstruct
-  the answer from an old conversation.
+- **`status.md`** identifies one next action without making you reconstruct the
+  answer from an old conversation.
 - **`log.md`** preserves dated detail while status stays concise.
-- **`AGENTS.md`** tells the assistant how to work in this particular project.
+- **`AGENTS.md`** tells the assistant how to work in this particular project,
+  while overall workbench rules are kept in the top level `AGENTS.md`.
 
 ![A project status page with one next action, the latest completed work, a blocker, and later tasks](images/project-status-example.png)
 
 *Status is deliberately small: one immediate action, one latest outcome,
 explicit blockers, and a short ordered backlog.*
 
-The detailed history lives separately in `log.md`. End a session with “log what
-we did and update the status,” and the assistant can carry the durable result
-forward. On the next visit, it reads the same files you do.
+The detailed history lives separately in `log.md`. At the end of a session, ask
+the assistant to log the completed work and update status. On your next visit,
+the assistant reads the same files that you read.
 
-This separation matters. Status is the fast “resume here” view; the log is the
-audit trail. If they conflict, the assistant is instructed to flag the gap
-rather than inventing a plausible history.
+This separation matters. Use status as the fast resume view and the log as the
+audit trail. If they conflict, project instructions require the assistant to
+flag the gap rather than invent a plausible history.
 
 ## Update tasks without leaving the page
 
@@ -65,7 +74,7 @@ tasks, status, or log entries.
 *The task remains Markdown; the popover is a focused editor for that source
 line, with an optional consistency check afterward.*
 
-## A wiki with an organising spine
+## Build a navigable project wiki
 
 Under the planning layer, OK Workbench is a local wiki. The browser turns
 ordinary links and directories into project navigation, while the files remain
@@ -86,7 +95,7 @@ That structure gives the assistant a reliable map. It can discover which files
 belong together and update a decision, task list, status, and log as one
 coherent change instead of leaving stale copies around the project.
 
-## Catch drift, then reconcile it deliberately
+## Review external changes before you reconcile them
 
 Markdown-first projects are often edited by more than one tool. OK Workbench
 monitors the selected project for filesystem changes and collects the affected
@@ -97,16 +106,16 @@ turn that reviews the accumulated batch and updates related state where needed.
 | --- | --- |
 | ![A change notification listing project files modified outside the current turn](images/project-drift-detection.png) | ![A system-initiated housekeeping message listing the changed files to review](images/automatic-housekeeping-example.png) |
 
-This is intentionally visible and user-triggered. The file watcher does not
-silently rewrite project knowledge in the background; it tells you what changed
-and lets you decide when the assistant should assess the consequences.
+This flow stays visible and user-triggered. The file watcher does not silently
+rewrite project knowledge in the background. It tells you what changed and lets
+you decide when the assistant should assess the consequences.
 
 ## Review every change as a Git diff
 
 AI-managed files only work if the AI's work is easy to inspect. The changes
 view shows the selected project's unstaged changes, staged changes, and latest
-commit. Paths are project-relative, and diffs can be viewed side by side or
-inline with different colour palettes.
+commit. Paths are project-relative. You can view diffs side by side or inline
+with different colour palettes.
 
 ![The changed-files dialog showing a project-scoped side-by-side Git diff](images/changed-files-example.png)
 
@@ -117,7 +126,7 @@ You can unstage a selected file or revert selected working-tree changes from the
 same review flow. Git operations use a pathspec scoped to the current project,
 so reviewing one project does not turn into a workspace-wide discard operation.
 
-## Chat stays attached to the project
+## Keep chat in project context
 
 Chat is optional and project-scoped. Each project can retain its own provider,
 model, effort, and conversation preferences. Multiple turns can continue at
@@ -126,13 +135,14 @@ once while you browse another page or project.
 Long-running work has explicit liveness states: tool start/completion, elapsed
 time, quiet-period messaging, retry status, and per-turn cancellation. Finished
 background turns create notifications that return to the exact response.
-Reasoning-model thinking can be shown as transient progress when enabled, but it
-is cleared when normal response text begins and is never saved in thread history.
+Reasoning-model thinking can appear as transient progress when you enable it.
+When normal response text begins, OK Workbench clears the thinking text and
+never saves it in thread history.
 
 Chat transcripts and provider credentials live in application state outside the
 workspace. Browsing the wiki does not require provider credentials at all.
 
-## Bring real project files with you
+## Add source documents to a project
 
 A Markdown knowledge base still needs to work with reports, spreadsheets, and
 slide decks. Store those files beside the project notes and the assistant can
@@ -148,7 +158,7 @@ understanding, chart interpretation, or faithful document rendering. The useful
 pattern is to keep the original file as evidence, extract enough text to search
 or summarise it, and link the resulting concept back to its source.
 
-## Extend the workspace with your own tools
+## Run custom workspace tools
 
 Executable Python 3 and Node.js scripts placed in `tools/` or a project's
 `tools/` directory become assistant-callable workspace tools. An adjacent JSON
@@ -163,7 +173,7 @@ This provides a controlled path to issue trackers, exporters, fetchers, and
 other local automation without turning every chat turn into unrestricted command
 execution.
 
-## Local and reviewable by design
+## Protect local project data
 
 Several boundaries keep the model's file access narrower than the application
 around it:
@@ -174,22 +184,14 @@ around it:
 - File-changing model tools run inside Bubblewrap on Linux or Seatbelt on macOS
   with a cleared environment, private temporary directory, and no network by
   default.
-- If the supported sandbox cannot start, mutating tools are disabled rather than
-  run with weaker isolation.
-- Git review and recovery actions are scoped to the selected project.
+- If the supported sandbox cannot start, OK Workbench disables mutating tools
+  rather than run them with weaker isolation.
+- Git review and recovery actions target only the selected project.
 
 OK Workbench is still a local application, not a security boundary against a
 malicious process already running as the same user. The full boundaries and
 known limits are documented in the [threat model](THREAT-MODEL.md) and
 [macOS sandbox guide](MACOS-SANDBOX.md).
-
-## Who it is for
-
-- **Solo builders and researchers** juggling several long-running projects.
-- **People who want AI leverage without opaque AI memory.** Everything durable
-  stays in files they can inspect.
-- **Anyone who wants a local wiki with an unusually diligent librarian.** Chat
-  is helpful, but the knowledge remains useful without it.
 
 ## Getting started
 
