@@ -279,8 +279,19 @@ async function applyPatch({ path: relative, content }) {
   await fs.writeFile(target, content, 'utf8'); return { path: safe, bytes: Buffer.byteLength(content) };
 }
 async function directoryExists(target) { return fs.stat(target).then(value => value.isDirectory()).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error)); }
-async function applyProjectUpdate({ changes }) {
+function normalizeMarkdown(value) { return String(value).replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd(); }
+async function existingContent(relative) {
+  const { target } = await targetFor(relative);
+  return fs.readFile(target, 'utf8').catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+}
+function appendProjectLog(content, summary) {
+  const date = new Date().toISOString().slice(0, 10);
+  return `${String(content || '').trimEnd()}\n\n## ${date}\n\n- ${summary.trim()}\n`;
+}
+async function applyProjectUpdate({ kind, summary, changes }) {
   if (!Array.isArray(changes) || !changes.length || changes.length > 64) throw new Error('Provide 1–64 workspace file changes');
+  if (!['correction', 'substantive'].includes(kind)) throw new Error('Project update kind must be correction or substantive');
+  if (kind === 'substantive' && (typeof summary !== 'string' || !summary.trim() || summary.trim().length > 280)) throw new Error('Substantive project updates need a summary of up to 280 characters');
   const prepared = new Map();
   for (const change of changes) {
     if (!change || typeof change.content !== 'string' || change.content.length > 1024 * 1024) throw new Error('Each workspace change needs text content under 1 MiB');
@@ -288,16 +299,29 @@ async function applyProjectUpdate({ changes }) {
     if (prepared.has(safe)) throw new Error(`Duplicate workspace change: ${safe}`);
     prepared.set(safe, change.content);
   }
-  const projects = new Set();
+  const original = new Map(await Promise.all([...prepared.keys()].map(async safe => [safe, await existingContent(safe)])));
+  const changed = new Set([...prepared].filter(([safe, content]) => original.get(safe) === null || normalizeMarkdown(original.get(safe)) !== normalizeMarkdown(content)).map(([safe]) => safe));
+  const projects = new Set(); const newDirectories = new Set();
   for (const safe of prepared.keys()) {
     const parts = safe.split('/'); if (parts.length < 2) continue;
     const project = parts[0];
     if (prepared.has(`${project}/index.md`) || await fs.stat(path.join(ROOT, project, 'index.md')).then(item => item.isFile()).catch(() => false)) projects.add(project);
     for (let directory = parts.slice(0, -1).join('/'); directory; directory = directory.split('/').slice(0, -1).join('/')) {
-      if (!(await directoryExists(path.join(ROOT, directory))) && !prepared.has(`${directory}/index.md`)) throw new Error(`New directory ${directory} requires ${directory}/index.md in the same update`);
+      if (!(await directoryExists(path.join(ROOT, directory)))) { newDirectories.add(directory); if (!prepared.has(`${directory}/index.md`)) throw new Error(`New directory ${directory} requires ${directory}/index.md in the same update`); }
     }
   }
-  for (const project of projects) for (const name of ['index.md', 'log.md', 'status.md']) if (!prepared.has(`${project}/${name}`)) throw new Error(`OKF project update requires ${project}/${name} in the same update`);
+  for (const project of projects) {
+    const meaningfulPaths = [...changed].filter(safe => safe.startsWith(`${project}/`) && safe !== `${project}/log.md`);
+    if (!meaningfulPaths.length) continue;
+    if (kind === 'correction' && meaningfulPaths.length > 3) throw new Error(`Correction updates may change at most 3 meaningful files in ${project}; use a substantive update instead`);
+    if (kind !== 'substantive') continue;
+    const structural = [...newDirectories].some(directory => directory === project || directory.startsWith(`${project}/`)) || meaningfulPaths.some(safe => original.get(safe) === null && path.posix.dirname(safe) === project);
+    const missing = [];
+    if (!changed.has(`${project}/status.md`)) missing.push(`${project}/status.md`);
+    if (structural && !changed.has(`${project}/index.md`)) missing.push(`${project}/index.md`);
+    if (missing.length) throw new Error(`Substantive project update requires meaningful changes to: ${missing.join(', ')}. The summary is recorded in ${project}/log.md automatically.`);
+    prepared.set(`${project}/log.md`, appendProjectLog(prepared.get(`${project}/log.md`) ?? await existingContent(`${project}/log.md`), summary));
+  }
   const written = [];
   for (const [safe, content] of prepared) written.push(await applyPatch({ path: safe, content }));
   return { paths: written.map(item => item.path), bytes: written.reduce((sum, item) => sum + item.bytes, 0) };
