@@ -108,13 +108,14 @@ test('worker creates and registers a discoverable top-level project', async () =
     await assert.rejects(worker.applyProjectUpdate({ kind: 'substantive', summary: 'Added evidence', changes: [
       { path: 'planning/index.md', content: index }, { path: 'planning/log.md', content: log }, { path: 'planning/status.md', content: status }, { path: 'planning/references/note.md', content: 'evidence\n' }
     ] }), /New directory planning\/references requires planning\/references\/index.md/);
-    const update = await worker.applyProjectUpdate({ kind: 'substantive', summary: 'Added initial evidence', changes: [
+    const summary = `Added initial evidence: ${'useful detail '.repeat(24)}`;
+    const update = await worker.applyProjectUpdate({ kind: 'substantive', summary, changes: [
       { path: 'planning/index.md', content: `${index}\n* [Evidence](references/index.md)\n` },
       { path: 'planning/status.md', content: status.replace('No substantive work recorded yet.', 'Added initial evidence.') },
       { path: 'planning/references/index.md', content: '# References\n\n* [Evidence note](note.md)\n' },
       { path: 'planning/references/note.md', content: 'evidence\n' }
     ] });
     assert.deepEqual(update.paths, ['planning/index.md', 'planning/status.md', 'planning/references/index.md', 'planning/references/note.md', 'planning/log.md']);
-    assert.match(await readFile(path.join(workspace, 'planning', 'log.md'), 'utf8'), /Added initial evidence/);
+    assert.match(await readFile(path.join(workspace, 'planning', 'log.md'), 'utf8'), new RegExp(summary.trim()));
   } finally { if (savedTemplate === undefined) delete process.env.OK_WORKBENCH_PROJECT_TEMPLATE; else process.env.OK_WORKBENCH_PROJECT_TEMPLATE = savedTemplate; }
 });

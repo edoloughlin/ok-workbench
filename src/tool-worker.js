@@ -291,7 +291,7 @@ function appendProjectLog(content, summary) {
 async function applyProjectUpdate({ kind, summary, changes }) {
   if (!Array.isArray(changes) || !changes.length || changes.length > 64) throw new Error('Provide 1–64 workspace file changes');
   if (!['correction', 'substantive'].includes(kind)) throw new Error('Project update kind must be correction or substantive');
-  if (kind === 'substantive' && (typeof summary !== 'string' || !summary.trim() || summary.trim().length > 280)) throw new Error('Substantive project updates need a summary of up to 280 characters');
+  if (kind === 'substantive' && (typeof summary !== 'string' || !summary.trim())) throw new Error('Substantive project updates need a summary');
   const prepared = new Map();
   for (const change of changes) {
     if (!change || typeof change.content !== 'string' || change.content.length > 1024 * 1024) throw new Error('Each workspace change needs text content under 1 MiB');
