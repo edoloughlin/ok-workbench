@@ -8,7 +8,13 @@
     "ok-workbench": "dist/bin/ok-workbench.mjs",
     "okf-workbench": "dist/bin/ok-workbench.mjs"
   },
-  "files": ["dist/", "seed/", "README.md", "LICENSE"],
+  "files": [
+    "dist/",
+    "seed/",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
   "scripts": {
     "build": "npm run docs:sync && node scripts/build.mjs",
     "docs:sync": "node scripts/sync-doc-templates.mjs",
@@ -18,14 +24,27 @@
     "pack": "npm pack --dry-run",
     "prepublishOnly": "npm run build && npm test && npm run pack"
   },
-  "engines": { "node": ">=22.19.0" },
-  "keywords": ["okf", "workspace", "llm", "project-management"],
-  "repository": { "type": "git", "url": "git+https://github.com/edoloughlin/ok-workbench.git" },
-  "bugs": { "url": "https://github.com/edoloughlin/ok-workbench/issues" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "okf",
+    "workspace",
+    "llm",
+    "project-management"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edoloughlin/ok-workbench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/edoloughlin/ok-workbench/issues"
+  },
   "homepage": "https://edoloughlin.github.io/ok-workbench/",
   "dependencies": {
     "@earendil-works/pi-ai": "^0.84.2",
     "@earendil-works/pi-coding-agent": "^0.84.2",
+    "mermaid": "11.17.0",
     "typebox": "^1.3.7"
   }
 }

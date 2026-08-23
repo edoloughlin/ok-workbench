@@ -5,3 +5,7 @@ It does not include copied upstream specification text, code, templates, or
 private workflows. The referenced upstream Knowledge Catalog repository is
 published by GoogleCloudPlatform under Apache-2.0; consult its OKF
 specification and LICENSE for the authoritative format and license terms.
+
+The browser bundle also includes Mermaid v11.17.0 under the MIT License.
+Its license and notices for its bundled production dependencies are included
+with the built distribution and described in THIRD-PARTY-NOTICES.md.

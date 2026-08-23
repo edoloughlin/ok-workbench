@@ -9,6 +9,34 @@ const createProjectUi = {
 let displayedDocument = null;
 let pageLoadSequence = 0;
 let pendingEntryRename = null;
+let mermaidModulePromise = null;
+
+function loadMermaid() {
+  mermaidModulePromise ||= import('/vendor/mermaid/mermaid.esm.min.mjs').then(({ default: mermaid }) => {
+    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', flowchart: { htmlLabels: false }, theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });
+    return mermaid;
+  });
+  return mermaidModulePromise;
+}
+
+async function renderMermaidDiagrams(container) {
+  const diagrams = Array.from(container.querySelectorAll('.mermaid-diagram:not([data-mermaid-rendered])'));
+  if (!diagrams.length) return;
+  const sources = new Map(diagrams.map(diagram => [diagram, diagram.textContent]));
+  diagrams.forEach(diagram => { diagram.dataset.mermaidRendered = 'pending'; });
+  try {
+    const mermaid = await loadMermaid();
+    await mermaid.run({ nodes: diagrams });
+  } catch (error) {
+    console.warn('Could not render Mermaid diagram.', error);
+    for (const diagram of diagrams) {
+      diagram.replaceChildren(document.createTextNode(sources.get(diagram)));
+      diagram.classList.add('mermaid-diagram-error');
+      const message = document.createElement('p'); message.className = 'mermaid-diagram-message'; message.setAttribute('role', 'alert'); message.textContent = 'Diagram could not be rendered; showing Mermaid source.';
+      diagram.before(message);
+    }
+  }
+}
 
 function routePath() {
   const clean = decodeURIComponent(location.pathname).replace(/\/+$/, '');
@@ -180,7 +208,7 @@ function renderMarkdown(markdown, sourcePath) {
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) { i++; continue; }
-    if (/^```/.test(line)) { const lang = line.slice(3).trim() || 'plaintext'; const block = []; while (++i < lines.length && !/^```/.test(lines[i])) block.push(lines[i]); i++; output.push(`<pre><code class="language-${escapeHtml(lang)}">${highlightCode(block.join('\n'), lang)}</code></pre>`); continue; }
+    if (/^```/.test(line)) { const lang = line.slice(3).trim() || 'plaintext'; const block = []; while (++i < lines.length && !/^```/.test(lines[i])) block.push(lines[i]); i++; const source = block.join('\n'); output.push(lang.toLowerCase() === 'mermaid' ? `<pre class="mermaid mermaid-diagram">${escapeHtml(source)}</pre>` : `<pre><code class="language-${escapeHtml(lang)}">${highlightCode(source, lang)}</code></pre>`); continue; }
     const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = heading[2].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath)}</h${level}>`); i++; continue; }
     if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
@@ -306,6 +334,7 @@ async function loadPage() {
   const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
   const kicker = `${contextLabel} / ${documentData.name}`;
   documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
+  void renderMermaidDiagrams(documentPane);
   if (typeof chatProjectChanged === 'function') chatProjectChanged(data.project).catch(error => setChatStatus(error.message));
   if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block: 'start' }); else { documentPane.scrollTop = 0; scrollTo(0, 0); }
   } finally {
@@ -662,6 +691,7 @@ function renderChatMarkdown(element, content, sourcePath) {
   // not accept raw HTML from a model.
   element.classList.add('chat-markdown');
   element.innerHTML = renderMarkdown(content, sourcePath);
+  void renderMermaidDiagrams(element).then(() => scrollChatToLatest());
 }
 function renderAssistantMarkdown(element, content) { renderChatMarkdown(element, content, '/workspace/index.md'); }
 function renderUserMarkdown(element, content) {

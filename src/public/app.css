@@ -161,6 +161,11 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .document code { padding: 2px 5px; color: var(--ink); background: var(--code-bg); border-radius: 4px; font: 13px var(--font-mono); }
 .document pre { display: block; overflow: auto; width: fit-content; min-width: min(72ch, 100%); max-width: 100%; padding: 16px 18px; color: var(--ink); border-radius: 8px; border: 1px solid var(--rule); background: var(--code-bg); }
 .document pre code { padding: 0; color: inherit; background: transparent; }
+.document .mermaid-diagram { width: 100%; min-height: 80px; white-space: pre; }
+.document .mermaid-diagram:not(.mermaid-diagram-error) { display: grid; place-items: center; white-space: normal; }
+.mermaid-diagram svg { display: block; max-width: 100%; height: auto; }
+.mermaid-diagram-message { margin: 16px 0 -16px; color: var(--danger); font-size: 13px; }
+.document .mermaid-diagram-error { border-color: color-mix(in srgb, var(--danger) 45%, var(--rule)); }
 .document blockquote { margin: 24px 0; padding: 2px 18px; border-left: 3px solid var(--rule-strong); color: var(--muted); }
 .document ul.task-list { padding-left: 0; list-style: none; }
 .document ul.task-list > li:not(.task-item) { position: relative; padding-left: 29px; }
@@ -352,6 +357,8 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-markdown pre { overflow: auto; margin: 8px 0; padding: 9px; border: 1px solid var(--rule); border-radius: 8px; background: var(--code-bg); color: var(--ink); white-space: pre; }
 .chat-markdown code { padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--rule-strong) 40%, transparent); font: 11px var(--font-mono); }
 .chat-markdown pre code { padding: 0; background: transparent; }
+.chat-markdown .mermaid-diagram { display: grid; place-items: center; min-height: 60px; white-space: normal; }
+.chat-markdown .mermaid-diagram-error { display: block; white-space: pre; border-color: color-mix(in srgb, var(--danger) 45%, var(--rule)); }
 .chat-markdown blockquote { padding-left: 9px; border-left: 2px solid var(--accent); color: var(--muted); }
 .chat-markdown a { color: var(--link); }
 .chat-tool-activity { margin: 0; padding: 4px 8px; color: var(--muted); border-left: 2px solid var(--accent); font: 11px var(--font-mono); }
