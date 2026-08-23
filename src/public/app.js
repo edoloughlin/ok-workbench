@@ -10,6 +10,38 @@ let displayedDocument = null;
 let pageLoadSequence = 0;
 let pendingEntryRename = null;
 let mermaidModulePromise = null;
+const sectionPreview = document.createElement('aside');
+sectionPreview.className = 'section-preview'; sectionPreview.setAttribute('role', 'tooltip'); sectionPreview.hidden = true;
+sectionPreview.innerHTML = '<span class="section-preview-number"></span><span class="section-preview-title"></span>';
+document.body.append(sectionPreview);
+let sectionPreviewTimer = null;
+
+function dismissSectionPreview() { clearTimeout(sectionPreviewTimer); sectionPreviewTimer = setTimeout(() => { sectionPreview.hidden = true; }, 90); }
+function positionSectionPreview(x, y) {
+  const gap = 14; const padding = 10; const rect = sectionPreview.getBoundingClientRect();
+  sectionPreview.style.left = `${Math.max(padding, Math.min(x + gap, innerWidth - rect.width - padding))}px`;
+  sectionPreview.style.top = `${Math.max(padding, Math.min(y + gap, innerHeight - rect.height - padding))}px`;
+}
+function showSectionPreview(reference, x, y) {
+  clearTimeout(sectionPreviewTimer);
+  sectionPreview.querySelector('.section-preview-number').textContent = reference.dataset.sectionNumber;
+  sectionPreview.querySelector('.section-preview-title').textContent = reference.dataset.sectionMissing === 'true' ? 'Heading not found in this document; it may refer to another document.' : reference.dataset.sectionTitle;
+  sectionPreview.hidden = false; positionSectionPreview(x, y);
+}
+documentPane.addEventListener('pointerover', event => {
+  const reference = event.target.closest('.section-reference'); if (!reference || !documentPane.contains(reference)) return;
+  showSectionPreview(reference, event.clientX, event.clientY);
+});
+documentPane.addEventListener('pointerout', event => {
+  const reference = event.target.closest('.section-reference'); if (reference && !reference.contains(event.relatedTarget) && !sectionPreview.contains(event.relatedTarget)) dismissSectionPreview();
+});
+documentPane.addEventListener('focusin', event => {
+  const reference = event.target.closest('.section-reference'); if (!reference) return;
+  const rect = reference.getBoundingClientRect(); showSectionPreview(reference, rect.left, rect.bottom);
+});
+documentPane.addEventListener('focusout', event => { if (event.target.closest('.section-reference') && !sectionPreview.contains(event.relatedTarget)) dismissSectionPreview(); });
+sectionPreview.addEventListener('pointerenter', () => clearTimeout(sectionPreviewTimer));
+sectionPreview.addEventListener('pointerleave', dismissSectionPreview);
 
 function loadMermaid() {
   mermaidModulePromise ||= import('/vendor/mermaid/mermaid.esm.min.mjs').then(({ default: mermaid }) => {
@@ -47,16 +79,20 @@ function escapeHtml(value) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
-function inline(value, sourcePath) {
-  const codeParts = [];
-  let result = escapeHtml(value).replace(/`([^`]+)`/g, (_, code) => {
-    codeParts.push(`<code>${code}</code>`); return `\u0000${codeParts.length - 1}\u0000`;
+function inline(value, sourcePath, sectionHeadings = new Map()) {
+  const protectedParts = [];
+  const protect = markup => { protectedParts.push(markup); return `\u0000${protectedParts.length - 1}\u0000`; };
+  let result = escapeHtml(value).replace(/`([^`]+)`/g, (_, code) => protect(`<code>${code}</code>`));
+  result = result.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<img alt="${label}" src="${linkHref(href, sourcePath, true)}">`));
+  result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<a href="${linkHref(href, sourcePath)}"${externalLinkAttributes(href)}>${label}</a>`));
+  result = result.replace(/§\s*(\d+(?:\.\d+)*)\b/g, (reference, number) => {
+    const heading = sectionHeadings.get(number);
+    if (!heading) return `<span class="section-reference section-reference-missing" data-section-number="${number}" data-section-missing="true" tabindex="0" role="note">§${number}</span>`;
+    return `<a class="section-reference" href="#${heading.id}" data-section-number="${number}" data-section-title="${escapeHtml(heading.title)}" aria-label="Section ${number}: ${escapeHtml(heading.title)}">§${number}</a>`;
   });
-  result = result.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => `<img alt="${label}" src="${linkHref(href, sourcePath, true)}">`);
-  result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => `<a href="${linkHref(href, sourcePath)}"${externalLinkAttributes(href)}>${label}</a>`);
   result = result.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/__([^_]+)__/g, '<strong>$1</strong>');
   result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>').replace(/(?<!_)_([^_]+)_(?!_)/g, '<em>$1</em>');
-  return result.replace(/\u0000(\d+)\u0000/g, (_, index) => codeParts[index]);
+  return result.replace(/\u0000(\d+)\u0000/g, (_, index) => protectedParts[index]);
 }
 
 function linkHref(href, sourcePath, asset = false) {
@@ -129,10 +165,10 @@ function highlightCode(source, language = 'plaintext') {
   return output;
 }
 
-function table(lines, sourcePath) {
+function table(lines, sourcePath, sectionHeadings) {
   const rows = lines.filter(line => !/^\s*\|?\s*:?-{3,}/.test(line)).map(line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
   if (!rows.length) return '';
-  return `<table><thead><tr>${rows[0].map(cell => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none">${inline(cell, sourcePath)}</th>`).join('')}</tr></thead><tbody>${rows.slice(1).map(row => `<tr>${row.map(cell => `<td>${inline(cell, sourcePath)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return `<table><thead><tr>${rows[0].map(cell => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none">${inline(cell, sourcePath, sectionHeadings)}</th>`).join('')}</tr></thead><tbody>${rows.slice(1).map(row => `<tr>${row.map(cell => `<td>${inline(cell, sourcePath, sectionHeadings)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
 const TASK_STATES = {
@@ -143,13 +179,13 @@ const TASK_STATES = {
   '-': { name: 'Canceled', className: 'canceled', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="m5.5 5.5 5 5m0-5-5 5" />' }
 };
 
-function taskListItem(value, sourcePath, location = {}) {
+function taskListItem(value, sourcePath, location = {}, sectionHeadings) {
   const marker = value.match(/^\[([ xX!~\-])\]\s*/);
-  if (!marker) return { isTask: false, html: `<li>${inline(value, sourcePath)}</li>` };
+  if (!marker) return { isTask: false, html: `<li>${inline(value, sourcePath, sectionHeadings)}</li>` };
 
   const state = TASK_STATES[marker[1].toLowerCase()];
   const icon = `<button class="task-marker" type="button" title="Edit task: ${state.name}" aria-label="Edit task: ${state.name}" data-task-start-line="${location.startLine || ''}" data-task-end-line="${location.endLine || ''}" data-task-source-path="${escapeHtml(sourcePath)}"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${state.icon}</svg></button>`;
-  return { isTask: true, html: `<li class="task-item task-${state.className}" data-task-state="${state.name.toLowerCase()}">${icon}<span class="task-content">${inline(value.slice(marker[0].length), sourcePath)}</span></li>` };
+  return { isTask: true, html: `<li class="task-item task-${state.className}" data-task-state="${state.name.toLowerCase()}">${icon}<span class="task-content">${inline(value.slice(marker[0].length), sourcePath, sectionHeadings)}</span></li>` };
 }
 
 function normalizeSortableValue(text) {
@@ -203,19 +239,32 @@ function renderMarkdown(markdown, sourcePath) {
   const frontmatter = normalizedMarkdown.match(/^---[\s\S]*?---\s*/);
   const sourceLineOffset = frontmatter ? frontmatter[0].split('\n').length - 1 : 0;
   const lines = (frontmatter ? normalizedMarkdown.slice(frontmatter[0].length) : normalizedMarkdown).split('\n');
-  const blockBoundary = line => /^(?:#{1,6}\s|```|>\s?|\s*[-*+]\s+|\s*\d+\.\s+|\s*([-*_])(?:\s*\1){2,}\s*$)/.test(line);
+  const headingId = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  const sectionHeadings = new Map(lines.flatMap(line => {
+    const heading = line.match(/^(#{1,6})\s+(.+)$/); const section = heading?.[2].match(/^(\d+(?:\.\d+)*)(?:[.)])?\s+(.+)$/);
+    return section ? [[section[1], { id: headingId(heading[2]), title: section[2] }]] : [];
+  }));
+  const fenceStart = line => line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  const blockBoundary = line => /^(?:#{1,6}\s| {0,3}(?:`{3,}|~{3,})|>\s?|\s*[-*+]\s+|\s*\d+\.\s+|\s*([-*_])(?:\s*\1){2,}\s*$)/.test(line);
   const output = []; let i = 0;
   while (i < lines.length) {
     const line = lines[i];
     if (!line.trim()) { i++; continue; }
-    if (/^```/.test(line)) { const lang = line.slice(3).trim() || 'plaintext'; const block = []; while (++i < lines.length && !/^```/.test(lines[i])) block.push(lines[i]); i++; const source = block.join('\n'); output.push(lang.toLowerCase() === 'mermaid' ? `<pre class="mermaid mermaid-diagram">${escapeHtml(source)}</pre>` : `<pre><code class="language-${escapeHtml(lang)}">${highlightCode(source, lang)}</code></pre>`); continue; }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = heading[2].toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath)}</h${level}>`); i++; continue; }
-    if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath)); continue; }
+    const openingFence = fenceStart(line);
+    if (openingFence) {
+      const marker = openingFence[1][0]; const minimumLength = openingFence[1].length; const closeFence = new RegExp(`^ {0,3}${marker}{${minimumLength},}\\s*$`);
+      const info = openingFence[2].trim(); const lang = info.split(/\s+/, 1)[0] || 'plaintext'; const block = [];
+      while (++i < lines.length && !closeFence.test(lines[i])) block.push(lines[i]);
+      if (i < lines.length) i++;
+      const source = block.join('\n'); output.push(lang.toLowerCase() === 'mermaid' ? `<pre class="mermaid mermaid-diagram">${escapeHtml(source)}</pre>` : `<pre><code class="language-${escapeHtml(lang)}">${highlightCode(source, lang)}</code></pre>`); continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = headingId(heading[2]); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath, sectionHeadings)}</h${level}>`); i++; continue; }
+    if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath, sectionHeadings)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
     if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath)}</p></blockquote>`); continue; }
-    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
-    if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
-    const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s|```|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath)}</p>`);
+    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }, sectionHeadings); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
+    if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath, sectionHeadings)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
+    const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s| {0,3}(?:`{3,}|~{3,})|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath, sectionHeadings)}</p>`);
   }
   return output.join('\n');
 }

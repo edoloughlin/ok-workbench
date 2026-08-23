@@ -21,6 +21,9 @@ test('Mermaid fences render with the locally bundled browser distribution', asyn
     readFile(path.join(root, 'THIRD-PARTY-NOTICES.md'), 'utf8'),
   ]);
   assert.match(script, /lang\.toLowerCase\(\) === 'mermaid'/);
+  assert.match(script, /const fenceStart = line => line\.match\(\/\^ \{0,3\}/);
+  assert.match(script, /const openingFence = fenceStart\(line\)/);
+  assert.match(script, /marker\}\{\$\{minimumLength\},\}/);
   assert.match(script, /import\('\/vendor\/mermaid\/mermaid\.esm\.min\.mjs'\)/);
   assert.match(script, /securityLevel: 'strict'/);
   assert.match(script, /const sources = new Map/);
@@ -29,6 +32,23 @@ test('Mermaid fences render with the locally bundled browser distribution', asyn
   assert.match(build, /THIRD-PARTY-NOTICES\.md/);
   assert.match(server, /url\.pathname\.startsWith\('\/vendor\/mermaid\/'\)/);
   assert.match(notices, /Mermaid v11\.17\.0/);
+});
+test('section references preview the current document heading and remain anchors', async () => {
+  const [script, css] = await Promise.all([
+    readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'public', 'app.css'), 'utf8'),
+  ]);
+  assert.match(script, /const sectionHeadings = new Map/);
+  assert.match(script, /class="section-reference" href="#\$\{heading\.id\}"/);
+  assert.match(script, /section-reference-missing/);
+  assert.match(script, /Heading not found in this document; it may refer to another document\./);
+  assert.match(script, /data-section-number/);
+  assert.match(script, /sectionPreview\.querySelector\('\.section-preview-number'\)\.textContent = reference\.dataset\.sectionNumber/);
+  assert.match(script, /documentPane\.addEventListener\('pointerover'/);
+  assert.match(script, /sectionPreview\.addEventListener\('pointerleave', dismissSectionPreview\)/);
+  assert.match(css, /\.section-preview \{ position: fixed;/);
+  assert.match(css, /\.section-preview\[hidden\] \{ display: none; \}/);
+  assert.match(css, /\.document \.section-reference/);
 });
 test('chat UI exposes the GitHub Copilot device code outside transient status text', async () => {
   const [html, script, server, harness] = await Promise.all([

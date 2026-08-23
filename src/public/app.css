@@ -158,6 +158,14 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .document p, .document li { max-width: 72ch; }
 .document a { color: var(--link); text-decoration: none; }
 .document a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.document .section-reference { border-bottom: 1px dotted currentColor; font-variant-numeric: tabular-nums; text-decoration: none; cursor: pointer; }
+.document .section-reference:hover, .document .section-reference:focus-visible { border-bottom-style: solid; color: var(--accent); outline: 0; }
+.document .section-reference-missing { color: color-mix(in srgb, var(--danger) 68%, var(--muted)); cursor: help; }
+.document .section-reference-missing:hover, .document .section-reference-missing:focus-visible { color: var(--danger); }
+.section-preview { position: fixed; z-index: 50; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; max-width: min(380px, calc(100vw - 20px)); padding: 9px 11px; border: 1px solid var(--rule-strong); border-radius: 7px; color: var(--ink); background: color-mix(in srgb, var(--paper) 96%, transparent); box-shadow: var(--shadow-pop); backdrop-filter: blur(14px); pointer-events: auto; }
+.section-preview[hidden] { display: none; }
+.section-preview-number { color: var(--ink); font: 700 11px/1.45 var(--font-mono); white-space: nowrap; }
+.section-preview-title { font-size: 12px; font-weight: 600; line-height: 1.35; }
 .document code { padding: 2px 5px; color: var(--ink); background: var(--code-bg); border-radius: 4px; font: 13px var(--font-mono); }
 .document pre { display: block; overflow: auto; width: fit-content; min-width: min(72ch, 100%); max-width: 100%; padding: 16px 18px; color: var(--ink); border-radius: 8px; border: 1px solid var(--rule); background: var(--code-bg); }
 .document pre code { padding: 0; color: inherit; background: transparent; }
