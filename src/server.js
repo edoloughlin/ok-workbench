@@ -653,6 +653,20 @@ function turnWriter(res, threadId, turnId) {
     return res.write(`${JSON.stringify(event)}\n`);
   };
 }
+function providerLabel(provider) {
+  if (provider === 'anthropic') return 'Anthropic';
+  if (provider === 'openai') return 'OpenAI';
+  if (provider === 'compatible') return 'Compatible provider';
+  return provider || 'Selected provider';
+}
+function providerError(provider, model, error) {
+  const message = String(error?.message || error || 'The provider did not return an error message');
+  const authenticationFailure = /\b(?:401|403)\b|api[ _-]?key|authentication|unauthori[sz]ed|expired (?:key|token|credential)|invalid (?:key|token|credential)/i.test(message);
+  const selection = model ? ` for ${model}` : '';
+  return authenticationFailure
+    ? `${providerLabel(provider)} authentication failed${selection}. Check or replace its API key, or sign in again. ${message}`
+    : `${providerLabel(provider)} request failed${selection}. ${message}`;
+}
 async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
@@ -677,7 +691,11 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
     body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).' }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
-  if (!response.ok || !response.body) throw new Error(`Provider request failed (${response.status})`);
+  if (!response.ok || !response.body) {
+    const payload = await response.text().catch(() => ''); let detail = '';
+    try { const parsed = JSON.parse(payload); detail = parsed.error?.message || parsed.message || ''; } catch { detail = payload.trim(); }
+    throw new Error(`${providerLabel(provider)} request failed (${response.status})${detail ? `: ${detail}` : ''}`);
+  }
   const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let eventName = '';
   while (true) {
     const { value, done } = await reader.read(); if (done) break;
@@ -1000,7 +1018,22 @@ const server = http.createServer(async (req, res) => {
         } });
         const title = titlePromise ? await titlePromise : '';
         await withThreadWrite(thread.id, async () => { const current = await loadThread(thread.id); if (title || current.title === 'New conversation') current.title = title || fallbackThreadTitle(current.messages[0]); current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: reply, model, effort: effort || '', turnId, createdAt: new Date().toISOString() }); await saveThread(current); }); writeEvent('message.completed'); writeEvent('turn.completed'); outcome = 'completed';
-      } catch (error) { outcome = abort.signal.aborted || error.name === 'AbortError' ? 'cancelled' : 'failed'; writeEvent('turn.failed', { error: outcome === 'cancelled' ? 'Turn cancelled' : error.message }); }
+      } catch (error) {
+        outcome = abort.signal.aborted || error.name === 'AbortError' ? 'cancelled' : 'failed';
+        const errorMessage = outcome === 'cancelled' ? 'Turn cancelled' : providerError(provider, model, error);
+        if (outcome === 'failed') {
+          logError('[ok-workbench] chat turn failed', { turnId, threadId: thread.id, project: thread.project, provider, model, error: errorMessage });
+          try {
+            await withThreadWrite(thread.id, async () => {
+              const current = await loadThread(thread.id);
+              if (current.title === 'New conversation') current.title = fallbackThreadTitle(current.messages[0]);
+              current.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: errorMessage, error: true, model, effort: effort || '', turnId, createdAt: new Date().toISOString() });
+              await saveThread(current);
+            });
+          } catch (saveError) { logError('[ok-workbench] failed to save chat turn error', { turnId, threadId: thread.id, error: saveError.message }); }
+        }
+        writeEvent('turn.failed', { error: errorMessage });
+      }
       finally { ACTIVE_TURNS.delete(turnId); if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
       return res.end();
     }

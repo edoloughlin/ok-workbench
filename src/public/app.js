@@ -730,6 +730,16 @@ function renderChatMessages(messages = [], threadSettings = {}) {
 }
 function addChatMessage(role, content, error = false, createdAt = new Date().toISOString(), settings = {}) { const existing = [...chatUi.messages.querySelectorAll('.chat-empty')]; existing.forEach(node => node.remove()); const node = document.createElement('article'); node.className = `chat-message ${role === 'user' ? 'user' : error ? 'error' : 'assistant'}`; node.dataset.streamMessage = role === 'assistant' && !error ? 'true' : ''; if (settings.turnId) node.dataset.turnId = settings.turnId; if (settings.clientTurnId) node.dataset.clientTurnId = settings.clientTurnId; const body = document.createElement('div'); body.className = 'chat-message-body'; if (!error && role === 'assistant') renderAssistantMarkdown(body, content); else if (!error && role === 'user') renderUserMarkdown(body, content); else body.textContent = content; node.append(messageHeader(role, error, createdAt, settings), body); chatUi.messages.append(node); scrollChatToLatest({ force: true }); return body; }
 
+function renderFailedChatTurn(turn) {
+  const node = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`);
+  if (!node) { addChatMessage('assistant', turn.error || 'Turn failed.', true, new Date().toISOString(), { turnId: turn.id, model: turn.model, effort: turn.effort }); return; }
+  node.className = 'chat-message error'; node.removeAttribute('data-stream-message');
+  node.querySelector('.message-meta').textContent = 'Error';
+  const body = node.querySelector('.chat-message-body'); body.textContent = turn.error || 'Turn failed.';
+  node.querySelectorAll('.chat-turn-status, .chat-turn-activity, .chat-turn-thinking').forEach(item => item.remove());
+  scrollChatToLatest({ force: true });
+}
+
 function turnStatusText(turn) {
   const elapsed = Math.floor((Date.now() - turn.startedAt) / 1000); const quiet = Math.floor((Date.now() - turn.lastEventAt) / 1000);
   const clock = seconds => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
@@ -880,7 +890,7 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     completed = true;
     turn.status = 'completed'; turn.thinkingText = ''; turn.completedAt = Date.now(); if (isVisible()) renderActiveTurn(turn);
     if (isVisible()) { setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads(); }
-  } catch (error) { turn.status = error.name === 'AbortError' ? 'cancelled' : 'failed'; turn.error = error.name === 'AbortError' ? 'Stopped.' : error.message; if (isVisible()) { renderActiveTurn(turn); setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
+  } catch (error) { turn.status = error.name === 'AbortError' ? 'cancelled' : 'failed'; turn.error = error.name === 'AbortError' ? 'Stopped.' : error.message; if (isVisible()) { if (turn.status === 'failed') renderFailedChatTurn(turn); else renderActiveTurn(turn); setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
   finally { const visible = isVisible(); activeChatTurns.delete(turn); recentTurns.set(turn.clientId, turn); while (recentTurns.size > 20) recentTurns.delete(recentTurns.keys().next().value); if (completed && !visible) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
   return completed;
 }

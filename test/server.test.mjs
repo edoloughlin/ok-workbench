@@ -95,6 +95,9 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /data-dismiss-turn-notification/);
   assert.match(script, /turn\.assistantText/);
   assert.match(script, /turn\.thinkingText = ''/);
+  assert.match(script, /function renderFailedChatTurn\(turn\)/);
+  assert.match(server, /function providerError\(provider, model, error\)/);
+  assert.match(server, /chat turn failed/);
   assert.match(script, /event\.type === 'turn\.thinking'/);
   assert.match(script, /toggle\.append\(input, ' Show thinking'\)/);
   assert.match(script, /showThinking: true/);

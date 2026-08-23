@@ -20,8 +20,10 @@ test('chat coordinator streams and persists a compatible-provider turn without r
   await writeFile(path.join(workspace, 'index.md'), '# Chat workspace\n');
   const legacyThread = { id: 'legacythread', project: 'workspace', provider: 'compatible', model: 'fake-model', effort: '', title: 'Legacy', messages: [{ id: 'legacyassistant', role: 'assistant', content: 'Old reply', createdAt: new Date().toISOString() }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await mkdir(state, { recursive: true }); await writeFile(path.join(state, `${legacyThread.id}.json`), JSON.stringify(legacyThread));
+  let rejectNextRequest = false;
   const provider = createServer(async (request, response) => {
     for await (const _ of request) { /* consume request without logging its headers */ }
+    if (rejectNextRequest) { response.writeHead(401, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'API key has expired' } })); return; }
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"Fake reply"}}]}\n\ndata: [DONE]\n\n');
   });
@@ -39,5 +41,10 @@ test('chat coordinator streams and persists a compatible-provider turn without r
     for (const event of events.filter(event => event.type === 'turn.status')) assert.deepEqual(Object.keys(event).sort(), ['sequence', 'state', 'thread_id', 'turn_id', 'type']);
     const started = events.find(event => event.type === 'turn.started'); assert.ok(started?.turn_id);
     const saved = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`); const savedThread = await saved.json(); assert.equal(savedThread.messages.at(-1).content, 'Fake reply'); assert.equal(savedThread.messages.at(-1).model, 'fake-model'); assert.equal(savedThread.messages.at(-1).effort, ''); assert.equal(savedThread.messages.at(-1).turnId, started.turn_id);
+    rejectNextRequest = true;
+    const failedCreated = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'workspace', provider: 'compatible', model: 'fake-model' }) }); assert.equal(failedCreated.status, 201); const failedThread = await failedCreated.json();
+    const failedTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${failedThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hello again', provider: 'compatible', model: 'fake-model' }) });
+    const failedEvents = (await failedTurn.text()).trim().split('\n').map(line => JSON.parse(line)); const failed = failedEvents.find(event => event.type === 'turn.failed'); assert.match(failed?.error || '', /authentication failed.*API key has expired/i);
+    const savedFailure = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${failedThread.id}`); const savedFailureThread = await savedFailure.json(); assert.equal(savedFailureThread.messages.at(-1).error, true); assert.match(savedFailureThread.messages.at(-1).content, /authentication failed/i);
   } finally { child.kill(); await new Promise(resolve => provider.close(resolve)); }
 });
