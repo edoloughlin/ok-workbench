@@ -58,6 +58,13 @@ const ENTRY_RENAMES = new Map();
 const ACTIVE_TURNS = new Map();
 const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
+const API_KEY_PROVIDERS = {
+  anthropic: { label: 'Anthropic', environment: 'ANTHROPIC_API_KEY' },
+  openai: { label: 'OpenAI', environment: 'OPENAI_API_KEY' },
+  google: { label: 'Google Gemini', environment: 'GEMINI_API_KEY' },
+  mistral: { label: 'Mistral', environment: 'MISTRAL_API_KEY' },
+  openrouter: { label: 'OpenRouter', environment: 'OPENROUTER_API_KEY' },
+};
 const DIRTY_PROJECT_STATE = new Map();
 const DIRTY_PROJECT_SNAPSHOTS = new Map();
 const DIRTY_WATCHERS = new Map();
@@ -549,6 +556,49 @@ async function writeAtomic(file, value) {
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(temporary, file);
 }
+function apiKeyFile() { return path.join(CHAT_STATE_DIR, 'provider-api-keys.json'); }
+async function storedApiKeys() {
+  try {
+    const value = JSON.parse(await fs.readFile(apiKeyFile(), 'utf8'));
+    return Object.fromEntries(Object.entries(value?.providers || {}).filter(([provider, key]) => API_KEY_PROVIDERS[provider] && typeof key === 'string' && key.trim()));
+  } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+}
+async function effectiveProviderEnvironment() {
+  const keys = await storedApiKeys();
+  return { ...Object.fromEntries(Object.entries(keys).map(([provider, key]) => [API_KEY_PROVIDERS[provider].environment, key])), ...process.env };
+}
+function keyPreview(key) { return `${key.slice(0, 8)}…`; }
+async function apiKeyConfiguration() {
+  const saved = await storedApiKeys();
+  return Object.entries(API_KEY_PROVIDERS).flatMap(([provider, details]) => {
+    if (process.env[details.environment]) return [{ provider, label: details.label, source: 'environment', environment: details.environment }];
+    if (saved[provider]) return [{ provider, label: details.label, source: 'stored', preview: keyPreview(saved[provider]) }];
+    return [];
+  });
+}
+async function saveApiKeyConfiguration(value) {
+  if (!Array.isArray(value) || value.length > Object.keys(API_KEY_PROVIDERS).length) throw new Error('Invalid provider API key configuration');
+  const providers = {};
+  for (const item of value) {
+    const provider = String(item?.provider || ''); const key = String(item?.key || '').trim();
+    if (!API_KEY_PROVIDERS[provider] || !key || key.length > 16_384 || providers[provider]) throw new Error('Invalid provider API key configuration');
+    providers[provider] = key;
+  }
+  await writeAtomic(apiKeyFile(), { providers });
+  return apiKeyConfiguration();
+}
+async function setApiKey(provider, key) {
+  if (!API_KEY_PROVIDERS[provider] || typeof key !== 'string' || !key.trim() || key.length > 16_384) throw new Error('Invalid provider API key');
+  const providers = await storedApiKeys(); providers[provider] = key.trim();
+  await writeAtomic(apiKeyFile(), { providers });
+  return apiKeyConfiguration();
+}
+async function removeApiKey(provider) {
+  if (!API_KEY_PROVIDERS[provider]) throw new Error('Unknown provider');
+  const providers = await storedApiKeys(); delete providers[provider];
+  await writeAtomic(apiKeyFile(), { providers });
+  return apiKeyConfiguration();
+}
 async function loadThread(id) {
   try { return JSON.parse(await fs.readFile(threadFile(id), 'utf8')); } catch (error) { if (error.code === 'ENOENT') throw new Error('Chat thread not found'); throw error; }
 }
@@ -575,7 +625,7 @@ async function listThreads(project) {
 
 async function providerCatalog() {
   const { configuredPiProviders } = await import('./pi-harness.mjs');
-  const configured = await configuredPiProviders({ stateDir: CHAT_STATE_DIR });
+  const configured = await configuredPiProviders({ stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() });
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
   if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL }] : [] });
@@ -591,7 +641,8 @@ async function chatStatus(provider) {
     providers: providers.map(({ id, label, models }) => ({ id, label, models })),
     defaultProvider: selected?.id || '',
     models: selected?.models || [],
-    defaultModel: selected?.models?.[0]?.id || ''
+    defaultModel: selected?.models?.[0]?.id || '',
+    apiKeys: await apiKeyConfiguration()
   };
 }
 
@@ -656,6 +707,9 @@ function turnWriter(res, threadId, turnId) {
 function providerLabel(provider) {
   if (provider === 'anthropic') return 'Anthropic';
   if (provider === 'openai') return 'OpenAI';
+  if (provider === 'google') return 'Google Gemini';
+  if (provider === 'mistral') return 'Mistral';
+  if (provider === 'openrouter') return 'OpenRouter';
   if (provider === 'compatible') return 'Compatible provider';
   return provider || 'Selected provider';
 }
@@ -677,16 +731,16 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
     endpoint = 'https://api.anthropic.com/v1/messages';
-    headers = { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
+    headers = { 'content-type': 'application/json', 'x-api-key': (await effectiveProviderEnvironment()).ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
     body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).', messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
   } else {
     endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `${process.env.LLM_COMPATIBLE_BASE_URL.replace(/\/$/, '')}/chat/completions`;
-    const apiKey = provider === 'openai' ? process.env.OPENAI_API_KEY : process.env.LLM_COMPATIBLE_API_KEY;
+    const environment = await effectiveProviderEnvironment(); const apiKey = provider === 'openai' ? environment.OPENAI_API_KEY : environment.LLM_COMPATIBLE_API_KEY;
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
     body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).' }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
@@ -968,6 +1022,9 @@ const server = http.createServer(async (req, res) => {
     if (dirtyMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, await markDirtyProjectProcessed(project)); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
+    const apiKeyMatch = url.pathname.match(/^\/api\/chat\/api-keys\/(anthropic|openai|google|mistral|openrouter)$/);
+    if (apiKeyMatch && req.method === 'PUT') { assertChatRequest(req); const body = await readJson(req); return json(res, 200, { apiKeys: await setApiKey(apiKeyMatch[1], body.key) }); }
+    if (apiKeyMatch && req.method === 'DELETE') { assertChatRequest(req); return json(res, 200, { apiKeys: await removeApiKey(apiKeyMatch[1]) }); }
     const authMatch = url.pathname.match(/^\/api\/chat\/auth\/(openai-codex|github-copilot)\/start$/);
     if (authMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await startProviderLogin(authMatch[1])); }
     if (url.pathname === '/api/chat/threads' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await listThreads(url.searchParams.get('project'))); }

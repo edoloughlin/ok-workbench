@@ -477,7 +477,7 @@ const chatUi = {
   notificationsButton: document.querySelector('#turn-notifications-button'), notificationsMenu: document.querySelector('#turn-notifications-menu'), notificationsList: document.querySelector('#turn-notifications-list'), notificationsCount: document.querySelector('#turn-notifications-count'),
   splitter: document.querySelector('#chat-splitter'), project: document.querySelector('#chat-project'),
   provider: document.querySelector('#chat-provider'), model: document.querySelector('#chat-model'), effort: document.querySelector('#chat-effort'),
-  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsMenu: document.querySelector('#chat-settings-menu'),
+  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'),
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
@@ -686,8 +686,47 @@ function setOptions(select, values, selected) {
     const option = document.createElement('option'); option.value = value.id || value; option.textContent = value.label || value.id || value; option.selected = option.value === selected; return option;
   }));
 }
-function closeChatSettings() { chatUi.settingsMenu.hidden = true; chatUi.settings.setAttribute('aria-expanded', 'false'); }
-function toggleChatSettings() { const open = chatUi.settingsMenu.hidden; chatUi.settingsMenu.hidden = !open; chatUi.settings.setAttribute('aria-expanded', String(open)); }
+let configuredApiKeys = [];
+let setupPrompted = false;
+const apiKeyProviderOptions = [
+  { id: 'anthropic', label: 'Anthropic' }, { id: 'openai', label: 'OpenAI' },
+  { id: 'google', label: 'Google Gemini' }, { id: 'mistral', label: 'Mistral' },
+  { id: 'openrouter', label: 'OpenRouter' },
+];
+function closeChatSettings() { if (chatUi.settingsDialog.open) chatUi.settingsDialog.close(); chatUi.settings.setAttribute('aria-expanded', 'false'); }
+function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); }
+function toggleChatSettings() { if (chatUi.settingsDialog.open) closeChatSettings(); else openChatSettings(); }
+function apiKeyRow(record = null, selectedProvider = '') {
+  const row = document.createElement('div'); row.className = 'chat-api-key-row';
+  const configured = new Set(configuredApiKeys.map(item => item.provider));
+  const selected = record?.provider || selectedProvider || apiKeyProviderOptions.find(option => !configured.has(option.id))?.id || 'anthropic';
+  const provider = document.createElement('select'); provider.setAttribute('aria-label', 'API key provider'); setOptions(provider, apiKeyProviderOptions.filter(option => option.id === selected || !configured.has(option.id)), selected);
+  const key = document.createElement('input'); key.type = 'password'; key.autocomplete = 'off'; key.spellcheck = false; key.setAttribute('aria-label', 'API key');
+  if (record?.source === 'environment') { provider.value = record.provider; provider.disabled = true; key.disabled = true; key.type = 'text'; key.value = `Read from ${record.environment}`; key.className = 'api-key-environment'; }
+  if (record?.source === 'stored') { provider.value = record.provider; provider.disabled = true; key.type = 'text'; key.value = record.preview; key.dataset.preview = record.preview; key.className = 'api-key-preview'; key.addEventListener('focus', () => { if (!key.dataset.preview) return; key.value = ''; key.type = 'password'; key.classList.remove('api-key-preview'); delete key.dataset.preview; }); }
+  const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'api-key-remove'; remove.textContent = 'Remove';
+  if (record?.source === 'environment') { remove.disabled = true; remove.title = 'This key is supplied by the server environment.'; }
+  else remove.addEventListener('click', async () => { if (!record) { row.remove(); return; } await deleteApiKey(record.provider); });
+  key.addEventListener('blur', async () => {
+    const value = key.value.trim(); if (!value || key.disabled || value === key.dataset.preview) return;
+    try { await saveApiKey(provider.value, value); } catch (error) { showSettingsError(error.message); }
+  });
+  provider.addEventListener('change', () => { key.focus(); });
+  row.append(provider, key, remove); return row;
+}
+function renderApiKeyRows() {
+  chatUi.apiKeys.replaceChildren();
+  for (const record of configuredApiKeys) chatUi.apiKeys.append(apiKeyRow(record));
+  if (!configuredApiKeys.length) { const empty = document.createElement('p'); empty.className = 'chat-api-keys-empty'; empty.textContent = 'No API keys saved.'; chatUi.apiKeys.append(empty); }
+  const used = new Set(configuredApiKeys.map(record => record.provider)); chatUi.apiKeyAdd.disabled = apiKeyProviderOptions.every(option => used.has(option.id));
+}
+function showSettingsError(message) { chatUi.settingsError.textContent = message; chatUi.settingsError.hidden = false; }
+async function saveApiKey(provider, key) {
+  const response = await chatApi(`/api/chat/api-keys/${encodeURIComponent(provider)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not save API key'); configuredApiKeys = data.apiKeys || []; renderApiKeyRows(); await loadChatStatus();
+}
+async function deleteApiKey(provider) {
+  try { const response = await chatApi(`/api/chat/api-keys/${encodeURIComponent(provider)}`, { method: 'DELETE' }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not remove API key'); configuredApiKeys = data.apiKeys || []; renderApiKeyRows(); await loadChatStatus(); } catch (error) { showSettingsError(error.message); }
+}
 function projectChatPreference() { return chatProjectId ? chatProjectPreferences[chatProjectId] || {} : {}; }
 function saveProjectChatPreference() {
   if (!chatProjectId) return;
@@ -722,7 +761,7 @@ function setProviderLoginState(providers) {
     { id: 'github-copilot', label: 'Copilot', button: chatUi.copilotLogin },
   ]) {
     const connected = providers.some(provider => provider.id === id);
-    button.textContent = connected ? `${label} connected` : `Sign in to ${label}`;
+    button.querySelector('span').textContent = connected ? `${label} connected` : `Sign in to ${label}`;
     button.disabled = connected;
     button.title = connected ? `This browser has its own ${label} sign-in.` : `Sign in to ${label} for this browser.`;
     if (connected && chatUi.authCode.dataset.provider === id) chatUi.authCode.hidden = true;
@@ -826,13 +865,15 @@ function renderActiveTurn(turn) {
 async function loadChatStatus() {
   try {
     const response = await chatApi('/api/chat/status'); if (!response.ok) throw new Error('Chat unavailable');
-    const data = await response.json(); const providers = data.providers || [];
+    const data = await response.json(); const providers = data.providers || []; configuredApiKeys = data.apiKeys || []; if (chatUi.settingsDialog.open) renderApiKeyRows();
     setProviderLoginState(providers);
     loadTitleModels(providers);
     const preference = projectChatPreference();
     setOptions(chatUi.provider, providers, providers.some(item => item.id === preference.provider) ? preference.provider : (chatUi.provider.value || data.defaultProvider));
     await loadChatModels();
-    setChatStatus(data.enabled ? 'Ready' : (data.message || 'Configure a provider'));
+    const providerAvailable = providers.some(provider => provider.models?.length);
+    setChatStatus(providerAvailable ? 'Ready' : (data.message || 'Configure a provider'));
+    if (!setupPrompted && !providerAvailable) { setupPrompted = true; openChatSettings(); }
   } catch { setProviderLoginState([]); setOptions(chatUi.provider, [{ id: 'anthropic', label: 'Anthropic (not configured)' }], 'anthropic'); chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); loadTitleModels([]); setChatStatus('Chat service unavailable'); }
 }
 async function loadChatModels() {
@@ -1014,7 +1055,16 @@ chatUi.provider.addEventListener('change', () => loadChatModels().then(saveProje
 chatUi.model.addEventListener('change', () => { loadChatEfforts(projectChatPreference().effort); saveProjectChatPreference(); });
 chatUi.effort.addEventListener('change', saveProjectChatPreference);
 chatUi.settings.addEventListener('click', toggleChatSettings);
-document.addEventListener('click', event => { if (!event.target.closest('.chat-menu')) closeChatSettings(); });
+chatUi.settingsClose.addEventListener('click', closeChatSettings);
+chatUi.settingsForm.addEventListener('submit', event => event.preventDefault());
+chatUi.settingsDialog.addEventListener('close', () => chatUi.settings.setAttribute('aria-expanded', 'false'));
+chatUi.apiKeyAdd.addEventListener('click', () => {
+  const used = new Set([...configuredApiKeys.map(record => record.provider), ...[...chatUi.apiKeys.querySelectorAll('select')].map(select => select.value)]);
+  const available = apiKeyProviderOptions.find(option => !used.has(option.id)); if (!available) return;
+  const empty = chatUi.apiKeys.querySelector('.chat-api-keys-empty'); empty?.remove();
+  const row = apiKeyRow(null, available.id); chatUi.apiKeys.append(row); row.querySelector('input').focus();
+  chatUi.apiKeyAdd.disabled = apiKeyProviderOptions.every(option => used.has(option.id) || option.id === available.id);
+});
 document.addEventListener('click', event => { if (!event.target.closest('.turn-notifications')) closeTurnNotifications(); });
 chatUi.titleModel.addEventListener('change', () => { const model = titleModels.find(item => titleModelKey(item) === chatUi.titleModel.value); if (!model) return; chatSettings.titleProvider = model.provider; chatSettings.titleModel = model.id; loadTitleEfforts(chatSettings.titleEffort); persistChatSettings(); });
 chatUi.titleEffort.addEventListener('change', () => { chatSettings.titleEffort = chatUi.titleEffort.value; persistChatSettings(); });

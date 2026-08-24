@@ -179,6 +179,9 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
 function apiKeyFor(provider, env) {
   if (provider === 'anthropic') return env.ANTHROPIC_API_KEY;
   if (provider === 'openai') return env.OPENAI_API_KEY;
+  if (provider === 'google') return env.GEMINI_API_KEY;
+  if (provider === 'mistral') return env.MISTRAL_API_KEY;
+  if (provider === 'openrouter') return env.OPENROUTER_API_KEY;
   return undefined;
 }
 

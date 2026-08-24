@@ -60,7 +60,7 @@ ok-workbench migrate-state --yes
 
 The content root resolves in this order: explicit `--root`, `OK_WORKSPACE_ROOT`, legacy `OKF_WORKSPACE_ROOT`/`AGENTS_BUNDLE_ROOT`, `workspaceRoot` in `$XDG_CONFIG_HOME/ok-workbench/config.json` (then the legacy `okf-workbench` location), `./workspace` when present, then `~/workspace`.
 
-Chat state and provider credentials live outside the bundle under the XDG state directory (default `~/.local/state/ok-workbench/chat`). Set `OK_WORKBENCH_STATE_DIR` to use another state location. Provider API keys belong in the server environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or compatible-provider variables) or can be supplied through the local sign-in UI; GitHub Copilot subscription sign-in uses GitHub's device flow. Never put credentials in the workspace.
+Chat state and provider credentials live outside the bundle under the XDG state directory (default `~/.local/state/ok-workbench/chat`). Set `OK_WORKBENCH_STATE_DIR` to use another state location. Provider API keys belong in the server environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, or compatible-provider variables) or can be supplied through the local sign-in UI; GitHub Copilot subscription sign-in uses GitHub's device flow. Never put credentials in the workspace.
 
 ## Workspace tools
 
