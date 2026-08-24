@@ -1,8 +1,9 @@
 # Third-party notices
 
 This distribution includes the Mermaid v11.17.0 browser bundle. Its source is
-available at <https://github.com/mermaid-js/mermaid>, and its MIT License is
-also distributed with the bundle at `dist/public/vendor/mermaid/LICENSE`.
+available at <https://github.com/mermaid-js/mermaid>. When Mermaid's npm
+package includes its license text, it is also distributed with the bundle at
+`dist/public/vendor/mermaid/LICENSE`.
 Notices for Mermaid's bundled production dependencies are generated at
 `dist/public/vendor/mermaid/THIRD-PARTY-NOTICES.md` during each build.
 

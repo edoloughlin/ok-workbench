@@ -28,6 +28,7 @@ test('Mermaid fences render with the locally bundled browser distribution', asyn
   assert.match(script, /securityLevel: 'strict'/);
   assert.match(script, /const sources = new Map/);
   assert.match(build, /mermaid\.esm\.min\.mjs/);
+  assert.match(build, /copyPackageLicense\(mermaidSource, path\.join\(mermaidDestination, 'LICENSE'\)\)/);
   assert.match(build, /mermaidNotices\(mermaidSource\)/);
   assert.match(build, /THIRD-PARTY-NOTICES\.md/);
   assert.match(server, /url\.pathname\.startsWith\('\/vendor\/mermaid\/'\)/);

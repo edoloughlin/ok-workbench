@@ -24,6 +24,11 @@ async function packageLicense(directory) {
   return (await fs.readFile(path.join(directory, candidates[0]), 'utf8')).trim();
 }
 
+async function copyPackageLicense(directory, destination) {
+  const candidates = (await fs.readdir(directory)).filter(name => /^(?:license|copying|notice)(?:\.[\w-]+)?$/i.test(name)).sort();
+  if (candidates.length) await fs.copyFile(path.join(directory, candidates[0]), destination);
+}
+
 async function mermaidNotices(mermaidSource) {
   const packages = new Map();
   async function visit(directory) {
@@ -53,7 +58,7 @@ const mermaidSource = path.join(root, 'node_modules', 'mermaid');
 const mermaidDestination = path.join(dist, 'public', 'vendor', 'mermaid');
 await fs.mkdir(mermaidDestination, { recursive: true });
 await Promise.all([
-  fs.copyFile(path.join(mermaidSource, 'LICENSE'), path.join(mermaidDestination, 'LICENSE')),
+  copyPackageLicense(mermaidSource, path.join(mermaidDestination, 'LICENSE')),
   fs.copyFile(path.join(mermaidSource, 'dist', 'mermaid.esm.min.mjs'), path.join(mermaidDestination, 'mermaid.esm.min.mjs')),
   fs.cp(path.join(mermaidSource, 'dist', 'chunks', 'mermaid.esm.min'), path.join(mermaidDestination, 'chunks', 'mermaid.esm.min'), { recursive: true, filter: source => !source.endsWith('.map') }),
   fs.writeFile(path.join(mermaidDestination, 'THIRD-PARTY-NOTICES.md'), await mermaidNotices(mermaidSource))
