@@ -153,12 +153,12 @@ async function extractDocument(relative) {
   const extension = path.extname(safe).toLowerCase(); if (!['.pdf', '.docx', '.pptx', '.xlsx', '.odt', '.odp', '.ods'].includes(extension)) throw new Error('Supported document types are PDF, DOCX, PPTX, XLSX, ODT, ODP, and ODS'); const buffer = await fs.readFile(target);
   const content = extension === '.pdf' ? extractPdf(buffer) : (() => { const entries = zipEntries(buffer); if (extension === '.docx') return extractDocx(entries); if (extension === '.pptx') return extractPptx(entries); if (extension === '.xlsx') return extractXlsx(entries); if (extension === '.odt') return extractOdt(entries); if (extension === '.odp') return extractOdp(entries); return extractOds(entries); })(); const result = cappedDocumentText(content); if (!result.content) throw new Error('No extractable text was found in this document'); return { path: safe, format: extension.slice(1), ...result };
 }
-async function searchFiles(query) {
+async function searchFiles(query, relative = '.') {
   if (typeof query !== 'string' || !query.trim() || query.length > 256) throw new Error('A short search query is required');
   const matches = [];
-  for (const relative of await listFiles('.')) {
+  for (const file of await listFiles(relative)) {
     if (matches.length >= MAX_RESULTS) break;
-    try { const { content } = await readFile(relative); const lines = content.split(/\r?\n/); lines.forEach((line, index) => { if (matches.length < MAX_RESULTS && line.toLowerCase().includes(query.toLowerCase())) matches.push({ path: relative, line: index + 1, text: line.slice(0, 500) }); }); } catch { /* skip binary/large/unreadable files */ }
+    try { const { content } = await readFile(file); const lines = content.split(/\r?\n/); lines.forEach((line, index) => { if (matches.length < MAX_RESULTS && line.toLowerCase().includes(query.toLowerCase())) matches.push({ path: file, line: index + 1, text: line.slice(0, 500) }); }); } catch { /* skip binary/large/unreadable files */ }
   }
   return matches;
 }
@@ -362,7 +362,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query }) => searchFiles(query), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // The launcher waits for this acknowledgement before exposing file tools.
   // A spawn event alone does not prove that the OS sandbox accepted the worker.

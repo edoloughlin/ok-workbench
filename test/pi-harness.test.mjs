@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -103,7 +103,46 @@ test('workspace AGENTS.md is included as bounded system instructions', async () 
   await (await import('node:fs/promises')).mkdir(project);
   await writeFile(path.join(project, 'AGENTS.md'), '# Project rules\n\nKeep project notes current.\n');
   const instructions = await workspaceAgentInstructions(workspace, project);
+  assert.match(instructions, /Project instructions are more specific and take precedence/);
   assert.match(instructions, /\[Workspace instructions: AGENTS\.md\][\s\S]*Always preserve evidence/);
   assert.match(instructions, /\[Project instructions: AGENTS\.md\][\s\S]*Keep project notes current/);
   assert.ok(instructions.indexOf('Always preserve evidence') < instructions.indexOf('Keep project notes current'));
+});
+test('agent instructions are fresh per turn, bounded, and not duplicated for the workspace project', async () => {
+  const { workspaceAgentInstructions } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-instruction-freshness-'));
+  const file = path.join(workspace, 'AGENTS.md');
+  await writeFile(file, 'First workspace rule\n');
+  const first = await workspaceAgentInstructions(workspace, workspace);
+  assert.equal((first.match(/First workspace rule/g) || []).length, 1);
+  await writeFile(file, 'Second workspace rule\n');
+  assert.match(await workspaceAgentInstructions(workspace, workspace), /Second workspace rule/);
+  await writeFile(file, 'x'.repeat(64 * 1024 + 1));
+  await assert.rejects(workspaceAgentInstructions(workspace, workspace), /Workspace AGENTS\.md is too large/);
+});
+test('agent instruction loader ignores an AGENTS.md symbolic link', async () => {
+  const { workspaceAgentInstructions } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-instruction-symlink-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'ok-workbench-instruction-symlink-outside-'));
+  await writeFile(path.join(outside, 'AGENTS.md'), 'Do not expose this content.\n');
+  await symlink(path.join(outside, 'AGENTS.md'), path.join(workspace, 'AGENTS.md'));
+  assert.equal(await workspaceAgentInstructions(workspace, workspace), '');
+});
+test('project tool context maps default paths without allowing project escape', async () => {
+  const { createToolContext, projectToolPath, projectToolResultPath, projectToolErrorMessage } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-tool-context-'));
+  const project = path.join(workspace, 'alpha');
+  await (await import('node:fs/promises')).mkdir(project);
+  const context = await createToolContext({ workspaceRoot: workspace, projectRoot: project });
+  assert.equal(context.projectPrefix, 'alpha');
+  assert.equal(projectToolPath(context, 'status.md'), 'alpha/status.md');
+  assert.equal(projectToolPath(context, '.'), 'alpha');
+  assert.equal(projectToolPath(context, 'index.md', 'workspace'), 'index.md');
+  assert.equal(projectToolResultPath(context, 'alpha/status.md'), 'status.md');
+  assert.equal(projectToolResultPath(context, 'beta/status.md', 'workspace'), 'beta/status.md');
+  assert.equal(projectToolErrorMessage(context, 'Substantive project update requires alpha/status.md'), 'Substantive project update requires status.md');
+  assert.throws(() => projectToolPath(context, '../beta/status.md'), /outside the selected scope/);
+  assert.throws(() => projectToolPath(context, 'status.md', 'invalid'), /Invalid tool scope/);
+  const outside = await mkdtemp(path.join(tmpdir(), 'ok-workbench-tool-context-outside-'));
+  await assert.rejects(createToolContext({ workspaceRoot: workspace, projectRoot: outside }), /outside the workspace/);
 });

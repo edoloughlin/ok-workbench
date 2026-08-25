@@ -18,11 +18,15 @@ test('chat coordinator streams and persists a compatible-provider turn without r
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-chat-'));
   const state = await mkdtemp(path.join(tmpdir(), 'ok-workbench-chat-state-'));
   await writeFile(path.join(workspace, 'index.md'), '# Chat workspace\n');
+  await writeFile(path.join(workspace, 'AGENTS.md'), '# Workspace rules\n\nPreserve workspace evidence.\n');
+  await mkdir(path.join(workspace, 'alpha'));
+  await writeFile(path.join(workspace, 'alpha', 'AGENTS.md'), '# Alpha rules\n\nUse alpha terminology.\n');
   const legacyThread = { id: 'legacythread', project: 'workspace', provider: 'compatible', model: 'fake-model', effort: '', title: 'Legacy', messages: [{ id: 'legacyassistant', role: 'assistant', content: 'Old reply', createdAt: new Date().toISOString() }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await mkdir(state, { recursive: true }); await writeFile(path.join(state, `${legacyThread.id}.json`), JSON.stringify(legacyThread));
-  let rejectNextRequest = false;
+  let rejectNextRequest = false; const providerRequests = [];
   const provider = createServer(async (request, response) => {
-    for await (const _ of request) { /* consume request without logging its headers */ }
+    let body = ''; for await (const chunk of request) body += chunk;
+    providerRequests.push(JSON.parse(body));
     if (rejectNextRequest) { response.writeHead(401, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'API key has expired' } })); return; }
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end('data: {"choices":[{"delta":{"content":"Fake reply"}}]}\n\ndata: [DONE]\n\n');
@@ -46,5 +50,12 @@ test('chat coordinator streams and persists a compatible-provider turn without r
     const failedTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${failedThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hello again', provider: 'compatible', model: 'fake-model' }) });
     const failedEvents = (await failedTurn.text()).trim().split('\n').map(line => JSON.parse(line)); const failed = failedEvents.find(event => event.type === 'turn.failed'); assert.match(failed?.error || '', /authentication failed.*API key has expired/i);
     const savedFailure = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${failedThread.id}`); const savedFailureThread = await savedFailure.json(); assert.equal(savedFailureThread.messages.at(-1).error, true); assert.match(savedFailureThread.messages.at(-1).content, /authentication failed/i);
+    rejectNextRequest = false;
+    const projectThreadResponse = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'alpha', provider: 'compatible', model: 'fake-model' }) }); assert.equal(projectThreadResponse.status, 201); const projectThread = await projectThreadResponse.json();
+    const projectTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${projectThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Use the project rules', provider: 'compatible', model: 'fake-model' }) }); assert.equal(projectTurn.status, 200); await projectTurn.text();
+    const projectPrompt = providerRequests.map(request => request.messages?.find(message => message.role === 'system')?.content).find(content => content?.includes('Use alpha terminology.'));
+    assert.match(projectPrompt || '', /Preserve workspace evidence/);
+    assert.match(projectPrompt || '', /Workspace instructions: AGENTS\.md[\s\S]*Project instructions: AGENTS\.md/);
+    assert.ok(projectPrompt.indexOf('Preserve workspace evidence') < projectPrompt.indexOf('Use alpha terminology.'));
   } finally { child.kill(); await new Promise(resolve => provider.close(resolve)); }
 });

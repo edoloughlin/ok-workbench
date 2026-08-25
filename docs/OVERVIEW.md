@@ -129,8 +129,10 @@ so reviewing one project does not turn into a workspace-wide discard operation.
 ## Keep chat in project context
 
 Chat is optional and project-scoped. Each project can retain its own provider,
-model, effort, and conversation preferences. Multiple turns can continue at
-once while you browse another page or project.
+model, effort, and conversation preferences. Bare file references in chat tools
+resolve from the selected project; use explicit workspace scope only for root or
+cross-project work. Multiple turns can continue at once while you browse another
+page or project.
 
 Long-running work has explicit liveness states: tool start/completion, elapsed
 time, quiet-period messaging, retry status, and per-turn cancellation. Finished

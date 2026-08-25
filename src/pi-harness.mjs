@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Type } from 'typebox';
+import agentInstructions from './agent-instructions.js';
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -19,13 +20,14 @@ const WORKER = path.join(APP_DIR, 'tool-worker.js');
 const PROJECT_TEMPLATE = path.resolve(APP_DIR, '..', 'seed', 'workspace', 'templates', 'project');
 const MACOS_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-sandbox.sb');
 const MACOS_NETWORK_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-network-sandbox.sb');
-const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
 const WORKER_READY_TIMEOUT = 5_000;
 const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
   || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
 
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
+
+const { workspaceAgentInstructions } = agentInstructions;
 
 async function exists(file, mode = constants.F_OK) { try { await access(file, mode); return true; } catch { return false; } }
 async function bwrapPath() {
@@ -245,24 +247,44 @@ export async function startPiLogin({ provider, stateDir, onEvent, onPrompt }) {
 function historyPrompt(messages) {
   return messages.slice(-20).map(message => `${message.role === 'assistant' ? 'Assistant' : 'User'}: ${message.content}`).join('\n\n');
 }
-async function agentInstructionsFile(root, label) {
-  const file = path.join(root, 'AGENTS.md');
-  try {
-    const metadata = await stat(file);
-    if (!metadata.isFile()) return '';
-    if (metadata.size > MAX_AGENT_INSTRUCTIONS) throw new Error(`${label} AGENTS.md is too large (maximum 64 KiB)`);
-    const content = await readFile(file, 'utf8');
-    return `\n\n[${label} instructions: AGENTS.md]\n${content.trim()}\n[End ${label.toLowerCase()} instructions]`;
-  } catch (error) {
-    if (error.code === 'ENOENT') return '';
-    throw error;
-  }
+export { workspaceAgentInstructions };
+
+function scopedPath(value) {
+  if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('A relative path is required');
+  const source = value.replace(/\\/g, '/');
+  if (path.posix.isAbsolute(source)) throw new Error('Path is outside the selected scope');
+  const normalized = path.posix.normalize(source).replace(/^\.\//, '');
+  if (normalized === '..' || normalized.startsWith('../')) throw new Error('Path is outside the selected scope');
+  return normalized;
 }
-export async function workspaceAgentInstructions(workspaceRoot, projectRoot = workspaceRoot) {
-  const workspace = path.resolve(workspaceRoot); const project = path.resolve(projectRoot);
-  const workspaceInstructions = await agentInstructionsFile(workspace, 'Workspace');
-  const projectInstructions = project === workspace ? '' : await agentInstructionsFile(project, 'Project');
-  return `${workspaceInstructions}${projectInstructions}`;
+
+export async function createToolContext({ workspaceRoot, projectRoot }) {
+  const [workspace, project] = await Promise.all([realpath(workspaceRoot), realpath(projectRoot)]);
+  const relative = path.relative(workspace, project);
+  if (relative && (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) throw new Error('Project root is outside the workspace');
+  return { workspace, project, projectPrefix: relative.split(path.sep).filter(Boolean).join('/') };
+}
+
+export function projectToolPath(context, value, scope = 'project') {
+  if (scope !== 'project' && scope !== 'workspace') throw new Error('Invalid tool scope');
+  const relative = scopedPath(value);
+  if (scope === 'workspace' || !context.projectPrefix) return relative;
+  return relative === '.' ? context.projectPrefix : `${context.projectPrefix}/${relative}`;
+}
+
+export function projectToolResultPath(context, value, scope = 'project') {
+  if (scope !== 'project' && scope !== 'workspace') throw new Error('Invalid tool scope');
+  if (scope === 'workspace' || !context.projectPrefix) return value;
+  if (value === context.projectPrefix) return '.';
+  const prefix = `${context.projectPrefix}/`;
+  if (!String(value).startsWith(prefix)) throw new Error('Worker returned a path outside the selected project');
+  return String(value).slice(prefix.length);
+}
+export function projectToolErrorMessage(context, message, scope = 'project') {
+  if (scope !== 'project' && scope !== 'workspace') throw new Error('Invalid tool scope');
+  if (scope === 'workspace' || !context.projectPrefix) return String(message);
+  const escaped = context.projectPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(message).replace(new RegExp(`(^|[\\s,:])${escaped}/`, 'g'), '$1');
 }
 export function projectToolResult(toolResult, git) {
   if (!git) return toolResult;
@@ -270,10 +292,11 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const worker = noWorkspaceTools ? null : await createTurnWorker(workspaceRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
-  const workspaceInstructions = systemPrompt ? '' : await workspaceAgentInstructions(workspaceRoot, projectRoot);
+  const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
+  const toolContext = worker ? await createToolContext({ workspaceRoot, projectRoot }) : null;
   const agentDir = path.join(stateDir, 'pi-agent');
   const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
   const apiKey = apiKeyFor(provider, env);
@@ -281,21 +304,44 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const model = modelRuntime.getModel(provider, modelId); if (!model) throw new Error(`Pi does not recognise ${provider}/${modelId}`);
   const loader = new DefaultResourceLoader({
     cwd: projectRoot, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-    systemPromptOverride: () => systemPrompt || `You are an ok-workbench workspace assistant. You can access only the served workspace through the supplied tools. Use extract_document for PDF, DOCX, PPTX, XLSX, ODT, ODP, and ODS files; it returns extracted text and does not modify the file. Use list_workspace_tools before running a workspace tool. Only executable Python 3 or Node.js scripts directly in tools/ or <project>/tools/ are available; pass each argument as a separate string, never as a shell command. Use create_project to create a discoverable top-level project; it returns the canonical project ID and location, which you must report accurately. Use apply_project_update for edits: use kind "substantive" plus a summary for substantive project work; aim for 280 characters or fewer, but prioritize an accurate useful summary. It automatically records the summary in log.md and requires a meaningful status.md change, plus an index.md change for structural additions. Use kind "correction" only for narrow corrections. Every new directory still needs an index.md in the same update. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md). Never claim access or a completed change you do not have. Make concise, reviewable edits only when asked.${workspaceInstructions}`
+    systemPromptOverride: () => systemPrompt || `You are an ok-workbench project assistant. The selected project is the default base for filesystem tool paths: a bare path such as status.md is in that project, and you must not prepend the project ID. Use scope "workspace" only when the user or supplied context explicitly identifies workspace-root or cross-project work. Response links remain workspace-relative Markdown paths such as [status](project/status.md). You can access only the served workspace through the supplied tools. Use extract_document for PDF, DOCX, PPTX, XLSX, ODT, ODP, and ODS files; it returns extracted text and does not modify the file. Use list_workspace_tools before running a workspace tool. Workspace tools use their discovered workspace-relative IDs. Only executable Python 3 or Node.js scripts directly in tools/ or <project>/tools/ are available; pass each argument as a separate string, never as a shell command. Use create_project to create a discoverable top-level project; it returns the canonical project ID and location, which you must report accurately. Use apply_project_update for edits: use kind "substantive" plus a summary for substantive project work; aim for 280 characters or fewer, but prioritize an accurate useful summary. It automatically records the summary in log.md and requires a meaningful status.md change, plus an index.md change for structural additions. Use kind "correction" only for narrow corrections. Every new directory still needs an index.md in the same update. Never claim access or a completed change you do not have. Make concise, reviewable edits only when asked.${workspaceInstructions}`
   });
   await loader.reload();
-  const call = async (name, params) => {
+  const call = async (name, params, transform = value => value, transformError = error => error) => {
     if (!worker) throw new Error('A supported sandbox is required before agent file tools can run');
     await onTool?.({ phase: 'started', name });
     try {
-      const result = await worker.call(name, params);
+      const result = transform(await worker.call(name, params));
       if (name === 'list_workspace_tools' && result.diagnostics?.length) logError('[ok-workbench] workspace tool metadata diagnostics', { diagnostics: result.diagnostics });
       await onTool?.({ phase: 'completed', name, changed: name === 'apply_project_update' || name === 'create_project', result });
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) {
-      await onTool?.({ phase: 'failed', name, error: error.message });
-      throw error;
+      const translated = transformError(error);
+      await onTool?.({ phase: 'failed', name, error: translated.message });
+      throw translated;
     }
+  };
+  const fileTool = async (name, params) => {
+    const scope = params.scope === undefined ? 'project' : params.scope;
+    const map = value => projectToolResultPath(toolContext, value, scope);
+    const mapError = error => new Error(projectToolErrorMessage(toolContext, error.message, scope));
+    if (name === 'list_files') {
+      const workerPath = projectToolPath(toolContext, params.path ?? '.', scope);
+      return call(name, { path: workerPath }, result => result.map(map), mapError);
+    }
+    if (name === 'read_file' || name === 'extract_document') {
+      const workerPath = projectToolPath(toolContext, params.path, scope);
+      return call(name, { path: workerPath }, result => ({ ...result, path: map(result.path) }), mapError);
+    }
+    if (name === 'search_files') {
+      const workerPath = projectToolPath(toolContext, '.', scope);
+      return call(name, { query: params.query, path: workerPath }, result => result.map(item => ({ ...item, path: map(item.path) })), mapError);
+    }
+    if (name === 'apply_project_update') {
+      const changes = params.changes.map(change => ({ ...change, path: projectToolPath(toolContext, change.path, scope) }));
+      return call(name, { kind: params.kind, summary: params.summary, changes }, result => ({ ...result, paths: result.paths.map(map) }), mapError);
+    }
+    throw new Error(`Unsupported project file tool: ${name}`);
   };
   const runWorkspaceTool = async params => {
     if (!worker) throw new Error('A supported sandbox is required before workspace tools can run');
@@ -318,13 +364,13 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     } finally { runner?.close(); }
   };
   const tools = noWorkspaceTools ? [] : [
-    defineTool({ name: 'list_files', label: 'List files', description: 'List files in the served workspace.', parameters: Type.Object({ path: Type.Optional(Type.String()) }), execute: (_id, params) => call('list_files', params) }),
-    defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file in the served workspace.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('read_file', params) }),
-    defineTool({ name: 'extract_document', label: 'Extract document text', description: 'Extract text from a PDF, DOCX, PPTX, XLSX, ODT, ODP, or ODS file in the served workspace. Use this for non-text office documents instead of read_file.', parameters: Type.Object({ path: Type.String() }), execute: (_id, params) => call('extract_document', params) }),
-    defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the served workspace.', parameters: Type.Object({ query: Type.String() }), execute: (_id, params) => call('search_files', params) }),
+    defineTool({ name: 'list_files', label: 'List files', description: 'List files in the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ path: Type.Optional(Type.String()), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('list_files', params) }),
+    defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file relative to the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ path: Type.String(), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('read_file', params) }),
+    defineTool({ name: 'extract_document', label: 'Extract document text', description: 'Extract a PDF, DOCX, PPTX, XLSX, ODT, ODP, or ODS document relative to the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ path: Type.String(), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('extract_document', params) }),
+    defineTool({ name: 'search_files', label: 'Search files', description: 'Search text files in the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ query: Type.String(), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('search_files', params) }),
     defineTool({ name: 'list_workspace_tools', label: 'List workspace tools', description: 'List executable Python 3 and Node.js scripts directly inside tools/ and each top-level project’s tools/ directory, including their declared environment-variable names, network policy, and timeout.', parameters: Type.Object({}), execute: (_id, params) => call('list_workspace_tools', params) }),
     defineTool({ name: 'run_workspace_tool', label: 'Run workspace tool', description: 'Run a discovered workspace tool without a shell. Provide its exact path and each argument as a separate string. Its colocated manifest controls which server environment variables it receives, whether it may use network access, and its timeout (30 seconds by default; up to 10 minutes).', parameters: Type.Object({ path: Type.String(), arguments: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })) }), execute: (_id, params) => runWorkspaceTool(params) }),
-    defineTool({ name: 'apply_project_update', label: 'Apply OKF project update', description: 'Apply a reviewable batch of project files. For substantive work, include an accurate summary; aim for 280 characters or fewer. Its summary is added to log.md, and it requires a changed status.md plus a changed index.md for structural additions. Use correction for up to three narrow file corrections. Each new nested directory needs an index.md.', parameters: Type.Object({ kind: Type.Union([Type.Literal('correction'), Type.Literal('substantive')]), summary: Type.Optional(Type.String()), changes: Type.Array(Type.Object({ path: Type.String(), content: Type.String() }), { minItems: 1, maxItems: 64 }) }), execute: (_id, params) => call('apply_project_update', params) }),
+    defineTool({ name: 'apply_project_update', label: 'Apply OKF project update', description: 'Apply a reviewable batch of selected-project files by default. Use scope "workspace" only for explicit workspace-root or cross-project work. For substantive work, include an accurate summary; aim for 280 characters or fewer. Its summary is added to log.md, and it requires a changed status.md plus a changed index.md for structural additions. Use correction for up to three narrow file corrections. Each new nested directory needs an index.md.', parameters: Type.Object({ kind: Type.Union([Type.Literal('correction'), Type.Literal('substantive')]), summary: Type.Optional(Type.String()), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])), changes: Type.Array(Type.Object({ path: Type.String(), content: Type.String() }), { minItems: 1, maxItems: 64 }) }), execute: (_id, params) => fileTool('apply_project_update', params) }),
     defineTool({ name: 'create_project', label: 'Create workspace project', description: 'Create and register a discoverable top-level project from the OKF project template. Use this instead of manually creating a project directory.', parameters: Type.Object({ id: Type.String(), title: Type.Optional(Type.String()) }), execute: async (_id, params) => {
       let git;
       try { git = await beforeCreateProject?.(); }

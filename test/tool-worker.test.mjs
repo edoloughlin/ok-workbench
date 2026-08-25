@@ -32,6 +32,15 @@ test('worker rejects traversal, private names, and symlink escapes while allowin
   await worker.applyPatch({ path: 'notes/new.md', content: 'safe' });
   assert.equal(await readFile(path.join(workspace, 'notes', 'new.md'), 'utf8'), 'safe');
 });
+test('worker search can start from a trusted project path', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-search-'));
+  await mkdir(path.join(workspace, 'alpha'), { recursive: true });
+  await mkdir(path.join(workspace, 'beta'), { recursive: true });
+  await writeFile(path.join(workspace, 'alpha', 'status.md'), 'launch date: alpha\n');
+  await writeFile(path.join(workspace, 'beta', 'status.md'), 'launch date: beta\n');
+  worker.setWorkspaceRoot(workspace);
+  assert.deepEqual(await worker.searchFiles('launch date', 'alpha'), [{ path: 'alpha/status.md', line: 1, text: 'launch date: alpha' }]);
+});
 test('worker extracts text from PDF and Office documents without exposing binary reads', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-documents-'));
   await writeFile(path.join(workspace, 'report.pdf'), '%PDF-1.4\nBT\n(Quarterly report) Tj\n<4865782074657874> Tj\nET\n');
@@ -75,6 +84,10 @@ test('worker discovers only executable Python or Node workspace tools in the per
   assert.deepEqual((await worker.listWorkspaceTools()).diagnostics, [{ path: 'tools/orphan.tool.json', error: 'Tool metadata does not match a script in this directory' }]);
   await assert.rejects(worker.applyPatch({ path: 'tools/top-tool.tool.json', content: '{}' }), /managed outside agent file updates/);
   await assert.rejects(worker.applyPatch({ path: 'tools/top-tool.js', content: 'console.log(1)' }), /managed outside agent file updates/);
+  await writeFile(path.join(workspace, 'tools', 'workspace-run.py'), '#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1])\n');
+  await chmod(path.join(workspace, 'tools', 'workspace-run.py'), 0o755);
+  const run = await worker.runWorkspaceTool({ path: 'tools/workspace-run.py', arguments: ['status.md'] });
+  assert.equal(run.ok, true); assert.equal(run.path, 'tools/workspace-run.py'); assert.equal(run.stdout.trim(), 'status.md');
   await assert.rejects(worker.runWorkspaceTool({ path: 'top-tool.js' }), /direct files/);
   await assert.rejects(worker.runWorkspaceTool({ path: 'tools/top-tool.js', arguments: ['\0'] }), /arguments/);
   await writeFile(path.join(workspace, 'tools', 'top-tool.tool.json'), JSON.stringify({ timeoutSeconds: 601 }));

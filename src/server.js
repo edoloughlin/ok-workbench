@@ -7,6 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
+const { workspaceAgentInstructions } = require('./agent-instructions.js');
 
 const PORT = Number(process.env.PORT || 3477);
 const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
@@ -721,7 +722,10 @@ function providerError(provider, model, error) {
     ? `${providerLabel(provider)} authentication failed${selection}. Check or replace its API key, or sign in again. ${message}`
     : `${providerLabel(provider)} request failed${selection}. ${message}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, maxTokens, noWorkspaceTools = false }) {
+function projectAssistantSystemPrompt(agentInstructions = '') {
+  return `You are a project-scoped coding assistant. The selected project is the default base for filesystem tool paths. A bare path such as status.md is in that project; do not prepend its project ID. Use scope "workspace" only for explicit workspace-root or cross-project work. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
+}
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -731,18 +735,18 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
     endpoint = 'https://api.anthropic.com/v1/messages';
     headers = { 'content-type': 'application/json', 'x-api-key': (await effectiveProviderEnvironment()).ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).', messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || projectAssistantSystemPrompt(agentInstructions), messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
   } else {
     endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `${process.env.LLM_COMPATIBLE_BASE_URL.replace(/\/$/, '')}/chat/completions`;
     const environment = await effectiveProviderEnvironment(); const apiKey = provider === 'openai' ? environment.OPENAI_API_KEY : environment.LLM_COMPATIBLE_API_KEY;
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || 'You are a project-scoped coding assistant. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).' }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || projectAssistantSystemPrompt(agentInstructions) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) {
@@ -1059,10 +1063,12 @@ const server = http.createServer(async (req, res) => {
       if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
       let outcome = 'failed';
       try {
-        const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: projectRootForId(thread.project), prompt: message }).catch(() => '') : null;
+        const selectedProjectRoot = projectRootForId(thread.project);
+        const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: selectedProjectRoot, prompt: message }).catch(() => '') : null;
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: projectRootForId(thread.project), workspaceRoot: BUNDLE_ROOT, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
+        const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
