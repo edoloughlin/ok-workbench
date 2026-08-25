@@ -52,9 +52,10 @@ test('section references preview the current document heading and remain anchors
   assert.match(css, /\.document \.section-reference/);
 });
 test('chat UI exposes the GitHub Copilot device code outside transient status text', async () => {
-  const [html, script, server, harness] = await Promise.all([
+  const [html, script, css, server, harness] = await Promise.all([
     readFile(path.join(root, 'src', 'public', 'index.html'), 'utf8'),
     readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8'),
+    readFile(path.join(root, 'src', 'public', 'app.css'), 'utf8'),
     readFile(path.join(root, 'src', 'server.js'), 'utf8'),
     readFile(path.join(root, 'src', 'pi-harness.mjs'), 'utf8'),
   ]);
@@ -133,7 +134,12 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /if \(!setupPrompted && !providerAvailable\) \{ setupPrompted = true; openChatSettings\(\); \}/);
   assert.match(server, /chat turn failed/);
   assert.match(script, /event\.type === 'turn\.thinking'/);
-  assert.match(script, /toggle\.append\(input, ' Show thinking'\)/);
+  assert.match(script, /if \(turn\.status === 'working'\) \{[\s\S]*toggle\.append\(input, ' Show thinking'\)/);
+  assert.match(script, /controls\.append\(toggle\)/);
+  assert.match(script, /controls\.append\(cancel\)/);
+  assert.match(css, /\.chat-turn-controls \{ display: inline-flex; min-width: 0; flex: 0 1 auto;/);
+  assert.match(css, /\.chat-thinking-toggle \{ min-width: 0; white-space: normal; \}/);
+  assert.match(css, /\.chat-turn-cancel \{ flex: none;[\s\S]*white-space: nowrap;/);
   assert.match(script, /showThinking: true/);
   assert.match(harness, /workspace tool timed out/);
   assert.match(server, /path\.relative\(git\.repo, candidate\)/);

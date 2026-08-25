@@ -391,8 +391,11 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-markdown a { color: var(--link); }
 .chat-tool-activity { margin: 0; padding: 4px 8px; color: var(--muted); border-left: 2px solid var(--accent); font: 11px var(--font-mono); }
 .chat-turn-thinking { margin: 7px 0 0; padding: 7px 9px; color: var(--muted); border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 5%, transparent); font: 12px/1.45 var(--font-ui); font-style: italic; white-space: pre-wrap; }
-.chat-turn-status { display: flex; align-items: center; gap: 5px; margin: 7px 0 0; color: var(--muted); font: 11px var(--font-ui); }
-.chat-turn-cancel { padding: 2px 6px; border: 1px solid var(--rule); border-radius: 4px; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.chat-turn-status { display: flex; align-items: center; gap: 8px; margin: 7px 0 0; color: var(--muted); font: 11px var(--font-ui); }
+.chat-turn-status-text { min-width: 0; flex: 1 1 auto; }
+.chat-turn-controls { display: inline-flex; min-width: 0; flex: 0 1 auto; align-items: center; gap: 8px; }
+.chat-thinking-toggle { min-width: 0; white-space: normal; }
+.chat-turn-cancel { flex: none; padding: 2px 6px; border: 1px solid var(--rule); border-radius: 4px; color: inherit; background: transparent; font: inherit; white-space: nowrap; cursor: pointer; }
 .chat-turn-cancel:hover, .chat-turn-cancel:focus-visible { color: var(--danger); border-color: var(--danger); outline: 0; }
 .chat-turn-highlight { animation: chat-turn-highlight 1.5s ease-out; }
 @keyframes chat-turn-highlight { 0%, 55% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent); } 100% { box-shadow: none; } }

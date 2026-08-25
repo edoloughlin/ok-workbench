@@ -842,9 +842,13 @@ function renderTurnStatusLine(turn, node = chatUi.messages.querySelector(`[data-
   if (!node) return;
   let status = node.querySelector('.chat-turn-status');
   if (!status) { status = document.createElement('p'); status.className = 'chat-turn-status'; node.append(status); }
-  status.replaceChildren(); status.textContent = turn.status === 'failed' ? (turn.error || 'Turn failed') : turn.status === 'cancelled' ? 'Stopped.' : turn.status === 'completed' ? 'Completed.' : turnStatusText(turn);
-  if (turn.status === 'working' && turn.lastActivityLabel === 'Model is thinking') { const toggle = document.createElement('label'); toggle.className = 'chat-thinking-toggle'; const input = document.createElement('input'); input.type = 'checkbox'; input.checked = Boolean(chatSettings.showThinking); input.addEventListener('change', () => setShowThinking(input.checked)); toggle.append(input, ' Show thinking'); status.append(' ', toggle); }
-  if (turn.status === 'working') { const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'chat-turn-cancel'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', () => cancelSpecificChatTurn(turn)); status.append(' ', cancel); }
+  status.replaceChildren(); const text = document.createElement('span'); text.className = 'chat-turn-status-text'; text.textContent = turn.status === 'failed' ? (turn.error || 'Turn failed') : turn.status === 'cancelled' ? 'Stopped.' : turn.status === 'completed' ? 'Completed.' : turnStatusText(turn); status.append(text);
+  if (turn.status === 'working') {
+    const controls = document.createElement('span'); controls.className = 'chat-turn-controls';
+    const toggle = document.createElement('label'); toggle.className = 'chat-thinking-toggle'; const input = document.createElement('input'); input.type = 'checkbox'; input.checked = Boolean(chatSettings.showThinking); input.addEventListener('change', () => setShowThinking(input.checked)); toggle.append(input, ' Show thinking'); controls.append(toggle);
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'chat-turn-cancel'; cancel.textContent = 'Cancel'; cancel.addEventListener('click', () => cancelSpecificChatTurn(turn)); controls.append(cancel);
+    status.append(controls);
+  }
   node.append(status);
 }
 function renderActiveTurn(turn) {
