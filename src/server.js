@@ -69,7 +69,7 @@ const API_KEY_PROVIDERS = {
 const DIRTY_PROJECT_STATE = new Map();
 const DIRTY_PROJECT_SNAPSHOTS = new Map();
 const DIRTY_WATCHERS = new Map();
-let ignoreRulesPromise;
+let ignoreRulesCache = { signature: null, rules: [] };
 let dirtyMonitorTimer = null;
 let dirtyMonitorRun = null;
 
@@ -132,7 +132,14 @@ function globRegex(pattern) {
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
     const char = pattern[i];
-    if (char === '*' && pattern[i + 1] === '*') { source += '.*'; i++; }
+    // Gitignore uses a backslash to quote special pattern characters. In
+    // particular, `\#*#` is the conventional rule for Emacs lock files:
+    // without this branch the backslash was treated as a literal character.
+    if (char === '\\' && pattern[i + 1] !== undefined) {
+      source += pattern[i + 1].replace(/[|\\{}()[\]^$+?.*]/g, '\\$&');
+      i++;
+    }
+    else if (char === '*' && pattern[i + 1] === '*') { source += '.*'; i++; }
     else if (char === '*') source += '[^/]*';
     else if (char === '?') source += '[^/]';
     else source += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
@@ -141,24 +148,26 @@ function globRegex(pattern) {
 }
 
 async function ignoreRules() {
-  if (!ignoreRulesPromise) ignoreRulesPromise = (async () => {
-    const file = path.join(BUNDLE_ROOT, '.gitignore');
-    if (!(await exists(file))) return [];
-    const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/);
-    return lines.map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(line => {
-      const negated = line.startsWith('!');
-      let pattern = negated ? line.slice(1) : line;
-      const directory = pattern.endsWith('/');
-      if (directory) pattern = pattern.slice(0, -1);
-      const anchored = pattern.startsWith('/');
-      if (anchored) pattern = pattern.slice(1);
-      const hasSlash = pattern.includes('/');
-      const prefix = anchored || hasSlash ? '^' : '(?:^|/)';
-      const suffix = directory ? '(?:/.*)?$' : '$';
-      return { negated, regex: new RegExp(`${prefix}${globRegex(pattern)}${suffix}`) };
-    });
-  })();
-  return ignoreRulesPromise;
+  const file = path.join(BUNDLE_ROOT, '.gitignore');
+  const stat = await fs.stat(file).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  const signature = stat ? `${stat.mtimeMs}:${stat.size}` : 'missing';
+  if (ignoreRulesCache.signature === signature) return ignoreRulesCache.rules;
+  if (!stat) return (ignoreRulesCache = { signature, rules: [] }).rules;
+  const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/);
+  const rules = lines.map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(line => {
+    const negated = line.startsWith('!');
+    let pattern = negated ? line.slice(1) : line;
+    const directory = pattern.endsWith('/');
+    if (directory) pattern = pattern.slice(0, -1);
+    const anchored = pattern.startsWith('/');
+    if (anchored) pattern = pattern.slice(1);
+    const hasSlash = pattern.includes('/');
+    const prefix = anchored || hasSlash ? '^' : '(?:^|/)';
+    const suffix = directory ? '(?:/.*)?$' : '$';
+    return { negated, regex: new RegExp(`${prefix}${globRegex(pattern)}${suffix}`) };
+  });
+  ignoreRulesCache = { signature, rules };
+  return rules;
 }
 
 async function isIgnored(file) {

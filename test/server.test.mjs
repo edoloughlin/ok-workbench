@@ -155,6 +155,8 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
   await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n\n- [Linked project](linked-project/index.md)\n* [ ] Direct task\n');
   await writeFile(path.join(workspace, 'linked-project', 'index.md'), '# Linked project\n');
   await writeFile(path.join(workspace, 'linked-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'linked-project', 'log.md'), '# Log\n');
+  await writeFile(path.join(workspace, '.gitignore'), '\\#*#\n');
+  await writeFile(path.join(workspace, 'linked-project', '#draft.md#'), '# Emacs lock file\n');
   await writeFile(path.join(workspace, 'unlisted-project', 'index.md'), '# Unlisted project\n');
   await writeFile(path.join(workspace, 'unlisted-project', 'status.md'), '# Status\n'); await writeFile(path.join(workspace, 'unlisted-project', 'log.md'), '# Log\n');
   await writeFile(path.join(workspace, 'tracked.md'), 'before\n'); await writeFile(path.join(sibling, 'tracked.md'), 'before\n');
@@ -169,6 +171,8 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.equal(document.status, 200); assert.equal((await document.json()).title, 'Test workspace');
     const project = await fetch(`http://127.0.0.1:${port}/api/project?path=/workspace/`);
     const projectBody = await project.json(); assert.ok(projectBody.projects.some(item => item.name === 'linked-project' && item.path === '/workspace/linked-project')); assert.ok(projectBody.projects.some(item => item.name === 'unlisted-project' && item.path === '/workspace/unlisted-project')); assert.ok(projectBody.projects.some(item => item.name === 'bare-project' && item.path === '/workspace/bare-project'));
+    const linkedProject = await fetch(`http://127.0.0.1:${port}/api/project?path=/workspace/linked-project/`);
+    const linkedProjectBody = await linkedProject.json(); assert.ok(linkedProjectBody.tree.every(item => item.path !== '/workspace/linked-project/%23draft.md%23'));
     const escaped = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/escape.md`);
     assert.equal(escaped.status, 404);
     const dirtyPage = await fetch(`http://127.0.0.1:${port}/workspace/`); const dirtyCsrf = (await dirtyPage.text()).match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(dirtyCsrf);
