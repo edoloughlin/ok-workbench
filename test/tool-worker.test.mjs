@@ -41,6 +41,18 @@ test('worker search can start from a trusted project path', async () => {
   worker.setWorkspaceRoot(workspace);
   assert.deepEqual(await worker.searchFiles('launch date', 'alpha'), [{ path: 'alpha/status.md', line: 1, text: 'launch date: alpha' }]);
 });
+test('worker moves files and applies selective edits against a fresh content hash', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-edits-'));
+  await mkdir(path.join(workspace, 'notes')); await writeFile(path.join(workspace, 'draft.md'), 'one\ntwo\nthree\n');
+  worker.setWorkspaceRoot(workspace);
+  const read = await worker.readFile('draft.md'); assert.match(read.hash, /^[a-f0-9]{12}$/);
+  const edited = await worker.editFile({ path: 'draft.md', hash: read.hash, edits: [{ startLine: 2, endLine: 2, replacement: 'second' }, { startLine: 3, endLine: 3, replacement: 'third\nfinal' }] });
+  assert.equal(await readFile(path.join(workspace, 'draft.md'), 'utf8'), 'one\nsecond\nthird\nfinal\n'); assert.match(edited.hash, /^[a-f0-9]{12}$/);
+  await assert.rejects(worker.editFile({ path: 'draft.md', hash: read.hash, edits: [{ startLine: 1, endLine: 1, replacement: 'stale' }] }), /content changed/);
+  assert.deepEqual(await worker.moveFile({ from: 'draft.md', to: 'notes/final.md' }), { from: 'draft.md', to: 'notes/final.md' });
+  assert.equal(await readFile(path.join(workspace, 'notes', 'final.md'), 'utf8'), 'one\nsecond\nthird\nfinal\n');
+  await assert.rejects(worker.moveFile({ from: 'notes/final.md', to: 'notes/final.md' }), /must differ/);
+});
 test('worker extracts text from PDF and Office documents without exposing binary reads', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-documents-'));
   await writeFile(path.join(workspace, 'report.pdf'), '%PDF-1.4\nBT\n(Quarterly report) Tj\n<4865782074657874> Tj\nET\n');

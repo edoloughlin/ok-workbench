@@ -7,6 +7,7 @@
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { constants } = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const readline = require('node:readline');
 const zlib = require('node:zlib');
@@ -24,6 +25,7 @@ const DEFAULT_TOOL_TIMEOUT_SECONDS = 30;
 const MAX_TOOL_TIMEOUT_SECONDS = 600;
 const MAX_TOOL_MANIFEST = 16 * 1024;
 const MAX_TOOL_ENVIRONMENT = 16;
+const CONTENT_HASH_LENGTH = 12;
 const DENIED = new Set(['.git', 'id_rsa', 'id_ed25519', 'known_hosts', 'credentials']);
 
 function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
@@ -60,10 +62,11 @@ async function listFiles(relative = '.') {
   }
   await visit(start.target, start.safe); return output;
 }
+function contentHash(content) { return crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, CONTENT_HASH_LENGTH); }
 async function readFile(relative) {
   const { safe, target } = await targetFor(relative); const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Path is not a file'); if (stat.size > MAX_READ) throw new Error('File is too large to read');
-  const content = await fs.readFile(target, 'utf8'); if (content.includes('\0')) throw new Error('Binary files are not available'); return { path: safe, content };
+  const content = await fs.readFile(target, 'utf8'); if (content.includes('\0')) throw new Error('Binary files are not available'); return { path: safe, content, hash: contentHash(content) };
 }
 function cappedDocumentText(value) {
   const text = String(value || '').replace(/\u0000/g, '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -278,6 +281,42 @@ async function applyPatch({ path: relative, content }) {
   if (existing?.isSymbolicLink()) throw new Error('Refusing to replace a symbolic link');
   await fs.writeFile(target, content, 'utf8'); return { path: safe, bytes: Buffer.byteLength(content) };
 }
+function managedPath(relative) { return isToolFile(relative) || safeRelative(relative).endsWith('.tool.json'); }
+async function moveFile({ from, to }) {
+  if (managedPath(from) || managedPath(to)) throw new Error('Workspace tools and their manifests are managed outside agent file updates');
+  const [source, destination] = await Promise.all([targetFor(from), targetFor(to, true)]);
+  if (source.safe === destination.safe) throw new Error('Source and destination paths must differ');
+  const sourceInfo = await fs.lstat(source.target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!sourceInfo?.isFile() || sourceInfo.isSymbolicLink()) throw new Error('Source must be a regular file');
+  const destinationInfo = await fs.lstat(destination.target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (destinationInfo) throw new Error('Destination already exists');
+  if (!(await directoryExists(path.dirname(destination.target)))) throw new Error('Destination directory does not exist');
+  await fs.rename(source.target, destination.target);
+  return { from: source.safe, to: destination.safe };
+}
+function linesForEdit(content) {
+  const newline = content.includes('\r\n') ? '\r\n' : '\n'; const finalNewline = content.endsWith(newline);
+  const body = finalNewline ? content.slice(0, -newline.length) : content;
+  return { lines: body ? body.split(newline) : [], newline, finalNewline };
+}
+function replacementLines(content) { return content === '' ? [] : content.replace(/\r\n?/g, '\n').split('\n'); }
+async function editFile({ path: relative, hash, edits }) {
+  if (managedPath(relative)) throw new Error('Workspace tools and their manifests are managed outside agent file updates');
+  if (typeof hash !== 'string' || !new RegExp(`^[a-f0-9]{${CONTENT_HASH_LENGTH}}$`).test(hash)) throw new Error(`Provide the ${CONTENT_HASH_LENGTH}-character content hash returned by read_file`);
+  if (!Array.isArray(edits) || !edits.length || edits.length > 64) throw new Error('Provide 1–64 line-range edits');
+  const { safe, target } = await targetFor(relative, true); const info = await fs.lstat(target);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error('Path is not a regular file'); if (info.size > MAX_READ) throw new Error('File is too large to edit');
+  const original = await fs.readFile(target, 'utf8'); if (original.includes('\0')) throw new Error('Binary files are not available');
+  if (contentHash(original) !== hash) throw new Error('File content changed since it was read; re-read the file and use its current hash');
+  const { lines, newline, finalNewline } = linesForEdit(original); const prepared = edits.map(edit => {
+    if (!edit || !Number.isInteger(edit.startLine) || !Number.isInteger(edit.endLine) || edit.startLine < 1 || edit.endLine < edit.startLine || edit.endLine > lines.length || typeof edit.replacement !== 'string' || edit.replacement.length > 1024 * 1024) throw new Error('Each edit needs valid startLine, endLine, and replacement text');
+    return { startLine: edit.startLine, endLine: edit.endLine, replacement: replacementLines(edit.replacement) };
+  }).sort((left, right) => left.startLine - right.startLine);
+  for (let index = 1; index < prepared.length; index++) if (prepared[index - 1].endLine >= prepared[index].startLine) throw new Error('Line-range edits must not overlap');
+  for (const edit of [...prepared].reverse()) lines.splice(edit.startLine - 1, edit.endLine - edit.startLine + 1, ...edit.replacement);
+  const content = `${lines.join(newline)}${finalNewline ? newline : ''}`; await fs.writeFile(target, content, 'utf8');
+  return { path: safe, hash: contentHash(content), bytes: Buffer.byteLength(content), edits: prepared.length };
+}
 async function directoryExists(target) { return fs.stat(target).then(value => value.isDirectory()).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error)); }
 function normalizeMarkdown(value) { return String(value).replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd(); }
 async function existingContent(relative) {
@@ -362,7 +401,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
 
 function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), move_file: moveFile, edit_file: editFile, list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // The launcher waits for this acknowledgement before exposing file tools.
   // A spawn event alone does not prove that the OS sandbox accepted the worker.
@@ -383,6 +422,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, extractDocument, searchFiles, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
+module.exports = { setWorkspaceRoot, listFiles, readFile, extractDocument, searchFiles, moveFile, editFile, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();

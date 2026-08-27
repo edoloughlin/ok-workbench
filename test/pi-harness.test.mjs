@@ -83,7 +83,7 @@ test('macOS Seatbelt worker can service workspace tools', { skip: process.platfo
   const worker = await createTurnWorker(workspace);
   assert.ok(worker, 'sandbox-exec must be available on macOS');
   try {
-    assert.deepEqual(await worker.call('read_file', { path: 'note.md' }), { path: 'note.md', content: 'sandboxed\n' });
+    assert.deepEqual(await worker.call('read_file', { path: 'note.md' }), { path: 'note.md', content: 'sandboxed\n', hash: '81d9084cfeab' });
   } finally {
     worker.close();
   }
