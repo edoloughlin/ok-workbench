@@ -215,6 +215,7 @@ export async function configuredPiProviders({ stateDir, env = process.env } = {}
         models: models.map(model => ({
           id: model.id,
           label: model.name || model.id,
+          supportsSteering: true,
           // Pi maps only exceptional values. Unmapped low-through-high levels
           // use the provider default; xhigh and max require explicit support.
           thinkingLevels: model.reasoning ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter(level => {
@@ -296,7 +297,7 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const worker = noWorkspaceTools ? null : await createTurnWorker(workspaceRoot); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
   const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
@@ -393,6 +394,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const unsubscribe = session.subscribe(event => {
     const assistantType = event.assistantMessageEvent?.type;
     if (TURN_DIAGNOSTICS) log('[ok-workbench] pi-session-event', { type: event.type, assistantMessageEventType: assistantType });
+    if (event.type === 'message_start' && event.message?.role === 'assistant') onResponseStart?.();
     if (event.type === 'message_update' && assistantType === 'text_delta') { reportStatus('responding'); onDelta(event.assistantMessageEvent.delta); return; }
     // These event names are part of Pi's assistant stream vocabulary. Their
     // payloads are intentionally ignored: status proves liveness without ever
@@ -405,5 +407,6 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     if (['auto_retry_start', 'summarization_retry_scheduled', 'summarization_retry_attempt_start'].includes(event.type)) reportStatus('retrying');
   });
   const abort = () => session.abort().catch(() => {}); signal?.addEventListener('abort', abort, { once: true });
+  onSteerReady?.(message => session.steer(message));
   try { await session.prompt(historyPrompt(messages)); } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
 }

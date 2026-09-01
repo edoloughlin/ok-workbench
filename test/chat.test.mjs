@@ -23,12 +23,13 @@ test('chat coordinator streams and persists a compatible-provider turn without r
   await writeFile(path.join(workspace, 'alpha', 'AGENTS.md'), '# Alpha rules\n\nUse alpha terminology.\n');
   const legacyThread = { id: 'legacythread', project: 'workspace', provider: 'compatible', model: 'fake-model', effort: '', title: 'Legacy', messages: [{ id: 'legacyassistant', role: 'assistant', content: 'Old reply', createdAt: new Date().toISOString() }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await mkdir(state, { recursive: true }); await writeFile(path.join(state, `${legacyThread.id}.json`), JSON.stringify(legacyThread));
-  let rejectNextRequest = false; const providerRequests = [];
+  let rejectNextRequest = false; let releaseHeldResponse = null; const providerRequests = [];
   const provider = createServer(async (request, response) => {
     let body = ''; for await (const chunk of request) body += chunk;
-    providerRequests.push(JSON.parse(body));
+    const providerRequest = JSON.parse(body); providerRequests.push(providerRequest);
     if (rejectNextRequest) { response.writeHead(401, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'API key has expired' } })); return; }
     response.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (providerRequest.max_tokens !== 48 && providerRequest.messages?.at(-1)?.content === 'Hold response') { response.write('data: {"choices":[{"delta":{"content":"Holding"}}]}\n\n'); await new Promise(resolve => { releaseHeldResponse = resolve; }); response.end('data: [DONE]\n\n'); return; }
     response.end('data: {"choices":[{"delta":{"content":"Fake reply"}}]}\n\ndata: [DONE]\n\n');
   });
   const providerPort = await listen(provider); const port = await availablePort();
@@ -36,7 +37,7 @@ test('chat coordinator streams and persists a compatible-provider turn without r
   try {
     const page = await fetch(`http://127.0.0.1:${port}/workspace/`); const csrf = (await page.text()).match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
     const loadedLegacy = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${legacyThread.id}`, { headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(loadedLegacy.status, 200); assert.equal((await loadedLegacy.json()).messages[0].turnId, undefined);
-    const status = await fetch(`http://127.0.0.1:${port}/api/chat/status`); const statusBody = await status.json(); assert.equal(statusBody.enabled, true); assert.ok(statusBody.providers.some(provider => provider.id === 'compatible'));
+    const status = await fetch(`http://127.0.0.1:${port}/api/chat/status`); const statusBody = await status.json(); assert.equal(statusBody.enabled, true); const compatible = statusBody.providers.find(provider => provider.id === 'compatible'); assert.ok(compatible); assert.equal(compatible.models[0].supportsSteering, false);
     const headers = { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf };
     const created = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'workspace', provider: 'compatible', model: 'fake-model' }) });
     assert.equal(created.status, 201); const thread = await created.json();
@@ -45,6 +46,12 @@ test('chat coordinator streams and persists a compatible-provider turn without r
     for (const event of events.filter(event => event.type === 'turn.status')) assert.deepEqual(Object.keys(event).sort(), ['sequence', 'state', 'thread_id', 'turn_id', 'type']);
     const started = events.find(event => event.type === 'turn.started'); assert.ok(started?.turn_id);
     const saved = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`); const savedThread = await saved.json(); assert.equal(savedThread.messages.at(-1).content, 'Fake reply'); assert.equal(savedThread.messages.at(-1).model, 'fake-model'); assert.equal(savedThread.messages.at(-1).effort, ''); assert.equal(savedThread.messages.at(-1).turnId, started.turn_id);
+    const heldCreated = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'workspace', provider: 'compatible', model: 'fake-model' }) }); const heldThread = await heldCreated.json();
+    const heldTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${heldThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hold response', provider: 'compatible', model: 'fake-model' }) }); const heldReader = heldTurn.body.getReader(); const heldFirst = new TextDecoder().decode((await heldReader.read()).value); const heldStarted = heldFirst.split('\n').filter(Boolean).map(line => JSON.parse(line)).find(event => event.type === 'turn.started'); assert.equal(heldStarted.supports_steering, false);
+    const overlapping = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${heldThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Second comment', provider: 'compatible', model: 'fake-model' }) }); assert.equal(overlapping.status, 400); assert.match((await overlapping.json()).error, /active response/);
+    const unsupportedSteer = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${heldThread.id}/turns/${heldStarted.turn_id}/steer`, { method: 'POST', headers, body: JSON.stringify({ message: 'Change direction' }) }); assert.equal(unsupportedSteer.status, 400); assert.match((await unsupportedSteer.json()).error, /does not support steering/);
+    const parallelCreated = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'alpha', provider: 'compatible', model: 'fake-model' }) }); const parallelThread = await parallelCreated.json(); const parallelTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${parallelThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Parallel project turn', provider: 'compatible', model: 'fake-model' }) }); assert.equal(parallelTurn.status, 200); await parallelTurn.text();
+    releaseHeldResponse(); while (!(await heldReader.read()).done) { /* drain held turn */ }
     rejectNextRequest = true;
     const failedCreated = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'workspace', provider: 'compatible', model: 'fake-model' }) }); assert.equal(failedCreated.status, 201); const failedThread = await failedCreated.json();
     const failedTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${failedThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hello again', provider: 'compatible', model: 'fake-model' }) });

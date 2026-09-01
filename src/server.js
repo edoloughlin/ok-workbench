@@ -72,6 +72,7 @@ const DIRTY_WATCHERS = new Map();
 let ignoreRulesCache = { signature: null, rules: [] };
 let dirtyMonitorTimer = null;
 let dirtyMonitorRun = null;
+function activeTurnForThread(threadId) { return [...ACTIVE_TURNS.values()].find(turn => turn.threadId === threadId) || null; }
 
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
@@ -638,8 +639,12 @@ async function providerCatalog() {
   const configured = await configuredPiProviders({ stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() });
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
-  if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL }] : [] });
-  return configured;
+  if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
+  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true })) }));
+}
+function providerUsesPi(provider) {
+  const direct = process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1';
+  return provider !== 'compatible' && !(direct && (provider === 'anthropic' || provider === 'openai'));
 }
 async function chatStatus(provider) {
   const startedAt = Date.now();
@@ -734,7 +739,7 @@ function providerError(provider, model, error) {
 function projectAssistantSystemPrompt(agentInstructions = '') {
   return `You are a project-scoped coding assistant. The selected project is the default base for filesystem tool paths. A bare path such as status.md is in that project; do not prepend its project ID. Use scope "workspace" only for explicit workspace-root or cross-project work. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -742,9 +747,9 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // Pi owns all providers it discovers, including the subscription-only
   // openai-codex provider. The direct HTTP adapter below is only an opt-in
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
-  if (provider !== 'compatible' && !((process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1') && (provider === 'anthropic' || provider === 'openai'))) {
+  if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -1049,6 +1054,21 @@ const server = http.createServer(async (req, res) => {
     const threadMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)$/);
     if (threadMatch && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await loadThread(threadMatch[1])); }
     if (threadMatch && req.method === 'DELETE') { assertChatRequest(req); await fs.unlink(threadFile(threadMatch[1])); return respond(res, 204, ''); }
+    const steerMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/steer$/);
+    if (steerMatch && req.method === 'POST') {
+      assertChatRequest(req); const body = await readJson(req); const message = String(body.message || '').trim();
+      if (!message) throw new Error('A steering comment is required'); if (message.length > 50_000) throw new Error('Steering comment is too long');
+      const active = ACTIVE_TURNS.get(steerMatch[2]);
+      if (!active || active.threadId !== steerMatch[1]) throw new Error('Active turn not found');
+      if (!active.supportsSteering) throw new Error('The active model does not support steering; cancel the response before sending another comment');
+      if (!active.steer) throw new Error('Steering is not ready yet');
+      await withThreadWrite(active.threadId, async () => {
+        if (ACTIVE_TURNS.get(steerMatch[2]) !== active) throw new Error('Active turn not found');
+        await active.steer(message);
+        const current = await loadThread(active.threadId); current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator: 'user', steering: true, targetTurnId: steerMatch[2], content: message, createdAt: new Date().toISOString() }); await saveThread(current);
+      });
+      return json(res, 202, { accepted: true, turnId: steerMatch[2] });
+    }
     const cancelMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)$/);
     if (cancelMatch && req.method === 'DELETE') {
       assertChatRequest(req);
@@ -1060,15 +1080,17 @@ const server = http.createServer(async (req, res) => {
     const turnMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns$/);
     if (turnMatch && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const message = String(body.message || '').trim(); if (!message) throw new Error('A chat message is required'); if (message.length > 50_000) throw new Error('Chat message is too long');
+      const turnId = crypto.randomUUID().replace(/-/g, ''); const abort = new AbortController(); let active;
       const thread = await withThreadWrite(turnMatch[1], async () => {
+        if (activeTurnForThread(turnMatch[1])) throw new Error('This thread already has an active response; steer it or cancel it before sending another comment');
         const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
         const initiator = body.initiator === 'system' ? 'system' : 'user';
-        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, createdAt: new Date().toISOString() }); await saveThread(current); return current;
+        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, createdAt: new Date().toISOString() }); await saveThread(current);
+        active = { threadId: current.id, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); return current;
       }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
-      const turnId = crypto.randomUUID().replace(/-/g, '');
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-      const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started');
-      let reply = ''; const startedAt = Date.now(); const abort = new AbortController(); ACTIVE_TURNS.set(turnId, { threadId: thread.id, abort }); req.on('aborted', () => abort.abort());
+      const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
+      let reply = ''; let pendingSteeringBoundary = false; const startedAt = Date.now(); req.on('aborted', () => abort.abort());
       if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
       let outcome = 'failed';
       try {
@@ -1077,7 +1099,7 @@ const server = http.createServer(async (req, res) => {
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
         const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;

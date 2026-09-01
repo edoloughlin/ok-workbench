@@ -519,7 +519,8 @@ async function applyTodo() {
     const sideEffectCheck = todoUi.useLlm.checked;
     const prompt = `I updated the task in ${activeTodo.path} (lines ${activeTodo.startLine}-${activeTodo.endLine}) to:\n\n${replacement}\n\nBriefly check this project for related side effects. Update only any task, status, or log items that genuinely need to stay consistent, then summarize what you found.${todoUi.prompt.value.trim() ? `\n\nAdditional instruction: ${todoUi.prompt.value.trim()}` : ''}`;
     closeTodo(); await loadPage(); refreshGitStatus();
-    if (sideEffectCheck) { addChatMessage('user', prompt, false, new Date().toISOString(), { initiator: 'system' }); await streamChatTurn(prompt, { model: todoUi.model.value, initiator: 'system' }); }
+    if (sideEffectCheck && !currentChatTurn()) { addChatMessage('user', prompt, false, new Date().toISOString(), { initiator: 'system' }); await streamChatTurn(prompt, { model: todoUi.model.value, initiator: 'system' }); }
+    else if (sideEffectCheck) setChatStatus('Task updated. Cancel or finish the active response before running its side-effect check.');
   } catch (error) { alert(error.message || 'Could not update task'); }
   finally { todoUi.apply.disabled = false; }
 }
@@ -587,7 +588,7 @@ function setChatStatus(message) { chatUi.status.textContent = message; }
 function dirtyItemsFor(project = chatProjectId) { return Array.isArray(dirtyProjectItems[project]) ? dirtyProjectItems[project] : []; }
 function renderDirtyProcessPrompt() {
   const items = dirtyItemsFor(); chatUi.processDirty.hidden = items.length === 0;
-  chatUi.processDirty.disabled = processingDirtyChanges;
+  chatUi.processDirty.disabled = processingDirtyChanges || Boolean(currentChatTurn());
   if (!items.length) { chatUi.processDirty.removeAttribute('title'); return; }
   chatUi.processDirty.title = `These items were changed:\n\n${items.map(item => `• ${item.path}`).join('\n')}\n\nClick to have AI assess and update related files.`;
 }
@@ -606,6 +607,7 @@ async function refreshDirtyStatus() {
 }
 async function processDirtyChanges() {
   const project = chatProjectId; const items = dirtyItemsFor(project); if (processingDirtyChanges || !project || !items.length) return;
+  if (currentChatTurn()) { setChatStatus('Cancel or finish the active response before processing changes.'); return; }
   processingDirtyChanges = true; renderDirtyProcessPrompt();
   const message = `Review this accumulated batch of filesystem changes and bring the project state up to date.\n\nChanged items:\n${items.map(item => `- ${item.path}`).join('\n')}\n\nUpdate every related index.md, including affected directory indexes, and update the project status.md and log.md. Inspect the project for impacts on other files. Make only changes that are genuinely needed. Discover and run relevant available project checks (for example /tools/mdcheck when present). If a check reports an actionable error, investigate it, make a careful repair, and rerun the check. If you cannot resolve a reported error, do not claim success: explain clearly what failed, what you tried, and what the user should do next. Summarize the result.`;
   try {
@@ -622,7 +624,14 @@ async function processDirtyChanges() {
 function activeTurnsFor(projectId = chatProjectId, threadId = chatThreadId) { return [...activeChatTurns].filter(turn => turn.projectId === projectId && turn.threadId === threadId); }
 function activeTurnFor(projectId = chatProjectId, threadId = chatThreadId) { return activeTurnsFor(projectId, threadId).at(-1) || null; }
 function currentChatTurn() { return activeTurnFor(); }
-function syncChatTurnControls() { chatUi.send.disabled = false; chatUi.stop.hidden = !currentChatTurn(); }
+function syncChatTurnControls() {
+  const turn = currentChatTurn(); const steering = Boolean(turn?.supportsSteering); const ready = steering && turn.steeringReady && !turn.steeringSubmitting;
+  chatUi.stop.hidden = !turn; chatUi.send.textContent = turn && steering ? 'Steer' : 'Send'; chatUi.send.disabled = Boolean(turn) && !ready;
+  chatUi.processDirty.disabled = processingDirtyChanges || Boolean(turn);
+  chatUi.input.disabled = Boolean(turn) && !steering;
+  chatUi.input.placeholder = !turn ? 'Ask about this project…' : steering ? (turn.steeringReady ? 'Add a steering comment…' : 'Preparing steering…') : 'Cancel the current response to send another comment';
+  chatUi.send.title = turn && !steering ? 'Cancel the current response before sending another comment.' : '';
+}
 function renderTurnNotifications() {
   chatUi.notificationsCount.hidden = turnNotifications.length === 0;
   chatUi.notificationsCount.textContent = turnNotifications.length > 9 ? '9+' : String(turnNotifications.length);
@@ -795,9 +804,9 @@ function scrollChatToLatest({ force = false } = {}) {
     if (force || chatFollowsActivity) chatUi.messages.scrollTop = chatUi.messages.scrollHeight;
   });
 }
-function messageHeader(role, error, createdAt, { model = '', effort = '', initiator = 'user' } = {}) {
+function messageHeader(role, error, createdAt, { model = '', effort = '', initiator = 'user', steering = false } = {}) {
   const header = document.createElement('header'); header.className = 'chat-message-header';
-  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? (initiator === 'system' ? 'System' : 'You') : error ? 'Error' : `${model || 'Model unavailable'} · ${effort || 'Default effort'}`;
+  const meta = document.createElement('span'); meta.className = 'message-meta'; meta.textContent = role === 'user' ? (initiator === 'system' ? 'System' : steering ? 'You · Steering' : 'You') : error ? 'Error' : `${model || 'Model unavailable'} · ${effort || 'Default effort'}`;
   const timestamp = document.createElement('time'); timestamp.className = 'message-time'; timestamp.dateTime = createdAt || ''; timestamp.textContent = formatThreadTime(createdAt);
   header.append(meta, timestamp); return header;
 }
@@ -811,7 +820,7 @@ function renderChatMessages(messages = [], threadSettings = {}) {
     else if (!message.error && message.role === 'user') renderUserMarkdown(content, message.content || '');
     else content.textContent = message.content || '';
     if (message.turnId) node.dataset.turnId = message.turnId;
-    node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort, initiator: message.initiator }), content); chatUi.messages.append(node);
+    node.append(messageHeader(message.role, message.error, message.createdAt, { model: message.model || threadSettings.model, effort: message.effort || threadSettings.effort, initiator: message.initiator, steering: message.steering }), content); chatUi.messages.append(node);
   }
   for (const turn of activeTurnsFor(chatProjectId, chatThreadId)) if (!turn.id || !chatUi.messages.querySelector(`[data-turn-id="${turn.id}"]`)) renderActiveTurn(turn);
   scrollChatToLatest({ force: true });
@@ -957,10 +966,22 @@ async function cancelChatTurn() {
   if (!turn) return;
   cancelSpecificChatTurn(turn);
 }
+async function steerChatTurn(turn, message) {
+  if (!turn?.id || !turn.supportsSteering || !turn.steeringReady || turn.steeringSubmitting) throw new Error('Steering is not available for this response yet');
+  turn.steeringSubmitting = true; syncChatTurnControls(); setChatStatus('Sending steering comment…');
+  try {
+    const response = await chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}/steer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message }) });
+    const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not steer the active response');
+    const assistant = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`); addChatMessage('user', message, false, new Date().toISOString(), { steering: true }); if (assistant) chatUi.messages.append(assistant);
+    turn.activities.push({ kind: 'steering', label: 'Steering comment accepted', at: Date.now(), done: true }); renderActiveTurn(turn); setChatStatus('Steering accepted');
+  } finally { turn.steeringSubmitting = false; syncChatTurnControls(); }
+}
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
+  if (currentChatTurn()) { setChatStatus('Cancel or steer the active response first.'); return false; }
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread({ force: true });
-  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
+  const selectedModel = chatModels.find(item => item.id === model);
+  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, supportsSteering: selectedModel?.supportsSteering === true, steeringReady: false, steeringSubmitting: false, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
   if (isVisible()) renderActiveTurn(turn); let projectCreated = false; let completed = false;
@@ -971,7 +992,8 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');
     if (initiator !== 'system') { chatThreadHasUserChat = true; updateNewThreadAvailability(); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
-    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') turn.id = event.turn_id || null;
+    for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') { turn.id = event.turn_id || null; turn.supportsSteering = event.supports_steering === true; syncChatTurnControls(); }
+      else if (event.type === 'turn.steering') { turn.steeringReady = event.available === true; syncChatTurnControls(); }
       else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.thinkingText = ''; turn.lastActivityLabel = 'Writing response'; if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
       else if (event.type === 'turn.thinking') { turn.thinkingText += event.delta || ''; turn.lastActivityLabel = 'Model is thinking'; }
       else if (event.type === 'tool.started') { turn.activities.push({ kind: 'tool', label: `Running ${event.tool || 'workspace tool'}…`, at: Date.now(), done: false }); turn.lastActivityLabel = event.tool || 'Running tool'; }
@@ -1076,7 +1098,11 @@ chatUi.codexLogin.addEventListener('click', () => signInToProvider('openai-codex
 chatUi.copilotLogin.addEventListener('click', () => signInToProvider('github-copilot'));
 chatUi.newThread.addEventListener('click', () => createChatThread().catch(error => setChatStatus(error.message)));
 chatUi.thread.addEventListener('change', () => loadChatThread(chatUi.thread.value).catch(error => setChatStatus(error.message)));
-chatUi.composer.addEventListener('submit', event => { event.preventDefault(); const message = chatUi.input.value.trim(); if (!message) return; chatUi.input.value = ''; addChatMessage('user', message); streamChatTurn(message); });
+chatUi.composer.addEventListener('submit', event => {
+  event.preventDefault(); const message = chatUi.input.value.trim(); if (!message) return; const turn = currentChatTurn();
+  if (turn) { if (!turn.supportsSteering || !turn.steeringReady) { setChatStatus('Cancel the active response before sending another comment.'); return; } chatUi.input.value = ''; void steerChatTurn(turn, message).catch(error => { if (!chatUi.input.value) chatUi.input.value = message; setChatStatus(error.message); }); return; }
+  chatUi.input.value = ''; addChatMessage('user', message); void streamChatTurn(message);
+});
 chatUi.input.addEventListener('keydown', event => { if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return; event.preventDefault(); chatUi.composer.requestSubmit(); });
 chatUi.processDirty.addEventListener('click', () => { processDirtyChanges().catch(error => setChatStatus(error.message || 'Could not process project changes')); });
 chatUi.stop.addEventListener('click', () => cancelChatTurn());

@@ -137,6 +137,14 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /if \(turn\.status === 'working'\) \{[\s\S]*toggle\.append\(input, ' Show thinking'\)/);
   assert.match(script, /controls\.append\(toggle\)/);
   assert.match(script, /controls\.append\(cancel\)/);
+  assert.match(harness, /supportsSteering: true/);
+  assert.match(harness, /onSteerReady\?\.\(message => session\.steer\(message\)\)/);
+  assert.match(server, /function activeTurnForThread\(threadId\)/);
+  assert.match(server, /The active model does not support steering/);
+  assert.match(server, /This thread already has an active response/);
+  assert.match(script, /chatUi\.send\.textContent = turn && steering \? 'Steer' : 'Send'/);
+  assert.match(script, /Cancel the current response to send another comment/);
+  assert.match(script, /async function steerChatTurn\(turn, message\)/);
   assert.match(css, /\.chat-turn-controls \{ display: inline-flex; min-width: 0; flex: 0 1 auto;/);
   assert.match(css, /\.chat-thinking-toggle \{ min-width: 0; white-space: normal; \}/);
   assert.match(css, /\.chat-turn-cancel \{ flex: none;[\s\S]*white-space: nowrap;/);
