@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Type } from 'typebox';
 import agentInstructions from './agent-instructions.js';
+import { runPython } from './python-runner.mjs';
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -424,7 +425,21 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
     } catch (error) { await onTool?.({ phase: 'failed', name, error: error.message }); throw error; }
   };
+  const runPythonTool = async params => {
+    const name = 'run_python';
+    await onTool?.({ phase: 'started', name });
+    try {
+      const result = await runPython(params, { projectRoot, env, signal });
+      await onTool?.({ phase: 'completed', name, changed: result.artifacts.length > 0, result });
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+    } catch (error) {
+      await onTool?.({ phase: 'failed', name, error: error.message });
+      throw error;
+    }
+  };
+  const runPythonDefinition = defineTool({ name: 'run_python', label: 'Run Python', description: 'Run Python code with the locally installed interpreter in an isolated Linux sandbox without network access. The tool is available for discovery, but execution requires the server operator to set OK_WORKBENCH_PYTHON=1. Explicit inputs are selected-project-relative regular files copied read-only to /workspace (the working directory). Write temporary and final files under /output. To preserve a final file, declare its staged_path and new project_path in the required artifacts manifest with preserve true; all other staged files are deleted. Use artifacts: [] when only stdout or stderr is needed. Artifacts are promoted only after a successful exit and never overwrite existing project files. Use for calculations, JSON/CSV analysis, Pillow images, CairoSVG conversion, and OpenCV via opencv-python-headless. Supply packages on each call; allowed packages install as wheels in a separate temporary sandbox without project access. Local script inputs can be executed using runpy.run_path. No shell, persistent environment, or interactive input. stdout and stderr are returned and capped at 64 KiB each.', parameters: Type.Object({ code: Type.String({ maxLength: 65536 }), artifacts: Type.Array(Type.Object({ staged_path: Type.String(), project_path: Type.String(), preserve: Type.Boolean() }, { additionalProperties: false }), { maxItems: 64 }), inputs: Type.Optional(Type.Array(Type.String(), { maxItems: 64 })), packages: Type.Optional(Type.Array(Type.String(), { maxItems: 16 })), arguments: Type.Optional(Type.Array(Type.String(), { maxItems: 32 })), stdin: Type.Optional(Type.String({ maxLength: 65536 })), timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 120 })) }), execute: (_id, params) => runPythonTool(params) });
   const tools = noWorkspaceTools ? [] : [
+    runPythonDefinition,
     defineTool({ name: 'web_search', label: 'Search the web', description: 'Search the public web for current or externally verifiable information. Results contain untrusted third-party titles, snippets, and URLs; cite the URLs used in the response.', parameters: Type.Object({ query: Type.String({ maxLength: 500 }), max_results: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })) }), execute: (_id, params) => runWebSearch(params) }),
     defineTool({ name: 'list_files', label: 'List files', description: 'List files in the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ path: Type.Optional(Type.String()), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('list_files', params) }),
     defineTool({ name: 'read_file', label: 'Read file', description: 'Read a text file relative to the selected project by default. Use scope "workspace" only for explicit workspace-root or cross-project work.', parameters: Type.Object({ path: Type.String(), scope: Type.Optional(Type.Union([Type.Literal('project'), Type.Literal('workspace')])) }), execute: (_id, params) => fileTool('read_file', params) }),

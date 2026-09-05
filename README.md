@@ -66,6 +66,8 @@ The project assistant can search the public web when it needs current or externa
 
 ## Workspace tools
 
+For general Python calculations, file processing, and image conversion, you can enable the isolated `run_python` tool on Linux. It uses your local Python interpreter and can install allowlisted dependencies into temporary directories. See [Python setup, usage, and security limits](docs/PYTHON.md).
+
 The assistant can discover executable Python 3 and Node.js scripts placed directly in `tools/` or `<project>/tools/`. Each tool needs a standard shebang such as `#!/usr/bin/env python3` or `#!/usr/bin/env node`. Tools run without a shell, with each supplied argument kept separate, a 30-second default limit, and captured output.
 
 Optional policy lives beside the script in `<tool-name>.tool.json`, where `<tool-name>` excludes the script extension. For example, the policy for `tools/jira-sync.js` is `tools/jira-sync.tool.json`. The full-filename form (`jira-sync.js.tool.json`) is also accepted for compatibility, but do not create both. It is visible to the assistant but is not writable by it; scripts under `tools/` are likewise read/run-only from the assistant's perspective. Never put a secret value in this file.
