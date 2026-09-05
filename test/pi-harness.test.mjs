@@ -95,6 +95,22 @@ test('project tool result preserves the Pi tool-result envelope and creation met
   assert.deepEqual(result.details.result, { id: 'planning', location: '/workspace/planning', git: { initialized: true, repository: '/tmp/workspace' } });
   assert.deepEqual(JSON.parse(result.content[0].text), result.details.result);
 });
+test('web search returns bounded, decoded, canonical public results', async () => {
+  const { searchWeb } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const html = `<div class="result"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs%3Fx%3D1">Example &amp; docs</a><a class="result__snippet">A useful <b>search</b> result.</a></div>
+    <div class="result"><a class="result__a" href="javascript:alert(1)">Unsafe</a></div>
+    <div class="result"><a class="result__a" href="https://second.example/story">Second result</a><div class="result__snippet">More detail</div></div>`;
+  let requested;
+  const result = await searchWeb('release notes', { maxResults: 2, fetchImpl: async (url, options) => { requested = { url, options }; return new Response(html, { status: 200, headers: { 'content-type': 'text/html' } }); } });
+  assert.match(requested.url, /q=release%20notes/);
+  assert.equal(requested.options.headers.accept, 'text/html');
+  assert.deepEqual(result, { query: 'release notes', results: [
+    { title: 'Example & docs', url: 'https://example.com/docs?x=1', snippet: 'A useful search result.' },
+    { title: 'Second result', url: 'https://second.example/story', snippet: 'More detail' },
+  ] });
+  await assert.rejects(searchWeb('', { fetchImpl: async () => { throw new Error('must not run'); } }), /1 to 500/);
+  await assert.rejects(searchWeb('query', { maxResults: 9, fetchImpl: async () => { throw new Error('must not run'); } }), /1 to 8/);
+});
 test('workspace AGENTS.md is included as bounded system instructions', async () => {
   const { workspaceAgentInstructions } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-instructions-'));

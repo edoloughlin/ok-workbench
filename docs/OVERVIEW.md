@@ -160,6 +160,14 @@ understanding, chart interpretation, or faithful document rendering. The useful
 pattern is to keep the original file as evidence, extract enough text to search
 or summarise it, and link the resulting concept back to its source.
 
+## Search the web
+
+The project assistant can search the public web for current or externally
+verifiable information. A search sends only its query to DuckDuckGo and returns
+a bounded set of titles, snippets, and source URLs. The assistant treats those
+results as untrusted third-party content and cites the URLs it relies on; the
+search tool cannot read workspace files or provider credentials.
+
 ## Run custom workspace tools
 
 Executable Python 3 and Node.js scripts placed in `tools/` or a project's

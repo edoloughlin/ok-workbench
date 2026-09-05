@@ -62,6 +62,8 @@ The content root resolves in this order: explicit `--root`, `OK_WORKSPACE_ROOT`,
 
 Chat state and provider credentials live outside the bundle under the XDG state directory (default `~/.local/state/ok-workbench/chat`). Set `OK_WORKBENCH_STATE_DIR` to use another state location. Provider API keys belong in the server environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, or compatible-provider variables) or can be supplied through the local sign-in UI; GitHub Copilot subscription sign-in uses GitHub's device flow. Never put credentials in the workspace.
 
+The project assistant can search the public web when it needs current or externally verifiable information. Searches are sent to DuckDuckGo and return bounded titles, snippets, and source URLs; the assistant is instructed to treat that content as untrusted and cite the URLs it uses. Search does not expose workspace files or provider credentials.
+
 ## Workspace tools
 
 The assistant can discover executable Python 3 and Node.js scripts placed directly in `tools/` or `<project>/tools/`. Each tool needs a standard shebang such as `#!/usr/bin/env python3` or `#!/usr/bin/env node`. Tools run without a shell, with each supplied argument kept separate, a 30-second default limit, and captured output.
