@@ -25,6 +25,7 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm',
   '.txt': 'text/plain; charset=utf-8', '.csv': 'text/csv; charset=utf-8'
 };
+const ACTIVE_WORKSPACE_EXTENSIONS = new Set(['.svg', '.html', '.htm', '.xml', '.xhtml', '.pdf']);
 const CODE_TYPES = {
   '.py': ['python', 'Python'], '.js': ['javascript', 'JavaScript'], '.mjs': ['javascript', 'JavaScript module'],
   '.cjs': ['javascript', 'CommonJS'], '.jsx': ['javascript', 'JSX'], '.ts': ['typescript', 'TypeScript'], '.tsx': ['typescript', 'TSX'],
@@ -39,7 +40,10 @@ const CODE_TYPES = {
   '.gitignore': ['gitignore', 'gitignore'], '.log': ['plaintext', 'log'], '.txt': ['plaintext', 'plain text']
 };
 const NAMED_CODE_TYPES = { Makefile: ['makefile', 'Makefile'], Dockerfile: ['dockerfile', 'Dockerfile'] };
-const MAX_TEXT_PREVIEW = 2 * 1024 * 1024;
+const MAX_MARKDOWN_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_CODE_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_CLASSIFICATION_BYTES = 8 * 1024;
+const MAX_INDEX_METADATA_BYTES = 256 * 1024;
 const MAX_JSON_BODY = 1024 * 1024;
 function chatStateDir() {
   const fallback = path.join(os.homedir(), '.local', 'state', 'ok-workbench', 'chat');
@@ -78,8 +82,15 @@ function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
 
 function respond(res, status, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
+  res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   res.end(body);
+}
+
+function isAllowedLocalAuthority(value) {
+  if (typeof value !== 'string') return false;
+  const match = value.match(/^(localhost|127\.0\.0\.1|\[::1\])(?::(\d{1,5}))?$/);
+  if (!match) return false;
+  return match[2] === undefined || Number(match[2]) <= 65_535;
 }
 
 function configDirectory(name = 'ok-workbench') {
@@ -113,6 +124,11 @@ function safePath(routePath) {
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
 async function isDirectory(file) { try { return (await fs.stat(file)).isDirectory(); } catch { return false; } }
 async function isFile(file) { try { return (await fs.stat(file)).isFile(); } catch { return false; } }
+async function readWorkspaceTextPrefix(file, limit = MAX_INDEX_METADATA_BYTES) {
+  const stat = await fs.stat(file).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!stat?.isFile()) return '';
+  return (await readPrefix(file, Math.min(stat.size, limit))).toString('utf8');
+}
 async function bundlePath(target) {
   try {
     const [root, resolved] = await Promise.all([fs.realpath(BUNDLE_ROOT), fs.realpath(target)]);
@@ -154,7 +170,7 @@ async function ignoreRules() {
   const signature = stat ? `${stat.mtimeMs}:${stat.size}` : 'missing';
   if (ignoreRulesCache.signature === signature) return ignoreRulesCache.rules;
   if (!stat) return (ignoreRulesCache = { signature, rules: [] }).rules;
-  const lines = (await fs.readFile(file, 'utf8')).split(/\r?\n/);
+  const lines = (await readWorkspaceTextPrefix(file)).split(/\r?\n/);
   const rules = lines.map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(line => {
     const negated = line.startsWith('!');
     let pattern = negated ? line.slice(1) : line;
@@ -205,10 +221,15 @@ function classifyFile(target, buffer) {
   const ext = path.extname(target).toLowerCase();
   const mime = MIME[ext] || 'application/octet-stream';
   if (ext === '.md') return { kind: 'markdown', language: 'markdown', fileType: 'Markdown', mime: 'text/markdown; charset=utf-8' };
+  // Workspace SVG is untrusted source, not an image: top-level SVG can run
+  // script with this application's origin if it is served as active content.
+  if (ext === '.svg') return { kind: 'code', language: 'html', fileType: 'SVG source', mime: 'text/plain; charset=utf-8' };
   if (mime.startsWith('image/')) return { kind: 'media', mediaType: 'image', fileType: mime.slice(6).toUpperCase(), mime };
   if (mime.startsWith('audio/')) return { kind: 'media', mediaType: 'audio', fileType: `${mime.slice(6).toUpperCase()} audio`, mime };
   if (mime.startsWith('video/')) return { kind: 'media', mediaType: 'video', fileType: `${mime.slice(6).toUpperCase()} video`, mime };
-  if (ext === '.pdf') return { kind: 'media', mediaType: 'pdf', fileType: 'PDF document', mime };
+  // Browser PDF renderers and active XML/HTML formats belong to the same
+  // untrusted-content boundary as SVG. Workspace copies are download-only.
+  if (ext === '.pdf') return { kind: 'binary', fileType: 'PDF document', mime };
   const firstLine = buffer.subarray(0, Math.min(buffer.length, 512)).toString('utf8').split(/\r?\n/, 1)[0];
   const codeType = CODE_TYPES[ext] || NAMED_CODE_TYPES[name] || shebangType(firstLine);
   if (codeType || appearsText(buffer)) {
@@ -216,6 +237,16 @@ function classifyFile(target, buffer) {
     return { kind: 'code', language, fileType, mime: MIME[ext] || 'text/plain; charset=utf-8' };
   }
   return { kind: 'binary', fileType: ext ? `${ext.slice(1).toUpperCase()} file` : 'binary file', mime };
+}
+
+async function readPrefix(file, bytes) {
+  if (!bytes) return Buffer.alloc(0);
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(bytes);
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally { await handle.close(); }
 }
 
 function linksFromIndex(markdown, folder) {
@@ -236,7 +267,7 @@ function linksFromIndex(markdown, folder) {
 async function navigationTree(folder, isRoot = false, depth = 0) {
   if (depth > 12) return [];
   const indexFile = path.join(folder, 'index.md');
-  const index = (await exists(indexFile)) ? await fs.readFile(indexFile, 'utf8') : '';
+  const index = await readWorkspaceTextPrefix(indexFile);
   const indexedLinks = linksFromIndex(index, folder);
   const entries = await fs.readdir(folder, { withFileTypes: true });
   const candidates = [];
@@ -285,7 +316,7 @@ async function projectData(requested) {
   const relativeParts = path.relative(BUNDLE_ROOT, requestedPath).split(path.sep).filter(Boolean);
   const projectRoot = relativeParts.length ? path.join(BUNDLE_ROOT, relativeParts[0]) : BUNDLE_ROOT;
   const bundleIndexFile = path.join(BUNDLE_ROOT, 'index.md');
-  const bundleIndex = (await exists(bundleIndexFile)) ? await fs.readFile(bundleIndexFile, 'utf8') : '';
+  const bundleIndex = await readWorkspaceTextPrefix(bundleIndexFile);
   const bundleLinks = linksFromIndex(bundleIndex, BUNDLE_ROOT);
   const projects = [{ name: 'workspace', path: '/workspace', label: 'workspace / bundle root' }];
   for (const link of bundleLinks) {
@@ -307,14 +338,14 @@ async function projectData(requested) {
     const projectPath = publicPath(target);
     if (!projects.some(project => project.path === projectPath)) {
       const indexFile = path.join(target, 'index.md');
-      const label = (await exists(indexFile)) ? titleFromMarkdown(await fs.readFile(indexFile, 'utf8'), entry.name) : entry.name;
+      const label = (await exists(indexFile)) ? titleFromMarkdown(await readWorkspaceTextPrefix(indexFile), entry.name) : entry.name;
       projects.push({ name: entry.name, path: projectPath, label });
     }
   }
   const projectIndexFile = path.join(projectRoot, 'index.md');
-  const projectIndex = (await exists(projectIndexFile)) ? await fs.readFile(projectIndexFile, 'utf8') : '';
+  const projectIndex = await readWorkspaceTextPrefix(projectIndexFile);
   const contextIndexFile = path.join(requestedPath, 'index.md');
-  const contextIndex = (await exists(contextIndexFile)) ? await fs.readFile(contextIndexFile, 'utf8') : '';
+  const contextIndex = await readWorkspaceTextPrefix(contextIndexFile);
   const common = [];
   for (const name of COMMON_FILES) if (await exists(path.join(projectRoot, name))) common.push({ label: name, path: publicPath(path.join(projectRoot, name)) });
   const projectFiles = await fs.readdir(projectRoot, { withFileTypes: true });
@@ -354,33 +385,43 @@ async function documentData(requested) {
   if (!target || !(await exists(target))) throw new Error('Not found');
   const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Not found');
-  const buffer = await fs.readFile(target);
-  const classification = classifyFile(target, buffer);
+  const classification = classifyFile(target, await readPrefix(target, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
   const base = { ...classification, name: path.basename(target), path: publicPath(target), url: `/asset${publicPath(target)}`, size: stat.size };
-  if (classification.kind === 'markdown') {
+  if (classification.kind === 'markdown' || classification.kind === 'code') {
+    const limit = classification.kind === 'markdown' ? MAX_MARKDOWN_PREVIEW_BYTES : MAX_CODE_PREVIEW_BYTES;
+    if (stat.size > limit && classification.kind === 'code') return { ...base, kind: 'binary', fileType: `${classification.fileType} · preview too large`, truncated: true };
+    const buffer = await readPrefix(target, Math.min(stat.size, limit));
     const text = buffer.toString('utf8');
-    return { ...base, title: titleFromMarkdown(text, path.basename(target)), text };
-  }
-  if (classification.kind === 'code') {
-    if (stat.size > MAX_TEXT_PREVIEW) return { ...base, kind: 'binary', fileType: `${classification.fileType} · preview too large` };
-    return { ...base, title: path.basename(target), text: buffer.toString('utf8') };
+    const truncated = stat.size > limit;
+    return classification.kind === 'markdown'
+      ? { ...base, title: titleFromMarkdown(text, path.basename(target)), text, truncated }
+      : { ...base, title: path.basename(target), text, truncated };
   }
   return { ...base, title: path.basename(target) };
 }
 
-async function asset(res, pathname) {
+async function asset(req, res, pathname) {
   const target = safePath(pathname);
   const resolved = target && await bundlePath(target);
-  if (!resolved || !(await exists(resolved)) || await isDirectory(resolved)) return respond(res, 404, 'Not found', 'text/plain');
-  const buffer = await fs.readFile(resolved);
-  const classification = classifyFile(resolved, buffer);
+  const stat = resolved && await fs.stat(resolved).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!resolved || !stat?.isFile()) return respond(res, 404, 'Not found', 'text/plain');
+  const classification = classifyFile(resolved, await readPrefix(resolved, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
+  const ext = path.extname(resolved).toLowerCase();
+  const downloadOnly = ACTIVE_WORKSPACE_EXTENSIONS.has(ext);
   res.writeHead(200, {
-    'content-type': classification.mime,
+    'content-type': ext === '.svg' ? 'text/plain; charset=utf-8' : classification.mime,
     'cache-control': 'no-store',
+    'content-security-policy': "default-src 'none'; script-src 'none'; object-src 'none'; connect-src 'none'; frame-ancestors 'none'; sandbox",
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
     'x-filetype': classification.language || classification.mediaType || classification.fileType,
-    'content-disposition': `inline; filename="${path.basename(resolved).replace(/"/g, '')}"`
+    'content-length': stat.size,
+    'content-disposition': `${downloadOnly ? 'attachment' : 'inline'}; filename="${path.basename(resolved).replace(/"/g, '')}"`
   });
-  res.end(buffer);
+  if (req.method === 'HEAD') return res.end();
+  const stream = fsNative.createReadStream(resolved);
+  stream.once('error', error => res.destroy(error));
+  stream.pipe(res);
 }
 
 function json(res, status, value) { return respond(res, status, JSON.stringify(value)); }
@@ -397,8 +438,6 @@ async function readJson(req) {
 }
 
 function assertChatRequest(req) {
-  const host = String(req.headers.host || '').split(':')[0];
-  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) throw new Error('Chat is available only on the local server');
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     if (req.headers['x-ok-workbench-csrf'] !== CHAT_CSRF && req.headers['x-okf-workbench-csrf'] !== CHAT_CSRF && req.headers['x-agents-browser-csrf'] !== CHAT_CSRF) throw new Error('Invalid chat request token');
     const origin = req.headers.origin;
@@ -1018,9 +1057,15 @@ async function updateTodo(project, body) {
   return { path: path.relative(root, target).split(path.sep).join('/') };
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+async function handleRequest(req, res) {
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
+  // Enforce the authority before parsing or dispatching any route. Binding to
+  // loopback alone does not prevent a DNS-rebound browser origin from issuing
+  // requests to the local server.
+  if (!isAllowedLocalAuthority(req.headers.host)) return respond(res, 421, 'Local authority required', 'text/plain; charset=utf-8');
   try {
+    const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/app.css') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.css')), 'text/css; charset=utf-8');
     if (url.pathname === '/favicon.svg' || url.pathname === '/favicon.ico') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/favicon.svg')), 'image/svg+xml');
     if (url.pathname === '/app.js') return respond(res, 200, await fs.readFile(path.join(__dirname, 'public/app.js')), 'text/javascript; charset=utf-8');
@@ -1144,16 +1189,35 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/agents')) {
       res.writeHead(308, { location: url.pathname.replace(/^\/agents/, '/workspace') }); return res.end();
     }
-    if (url.pathname.startsWith('/asset/workspace/')) return asset(res, url.pathname.slice('/asset'.length));
+    if (url.pathname.startsWith('/asset/workspace/')) return asset(req, res, url.pathname.slice('/asset'.length));
     if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
   } catch (error) { json(res, error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400, { error: error.message }); }
-});
+}
+
+const server = http.createServer(handleRequest);
+const ipv6Server = http.createServer(handleRequest);
+
+function listen(serverInstance, host) {
+  return new Promise((resolve, reject) => {
+    const fail = error => { serverInstance.off('listening', ready); reject(error); };
+    const ready = () => { serverInstance.off('error', fail); resolve(); };
+    serverInstance.once('error', fail);
+    serverInstance.once('listening', ready);
+    serverInstance.listen(PORT, host);
+  });
+}
 
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
   await refreshDirtyMonitor();
   const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
   dirtyReconciliation.unref();
-  server.listen(PORT, '127.0.0.1', () => log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`));
-}).catch(error => { logError(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1; });
+  await listen(server, '127.0.0.1');
+  await listen(ipv6Server, '::1');
+  log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`);
+}).catch(error => {
+  if (server.listening) server.close();
+  if (ipv6Server.listening) ipv6Server.close();
+  logError(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1;
+});
