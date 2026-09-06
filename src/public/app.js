@@ -1,6 +1,7 @@
 const documentPane = document.querySelector('#document');
 const nav = document.querySelector('#file-nav');
 const picker = document.querySelector('#project-select');
+const workspaceAssetOrigin = document.querySelector('meta[name="ok-workbench-asset-origin"]')?.content.replace(/\/$/, '');
 const createProjectUi = {
   button: document.querySelector('#create-project-button'), dialog: document.querySelector('#create-project-dialog'), form: document.querySelector('#create-project-form'),
   name: document.querySelector('#create-project-name'), id: document.querySelector('#create-project-id'), description: document.querySelector('#create-project-description'),
@@ -102,7 +103,7 @@ function linkHref(href, sourcePath, asset = false) {
   const output = raw.startsWith('/') ? raw.split('/') : [...source, ...raw.split('/')].reduce((parts, part) => part === '..' ? (parts.pop(), parts) : part !== '.' && part ? (parts.push(part), parts) : parts, []);
   const encodePathPart = part => { try { return encodeURIComponent(decodeURIComponent(part)); } catch { return encodeURIComponent(part); } };
   const resolved = `/${output.filter(Boolean).map(encodePathPart).join('/')}`.replace(/^\/workspace\/workspace/, '/workspace');
-  const target = asset ? `/asset${resolved}` : resolved;
+  const target = asset ? `${workspaceAssetOrigin}${resolved}` : resolved;
   return `${target}${hash ? `#${encodeURIComponent(hash)}` : ''}`;
 }
 
@@ -354,7 +355,7 @@ function formatBytes(bytes) {
 function renderFile(file, kicker) {
   const header = `<p class="doc-kicker">${escapeHtml(kicker)}</p><div class="file-header"><h1>${escapeHtml(file.name)}</h1><span>${escapeHtml(file.fileType)} · ${formatBytes(file.size)}</span></div>`;
   if (file.kind === 'code') return `${header}<pre class="source-view" data-language="${escapeHtml(file.language)}"><code>${highlightCode(file.text, file.language)}</code></pre>`;
-  if (file.kind === 'media' && file.mediaType === 'image') return `${header}<figure class="media-view"><a href="${file.url}" target="_blank" rel="noopener"><img src="${file.url}" alt="${escapeHtml(file.name)}"></a></figure>`;
+  if (file.kind === 'media' && file.mediaType === 'image') return `${header}<figure class="media-view"><a href="${file.url}" target="_blank" rel="noopener noreferrer"><img src="${file.url}" alt="${escapeHtml(file.name)}"></a></figure>`;
   if (file.kind === 'media' && file.mediaType === 'pdf') return `${header}<iframe class="document-view" src="${file.url}" title="${escapeHtml(file.name)}"></iframe>`;
   if (file.kind === 'media' && file.mediaType === 'audio') return `${header}<div class="media-view"><audio controls src="${file.url}"></audio></div>`;
   if (file.kind === 'media' && file.mediaType === 'video') return `${header}<div class="media-view"><video controls src="${file.url}"></video></div>`;

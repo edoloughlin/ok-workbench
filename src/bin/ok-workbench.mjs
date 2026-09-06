@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const seed = path.join(dist, 'seed', 'workspace');
 const version = '1.0.0';
-const usage = `ok-workbench ${version}\n\nCommands:\n  init [directory] [--yes] [--merge] [--git]\n  serve [--root directory] [--port port]\n  doctor [--root directory]\n  migrate-state --yes\n  seed diff [directory]`;
+const usage = `ok-workbench ${version}\n\nCommands:\n  init [directory] [--yes] [--merge] [--git]\n  serve [--root directory] [--port port] [--asset-port port]\n  doctor [--root directory]\n  migrate-state --yes\n  seed diff [directory]`;
 const home = path.resolve(os.homedir());
 function fatal(message) { console.error(`ok-workbench: ${message}`); process.exitCode = 1; }
 function isMacOSVarAlias(target, canonical) { return process.platform === 'darwin' && target.startsWith('/var/') && canonical === `/private${target}`; }
@@ -37,7 +37,7 @@ async function init(args) {
   if (git && !(await entries(path.join(target, '.git')))) await new Promise((resolve, reject) => { const child = spawn('git', ['init'], { cwd: target, stdio: 'inherit' }); child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('git init failed'))); });
   console.log(`Initialized workspace bundle at ${target}\nNext: ok-workbench serve --root ${target}\nProvider setup: sign in from the local chat pane, or set provider credentials in the server environment.`);
 }
-async function serve(args) { const index = args.indexOf('--root'); const root = index >= 0 ? path.resolve(args[index + 1]) : await defaultRoot(); const port = args.indexOf('--port'); const env = { ...process.env, OK_WORKSPACE_ROOT: root, PORT: port >= 0 ? args[port + 1] : process.env.PORT }; const child = spawn(process.execPath, [path.join(dist, 'server.js')], { env, stdio: 'inherit' }); child.on('exit', code => process.exitCode = code || 0); }
+async function serve(args) { const index = args.indexOf('--root'); const root = index >= 0 ? path.resolve(args[index + 1]) : await defaultRoot(); const port = args.indexOf('--port'); const assetPort = args.indexOf('--asset-port'); const env = { ...process.env, OK_WORKSPACE_ROOT: root, PORT: port >= 0 ? args[port + 1] : process.env.PORT, OK_WORKBENCH_ASSET_PORT: assetPort >= 0 ? args[assetPort + 1] : process.env.OK_WORKBENCH_ASSET_PORT }; const child = spawn(process.execPath, [path.join(dist, 'server.js')], { env, stdio: 'inherit' }); child.on('exit', code => process.exitCode = code || 0); }
 async function sandboxCheck() {
   if (process.platform === 'linux') return ['Sandbox (Bubblewrap/user namespaces)', await commandWorks('/usr/bin/bwrap', ['--unshare-user', '--ro-bind', '/', '/', '--', '/usr/bin/true']) || await commandWorks('/bin/bwrap', ['--unshare-user', '--ro-bind', '/', '/', '--', '/usr/bin/true'])];
   if (process.platform === 'darwin') return ['Sandbox (sandbox-exec/Seatbelt)', await commandWorks('/usr/bin/sandbox-exec', ['-p', '(version 1) (deny default) (allow process-exec (literal "/usr/bin/true")) (allow file-read* (subpath "/System") (subpath "/usr/lib") (literal "/usr/bin/true"))', '/usr/bin/true'])];

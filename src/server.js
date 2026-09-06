@@ -9,7 +9,16 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { workspaceAgentInstructions } = require('./agent-instructions.js');
 
-const PORT = Number(process.env.PORT || 3477);
+function configuredPort(name, fallback) {
+  const value = Number(process.env[name] || fallback);
+  if (!Number.isInteger(value) || value < 1 || value > 65_535) throw new Error(`${name} must be a TCP port between 1 and 65535`);
+  return value;
+}
+
+const PORT = configuredPort('PORT', 3477);
+const ASSET_PORT = configuredPort('OK_WORKBENCH_ASSET_PORT', PORT + 1);
+if (ASSET_PORT === PORT) throw new Error('OK_WORKBENCH_ASSET_PORT must differ from PORT');
+const ASSET_ORIGIN = `http://localhost:${ASSET_PORT}`;
 const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
   || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
 // Resolve the bundle from this project's location so both `node server.js` and
@@ -25,7 +34,7 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.mp4': 'video/mp4', '.webm': 'video/webm',
   '.txt': 'text/plain; charset=utf-8', '.csv': 'text/csv; charset=utf-8'
 };
-const ACTIVE_WORKSPACE_EXTENSIONS = new Set(['.svg', '.html', '.htm', '.xml', '.xhtml', '.pdf']);
+const ASSET_CSP = "default-src 'none'; script-src 'none'; object-src 'none'; connect-src 'none'; frame-ancestors 'none'; sandbox";
 const CODE_TYPES = {
   '.py': ['python', 'Python'], '.js': ['javascript', 'JavaScript'], '.mjs': ['javascript', 'JavaScript module'],
   '.cjs': ['javascript', 'CommonJS'], '.jsx': ['javascript', 'JSX'], '.ts': ['typescript', 'TypeScript'], '.tsx': ['typescript', 'TSX'],
@@ -84,6 +93,12 @@ function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...a
 function respond(res, status, body, type = 'application/json; charset=utf-8') {
   res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   res.end(body);
+}
+
+function applyAssetSecurityHeaders(res) {
+  res.setHeader('content-security-policy', ASSET_CSP);
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
 }
 
 function isAllowedLocalAuthority(value) {
@@ -221,9 +236,10 @@ function classifyFile(target, buffer) {
   const ext = path.extname(target).toLowerCase();
   const mime = MIME[ext] || 'application/octet-stream';
   if (ext === '.md') return { kind: 'markdown', language: 'markdown', fileType: 'Markdown', mime: 'text/markdown; charset=utf-8' };
-  // Workspace SVG is untrusted source, not an image: top-level SVG can run
-  // script with this application's origin if it is served as active content.
-  if (ext === '.svg') return { kind: 'code', language: 'html', fileType: 'SVG source', mime: 'text/plain; charset=utf-8' };
+  // Renderable workspace content is served only from ASSET_ORIGIN, never from
+  // the privileged application origin. The asset server's CSP makes SVG
+  // scripts and network access inert even for top-level navigation.
+  if (ext === '.svg') return { kind: 'media', mediaType: 'image', fileType: 'SVG image', mime: 'image/svg+xml' };
   if (mime.startsWith('image/')) return { kind: 'media', mediaType: 'image', fileType: mime.slice(6).toUpperCase(), mime };
   if (mime.startsWith('audio/')) return { kind: 'media', mediaType: 'audio', fileType: `${mime.slice(6).toUpperCase()} audio`, mime };
   if (mime.startsWith('video/')) return { kind: 'media', mediaType: 'video', fileType: `${mime.slice(6).toUpperCase()} video`, mime };
@@ -386,7 +402,7 @@ async function documentData(requested) {
   const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Not found');
   const classification = classifyFile(target, await readPrefix(target, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
-  const base = { ...classification, name: path.basename(target), path: publicPath(target), url: `/asset${publicPath(target)}`, size: stat.size };
+  const base = { ...classification, name: path.basename(target), path: publicPath(target), url: `${ASSET_ORIGIN}${publicPath(target)}`, size: stat.size };
   if (classification.kind === 'markdown' || classification.kind === 'code') {
     const limit = classification.kind === 'markdown' ? MAX_MARKDOWN_PREVIEW_BYTES : MAX_CODE_PREVIEW_BYTES;
     if (stat.size > limit && classification.kind === 'code') return { ...base, kind: 'binary', fileType: `${classification.fileType} · preview too large`, truncated: true };
@@ -406,17 +422,15 @@ async function asset(req, res, pathname) {
   const stat = resolved && await fs.stat(resolved).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
   if (!resolved || !stat?.isFile()) return respond(res, 404, 'Not found', 'text/plain');
   const classification = classifyFile(resolved, await readPrefix(resolved, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
-  const ext = path.extname(resolved).toLowerCase();
-  const downloadOnly = ACTIVE_WORKSPACE_EXTENSIONS.has(ext);
   res.writeHead(200, {
-    'content-type': ext === '.svg' ? 'text/plain; charset=utf-8' : classification.mime,
+    'content-type': classification.mime,
     'cache-control': 'no-store',
-    'content-security-policy': "default-src 'none'; script-src 'none'; object-src 'none'; connect-src 'none'; frame-ancestors 'none'; sandbox",
+    'content-security-policy': ASSET_CSP,
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'x-filetype': classification.language || classification.mediaType || classification.fileType,
     'content-length': stat.size,
-    'content-disposition': `${downloadOnly ? 'attachment' : 'inline'}; filename="${path.basename(resolved).replace(/"/g, '')}"`
+    'content-disposition': `inline; filename="${path.basename(resolved).replace(/"/g, '')}"`
   });
   if (req.method === 'HEAD') return res.end();
   const stream = fsNative.createReadStream(resolved);
@@ -1189,22 +1203,34 @@ async function handleRequest(req, res) {
     if (url.pathname.startsWith('/agents')) {
       res.writeHead(308, { location: url.pathname.replace(/^\/agents/, '/workspace') }); return res.end();
     }
-    if (url.pathname.startsWith('/asset/workspace/')) return asset(req, res, url.pathname.slice('/asset'.length));
-    if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF), 'text/html; charset=utf-8');
+    if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
   } catch (error) { json(res, error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400, { error: error.message }); }
 }
 
+async function handleAssetRequest(req, res) {
+  applyAssetSecurityHeaders(res);
+  if (!isAllowedLocalAuthority(req.headers.host)) return respond(res, 421, 'Local authority required', 'text/plain; charset=utf-8');
+  if (req.method !== 'GET' && req.method !== 'HEAD') return respond(res, 405, 'Method not allowed', 'text/plain; charset=utf-8');
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname.startsWith('/workspace/')) return asset(req, res, url.pathname);
+    return respond(res, 404, 'Not found', 'text/plain; charset=utf-8');
+  } catch (error) { return respond(res, 400, 'Bad request', 'text/plain; charset=utf-8'); }
+}
+
 const server = http.createServer(handleRequest);
 const ipv6Server = http.createServer(handleRequest);
+const assetServer = http.createServer(handleAssetRequest);
+const ipv6AssetServer = http.createServer(handleAssetRequest);
 
-function listen(serverInstance, host) {
+function listen(serverInstance, host, port) {
   return new Promise((resolve, reject) => {
     const fail = error => { serverInstance.off('listening', ready); reject(error); };
     const ready = () => { serverInstance.off('error', fail); resolve(); };
     serverInstance.once('error', fail);
     serverInstance.once('listening', ready);
-    serverInstance.listen(PORT, host);
+    serverInstance.listen(port, host);
   });
 }
 
@@ -1213,11 +1239,15 @@ void resolveWorkspaceRoot().then(async root => {
   await refreshDirtyMonitor();
   const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
   dirtyReconciliation.unref();
-  await listen(server, '127.0.0.1');
-  await listen(ipv6Server, '::1');
-  log(`OK Workbench: http://localhost:${PORT}/workspace/ (serving ${BUNDLE_ROOT})`);
+  await listen(server, '127.0.0.1', PORT);
+  await listen(ipv6Server, '::1', PORT);
+  await listen(assetServer, '127.0.0.1', ASSET_PORT);
+  await listen(ipv6AssetServer, '::1', ASSET_PORT);
+  log(`OK Workbench: http://localhost:${PORT}/workspace/ (assets: ${ASSET_ORIGIN}; serving ${BUNDLE_ROOT})`);
 }).catch(error => {
   if (server.listening) server.close();
   if (ipv6Server.listening) ipv6Server.close();
+  if (assetServer.listening) assetServer.close();
+  if (ipv6AssetServer.listening) ipv6AssetServer.close();
   logError(`OK Workbench could not open its workspace: ${error.message}`); process.exitCode = 1;
 });
