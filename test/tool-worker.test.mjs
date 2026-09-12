@@ -32,6 +32,41 @@ test('worker rejects traversal, private names, and symlink escapes while allowin
   await worker.applyPatch({ path: 'notes/new.md', content: 'safe' });
   assert.equal(await readFile(path.join(workspace, 'notes', 'new.md'), 'utf8'), 'safe');
 });
+test('worker enforces selected-project capabilities, one-turn grants, and hidden-file policy', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-capabilities-'));
+  const projectA = path.join(workspace, 'project-a'); const projectB = path.join(workspace, 'project-b');
+  await mkdir(projectA); await mkdir(projectB);
+  await writeFile(path.join(projectA, 'normal.md'), 'project A\n');
+  await writeFile(path.join(projectA, '.npmrc'), 'hidden project config\n');
+  await writeFile(path.join(projectA, 'secrets.json'), '{"secret":true}\n');
+  await symlink('.npmrc', path.join(projectA, 'public-config.md'));
+  await mkdir(path.join(projectA, '.git'));
+  await writeFile(path.join(projectA, '.git', 'config'), 'hidden git config\n');
+  await symlink('.git', path.join(projectA, 'documents'));
+  const privateFile = path.join(projectB, 'private.md'); await writeFile(privateFile, 'project B private\n');
+  await symlink(privateFile, path.join(projectA, 'linked-private.md'));
+  worker.setWorkspaceRoot(projectA);
+  assert.equal((await worker.readFile('normal.md')).content, 'project A\n');
+  for (const operation of [
+    () => worker.readFile('../project-b/private.md'),
+    () => worker.readFile('project-b/private.md'),
+    () => worker.readFile('linked-private.md'),
+    () => worker.applyPatch({ path: '../project-b/private.md', content: 'overwritten' }),
+    () => worker.readFile('.npmrc'),
+    () => worker.readFile('secrets.json'),
+    () => worker.readFile('public-config.md'),
+    () => worker.applyPatch({ path: 'documents/config', content: 'overwritten' }),
+    () => worker.moveFile({ from: 'normal.md', to: 'documents/moved.md' }),
+    () => worker.applyProjectUpdate({ kind: 'correction', changes: [{ path: 'documents/config', content: 'overwritten' }] }),
+    () => worker.readGrantedFile('grant-invented'),
+  ]) await assert.rejects(operation());
+  worker.setWorkspaceRoot(projectA, { readGrants: { 'grant-privatefile': privateFile, 'grant-hiddenfile': path.join(projectA, '.npmrc') } });
+  assert.equal((await worker.readGrantedFile('grant-privatefile')).content, 'project B private\n');
+  assert.equal((await worker.readGrantedFile('grant-hiddenfile')).content, 'hidden project config\n');
+  await assert.rejects(worker.editFile({ path: 'grant-privatefile', hash: '000000000000', edits: [{ startLine: 1, endLine: 1, replacement: 'nope' }] }));
+  worker.setWorkspaceRoot(projectA);
+  await assert.rejects(worker.readGrantedFile('grant-privatefile'), /Unknown read grant/);
+});
 test('worker search can start from a trusted project path', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-search-'));
   await mkdir(path.join(workspace, 'alpha'), { recursive: true });
@@ -81,15 +116,14 @@ test('worker discovers only executable Python or Node workspace tools in the per
   await mkdir(path.join(workspace, 'tools'));
   await writeFile(path.join(workspace, 'tools', 'top-tool.js'), '#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n');
   await chmod(path.join(workspace, 'tools', 'top-tool.js'), 0o755);
-  await writeFile(path.join(workspace, 'tools', 'top-tool.tool.json'), JSON.stringify({ environment: ['JIRA_API_TOKEN', 'JIRA_BASE_URL'], network: true, timeoutSeconds: 120 }));
+  await writeFile(path.join(workspace, 'tools', 'top-tool.tool.json'), JSON.stringify({ secrets: ['jira-token'], network: { hosts: ['jira.example.com'] }, timeoutSeconds: 120 }));
   await mkdir(path.join(workspace, 'project', 'tools'), { recursive: true });
   await writeFile(path.join(workspace, 'project', 'tools', 'project-tool'), '#!/usr/bin/env python3\nprint("ready")\n');
   await chmod(path.join(workspace, 'project', 'tools', 'project-tool'), 0o755);
   worker.setWorkspaceRoot(workspace);
   assert.deepEqual(await worker.listWorkspaceTools(), {
     tools: [
-      { path: 'tools/top-tool.js', runtime: 'nodejs', manifestPath: 'tools/top-tool.tool.json', manifest: { environment: ['JIRA_API_TOKEN', 'JIRA_BASE_URL'], network: true, timeoutSeconds: 120 }, environment: ['JIRA_API_TOKEN', 'JIRA_BASE_URL'], network: true, timeoutSeconds: 120 },
-      { path: 'project/tools/project-tool', runtime: 'python3', manifestPath: null, manifest: null, environment: [], network: false, timeoutSeconds: 30 }
+      { path: 'tools/top-tool.js', runtime: 'nodejs', manifestPath: 'tools/top-tool.tool.json', toolSha256: (await worker.workspaceToolPolicy('tools/top-tool.js')).toolSha256, manifestSha256: (await worker.workspaceToolPolicy('tools/top-tool.js')).manifestSha256, requirements: { secrets: ['jira-token'], network: { hosts: ['jira.example.com'], ports: [443] }, timeoutSeconds: 120 } }
     ], diagnostics: []
   });
   await writeFile(path.join(workspace, 'tools', 'orphan.tool.json'), '{}');
@@ -98,12 +132,14 @@ test('worker discovers only executable Python or Node workspace tools in the per
   await assert.rejects(worker.applyPatch({ path: 'tools/top-tool.js', content: 'console.log(1)' }), /managed outside agent file updates/);
   await writeFile(path.join(workspace, 'tools', 'workspace-run.py'), '#!/usr/bin/env python3\nimport sys\nprint(sys.argv[1])\n');
   await chmod(path.join(workspace, 'tools', 'workspace-run.py'), 0o755);
+  const runPolicy = await worker.workspaceToolPolicy('tools/workspace-run.py'); const savedExecutionPolicy = process.env.OK_WORKBENCH_TOOL_EXECUTION_POLICY; process.env.OK_WORKBENCH_TOOL_EXECUTION_POLICY = JSON.stringify({ path: runPolicy.path, toolSha256: runPolicy.toolSha256, manifestSha256: runPolicy.manifestSha256, requirements: runPolicy.requirements, timeoutSeconds: 30, resourceLimits: { memoryBytes: 512 * 1024 * 1024, cpuSeconds: 30, processCount: 32, openFiles: 128, fileSizeBytes: 32 * 1024 * 1024 } });
   const run = await worker.runWorkspaceTool({ path: 'tools/workspace-run.py', arguments: ['status.md'] });
+  if (savedExecutionPolicy === undefined) delete process.env.OK_WORKBENCH_TOOL_EXECUTION_POLICY; else process.env.OK_WORKBENCH_TOOL_EXECUTION_POLICY = savedExecutionPolicy;
   assert.equal(run.ok, true); assert.equal(run.path, 'tools/workspace-run.py'); assert.equal(run.stdout.trim(), 'status.md');
   await assert.rejects(worker.runWorkspaceTool({ path: 'top-tool.js' }), /direct files/);
   await assert.rejects(worker.runWorkspaceTool({ path: 'tools/top-tool.js', arguments: ['\0'] }), /arguments/);
-  await writeFile(path.join(workspace, 'tools', 'top-tool.tool.json'), JSON.stringify({ timeoutSeconds: 601 }));
-  await assert.rejects(worker.workspaceToolPolicy('tools/top-tool.js'), /timeoutSeconds must be an integer from 1 to 600/);
+  await writeFile(path.join(workspace, 'tools', 'top-tool.tool.json'), JSON.stringify({ timeoutSeconds: 121 }));
+  await assert.rejects(worker.workspaceToolPolicy('tools/top-tool.js'), /timeoutSeconds must be an integer from 1 to 120/);
 });
 test('worker creates and registers a discoverable top-level project', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-project-'));
@@ -111,7 +147,7 @@ test('worker creates and registers a discoverable top-level project', async () =
   await writeFile(path.join(workspace, 'index.md'), '# Workspace\n');
   await cp(path.join(root, 'seed', 'workspace', 'templates', 'project'), template, { recursive: true });
   const savedTemplate = process.env.OK_WORKBENCH_PROJECT_TEMPLATE; process.env.OK_WORKBENCH_PROJECT_TEMPLATE = template;
-  worker.setWorkspaceRoot(workspace);
+  worker.setWorkspaceRoot(workspace, { workspaceMode: true });
   try {
     const created = await worker.createProject({ id: 'planning', title: 'Private planning' });
     assert.deepEqual(created, { id: 'planning', path: 'planning', location: '/workspace/planning', title: 'Private planning', structure: 'OKF 0.2 project template' });

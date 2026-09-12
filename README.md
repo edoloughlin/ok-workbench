@@ -70,19 +70,21 @@ For general Python calculations, file processing, and image conversion, you can 
 
 The assistant can discover executable Python 3 and Node.js scripts placed directly in `tools/` or `<project>/tools/`. Each tool needs a standard shebang such as `#!/usr/bin/env python3` or `#!/usr/bin/env node`. Tools run without a shell, with each supplied argument kept separate, a 30-second default limit, and captured output.
 
-Optional policy lives beside the script in `<tool-name>.tool.json`, where `<tool-name>` excludes the script extension. For example, the policy for `tools/jira-sync.js` is `tools/jira-sync.tool.json`. The full-filename form (`jira-sync.js.tool.json`) is also accepted for compatibility, but do not create both. It is visible to the assistant but is not writable by it; scripts under `tools/` are likewise read/run-only from the assistant's perspective. Never put a secret value in this file.
+Optional requirements live beside the script in `<tool-name>.tool.json`, where `<tool-name>` excludes the script extension. For example, the policy for `tools/jira-sync.js` is `tools/jira-sync.tool.json`. The full-filename form (`jira-sync.js.tool.json`) is also accepted for compatibility, but do not create both. The manifest is visible to the assistant but is not writable by it; scripts under `tools/` are likewise read/run-only from the assistant's perspective. Never put a secret value in this file.
 
 When tools are discovered, malformed, conflicting, or orphaned metadata is returned as a diagnostic and written to the backend log. This makes a metadata filename mismatch visible without attempting to run the tool.
 
 ```json
 {
-  "environment": ["JIRA_API_TOKEN", "JIRA_BASE_URL"],
-  "network": true,
+  "secrets": ["jira-token"],
+  "network": { "hosts": ["jira.example.com"], "ports": [443] },
   "timeoutSeconds": 120
 }
 ```
 
-`environment` lists variables that must already be set in the environment used to start `ok-workbench`; only that tool receives those named values. `network` defaults to `false`. Setting it to `true` permits that tool outbound network access on Linux and macOS. `timeoutSeconds` defaults to `30` and accepts whole seconds from `1` through `600`. This is deliberately a per-tool grant, but it currently permits general outbound access rather than a host allowlist. Keep credentials in the launching environment, not in the workspace or manifest.
+The manifest only declares requirements; it grants nothing. In **Agent connections → Workspace tools**, a user must review and approve the exact script and manifest hashes before any workspace tool can run. Tool secrets are independently stored in Workbench state under logical names such as `jira-token`, and are injected only as `OK_WORKBENCH_TOOL_SECRET_JIRA_TOKEN`. Provider keys and arbitrary server environment variables are never requestable by workspace tools. Changing or renaming a script or manifest invalidates its approval.
+
+`network.hosts` is a public-DNS allowlist requirement, not a boolean grant. Until Workbench has a host-filtering egress broker, even an approved network requirement remains fail-closed and tools have no network access. `timeoutSeconds` defaults to `30` and accepts whole seconds from `1` through `120`. Workspace-tool execution currently requires Linux `prlimit` resource controls and fails closed on macOS. Each execution is separately sandboxed and has wall-clock, CPU, address-space, process-count, open-file, individual-file-size, and captured-output limits; project-wide disk quota and cgroup-wide aggregate quotas remain host-configuration concerns.
 
 The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_BROWSER_STATE_DIR`, old CSRF headers, `/agents/`, and `AGENTS_BUNDLE_ROOT` are one-release compatibility paths. Use `ok-workbench migrate-state --yes` only after reviewing the paths: it copies legacy state only if the destination does not exist and never deletes old data. Browser `localStorage` preferences may need to be set again when the route, origin, or port changes.
 

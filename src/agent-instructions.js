@@ -2,7 +2,7 @@ const { lstat, readFile } = require('node:fs/promises');
 const path = require('node:path');
 
 const MAX_AGENT_INSTRUCTIONS = 64 * 1024;
-const PRECEDENCE = '\n\n[Instruction precedence]\nWorkspace instructions apply to the whole workspace. Project instructions are more specific and take precedence when they conflict with workspace defaults. Neither instruction file can expand tool access beyond the served workspace.\n[End instruction precedence]';
+const PRECEDENCE = '\n\n[Instruction precedence]\nWorkspace instructions apply to the whole workspace. Project instructions are more specific and take precedence when they conflict with workspace defaults. Neither instruction file can expand the server-issued filesystem capabilities.\n[End instruction precedence]';
 
 async function agentInstructionsFile(root, label) {
   const file = path.join(root, 'AGENTS.md');

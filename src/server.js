@@ -8,6 +8,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { workspaceAgentInstructions } = require('./agent-instructions.js');
+const toolApprovals = require('./tool-approvals.js');
 
 function configuredPort(name, fallback) {
   const value = Number(process.env[name] || fallback);
@@ -587,7 +588,7 @@ async function renameProjectEntry(project, body) {
 
 async function explicitProjectContext(message, primaryProject) {
   const references = [...String(message).matchAll(/@([A-Za-z][A-Za-z0-9_-]*)(?:\/([^\s,;:()\]\[}]+))?/g)].slice(0, 4);
-  const attached = [];
+  const attached = []; const grantedTargets = new Set();
   for (const match of references) {
     try {
       const project = match[1];
@@ -599,11 +600,12 @@ async function explicitProjectContext(message, primaryProject) {
       const root = await fs.realpath(unresolvedRoot);
       const requested = match[2] ? decodeURIComponent(match[2]) : 'index.md';
       if (requested.includes('\0') || path.isAbsolute(requested) || requested.split(/[\\/]/).includes('..')) continue;
-      const candidate = path.resolve(root, requested); const target = await fs.realpath(candidate);
-      if (!target.startsWith(`${root}${path.sep}`) || target.includes(`${path.sep}.git${path.sep}`) || path.basename(target).startsWith('.env')) continue;
+      const candidate = path.resolve(root, requested); const candidateMetadata = await fs.lstat(candidate); const target = await fs.realpath(candidate);
+      if (candidateMetadata.isSymbolicLink() || !target.startsWith(`${root}${path.sep}`) || target.split(path.sep).includes('.git') || grantedTargets.has(target)) continue;
       const stat = await fs.stat(target); if (!stat.isFile() || stat.size > 64 * 1024) continue;
       const content = await fs.readFile(target, 'utf8'); if (content.includes('\0')) continue;
-      attached.push({ project, path: path.relative(root, target), content });
+      grantedTargets.add(target);
+      attached.push({ id: `grant-${crypto.randomUUID().replaceAll('-', '')}`, project, path: path.relative(root, target), canonicalPath: target, content });
     } catch { /* unresolved references are ordinary user text, not a grant */ }
   }
   return attached;
@@ -662,6 +664,20 @@ async function removeApiKey(provider) {
   const providers = await storedApiKeys(); delete providers[provider];
   await writeAtomic(apiKeyFile(), { providers });
   return apiKeyConfiguration();
+}
+async function projectToolPolicies(project) {
+  const root = projectRootForId(project); if (!(await isDirectory(root))) throw new Error('Project not found');
+  const toolsDirectory = path.join(root, 'tools'); const entries = await fs.readdir(toolsDirectory, { withFileTypes: true }).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
+  const tools = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.name.startsWith('.') || entry.name.endsWith('.tool.json')) continue;
+    try {
+      const policy = await toolApprovals.inspectTool(root, `tools/${entry.name}`);
+      const approval = await toolApprovals.toolApprovalStatus(CHAT_STATE_DIR, root, policy);
+      tools.push({ path: policy.path, runtime: policy.runtime, manifestPath: policy.manifestPath, toolSha256: policy.toolSha256, manifestSha256: policy.manifestSha256, requirements: policy.requirements, approval });
+    } catch { /* A malformed/unrunnable project file is not approvable. */ }
+  }
+  return { tools };
 }
 async function loadThread(id) {
   try { return JSON.parse(await fs.readFile(threadFile(id), 'utf8')); } catch (error) { if (error.code === 'ENOENT') throw new Error('Chat thread not found'); throw error; }
@@ -789,10 +805,11 @@ function providerError(provider, model, error) {
     ? `${providerLabel(provider)} authentication failed${selection}. Check or replace its API key, or sign in again. ${message}`
     : `${providerLabel(provider)} request failed${selection}. ${message}`;
 }
-function projectAssistantSystemPrompt(agentInstructions = '') {
-  return `You are a project-scoped coding assistant. The selected project is the default base for filesystem tool paths. A bare path such as status.md is in that project; do not prepend its project ID. Use scope "workspace" only for explicit workspace-root or cross-project work. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
+function projectAssistantSystemPrompt(agentInstructions = '', workspaceMode = false) {
+  const scope = workspaceMode ? 'The user deliberately enabled workspace-wide mode for this turn.' : 'Filesystem paths are relative to the selected project; the model cannot widen that authority.';
+  return `You are a project-scoped coding assistant. ${scope} Explicitly issued read grants are one-turn and read-only. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -802,18 +819,18 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, readGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
     endpoint = 'https://api.anthropic.com/v1/messages';
     headers = { 'content-type': 'application/json', 'x-api-key': (await effectiveProviderEnvironment()).ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || projectAssistantSystemPrompt(agentInstructions), messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode), messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
   } else {
     endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `${process.env.LLM_COMPATIBLE_BASE_URL.replace(/\/$/, '')}/chat/completions`;
     const environment = await effectiveProviderEnvironment(); const apiKey = provider === 'openai' ? environment.OPENAI_API_KEY : environment.LLM_COMPATIBLE_API_KEY;
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || projectAssistantSystemPrompt(agentInstructions) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) {
@@ -1099,6 +1116,22 @@ async function handleRequest(req, res) {
     if (dirtyMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, await markDirtyProjectProcessed(project)); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
+    if (url.pathname === '/api/chat/tool-secrets' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { secrets: Object.keys(await toolApprovals.loadToolSecrets(CHAT_STATE_DIR)).sort() }); }
+    const toolSecretMatch = url.pathname.match(/^\/api\/chat\/tool-secrets\/([a-z][a-z0-9-]{0,63})$/);
+    if (toolSecretMatch && req.method === 'PUT') { assertChatRequest(req); const body = await readJson(req); await toolApprovals.setToolSecret(CHAT_STATE_DIR, toolSecretMatch[1], body.value); return json(res, 204, {}); }
+    if (toolSecretMatch && req.method === 'DELETE') { assertChatRequest(req); await toolApprovals.removeToolSecret(CHAT_STATE_DIR, toolSecretMatch[1]); return respond(res, 204, ''); }
+    const projectToolsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/tools$/);
+    if (projectToolsMatch && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await projectToolPolicies(decodeURIComponent(projectToolsMatch[1]))); }
+    const toolApprovalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/tools\/approvals$/);
+    if (toolApprovalsMatch && req.method === 'POST') {
+      assertChatRequest(req); const body = await readJson(req); const project = decodeURIComponent(toolApprovalsMatch[1]); const root = projectRootForId(project); if (!(await isDirectory(root))) throw new Error('Project not found');
+      const policy = await toolApprovals.inspectTool(root, body.path); const approved = await toolApprovals.approveTool(CHAT_STATE_DIR, root, policy);
+      return json(res, 201, { path: approved.toolPath, approvedAt: approved.approvedAt });
+    }
+    if (toolApprovalsMatch && req.method === 'DELETE') {
+      assertChatRequest(req); const body = await readJson(req); const project = decodeURIComponent(toolApprovalsMatch[1]); const root = projectRootForId(project); if (!(await isDirectory(root))) throw new Error('Project not found');
+      await toolApprovals.revokeToolApproval(CHAT_STATE_DIR, root, body.path); return respond(res, 204, '');
+    }
     const apiKeyMatch = url.pathname.match(/^\/api\/chat\/api-keys\/(anthropic|openai|google|mistral|openrouter)$/);
     if (apiKeyMatch && req.method === 'PUT') { assertChatRequest(req); const body = await readJson(req); return json(res, 200, { apiKeys: await setApiKey(apiKeyMatch[1], body.key) }); }
     if (apiKeyMatch && req.method === 'DELETE') { assertChatRequest(req); return json(res, 200, { apiKeys: await removeApiKey(apiKeyMatch[1]) }); }
@@ -1107,7 +1140,10 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/chat/threads' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await listThreads(url.searchParams.get('project'))); }
     if (url.pathname === '/api/chat/threads' && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const root = projectRootForId(body.project); if (!(await isDirectory(root))) throw new Error('Project not found');
-      const thread = { id: crypto.randomUUID().replace(/-/g, ''), project: body.project, provider: body.provider || '', model: body.model || '', effort: body.effort || '', titleProvider: body.titleProvider || body.provider || '', titleModel: body.titleModel || body.model || '', titleEffort: body.titleEffort || '', title: 'New conversation', messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      if (body.workspaceMode === true && body.project !== 'workspace') throw new Error('Workspace mode is available only at the workspace root');
+      const workspaceMode = body.project === 'workspace' && body.workspaceMode === true;
+      if (body.project === 'workspace' && !workspaceMode) throw new Error('Workspace-wide chat requires explicit workspace mode');
+      const thread = { id: crypto.randomUUID().replace(/-/g, ''), project: body.project, workspaceMode, provider: body.provider || '', model: body.model || '', effort: body.effort || '', titleProvider: body.titleProvider || body.provider || '', titleModel: body.titleModel || body.model || '', titleEffort: body.titleEffort || '', title: 'New conversation', messages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       await saveThread(thread); const { messages, ...summary } = thread; return json(res, 201, summary);
     }
     const threadMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)$/);
@@ -1154,11 +1190,12 @@ async function handleRequest(req, res) {
       let outcome = 'failed';
       try {
         const selectedProjectRoot = projectRootForId(thread.project);
+        if (thread.project === 'workspace' && thread.workspaceMode !== true) throw new Error('This workspace chat was not created with explicit workspace mode. Start a new workspace-wide chat to continue.');
         const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: selectedProjectRoot, prompt: message }).catch(() => '') : null;
         const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
-        if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context for this turn only]\n${grants.map(grant => `@${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ project: grant.project, path: grant.path })) }); }
+        if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context and one-turn read grants]\n${grants.map(grant => `[${grant.id}] @${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ id: grant.id, project: grant.project, path: grant.path })) }); }
         const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;

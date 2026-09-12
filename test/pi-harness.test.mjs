@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
+const linuxSandboxAvailable = process.platform === 'linux' && spawnSync('/usr/bin/bwrap', ['--unshare-user', '--ro-bind', '/', '/', '--', '/usr/bin/true']).status === 0;
 
 test('TurnWorker reports a sandbox process exit instead of leaving tool calls pending', async () => {
   const { TurnWorker } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
@@ -33,24 +34,20 @@ test('sandbox backend selection and Seatbelt arguments are platform-specific', a
   assert.equal(sandboxBackend('win32'), null);
   const args = macosSandboxArgs({
     workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template',
-    temporaryDirectory: '/private/tmp/ok-workbench-worker-123', nodeBinary: '/opt/homebrew/Cellar/node/22.19.0/bin/node', workerSource: 'startWorker();',
+    temporaryDirectory: '/private/tmp/ok-workbench-worker-123', grants: '/private/tmp/ok-workbench-grants-123', nodeBinary: '/opt/homebrew/Cellar/node/22.19.0/bin/node', workerSource: 'startWorker();',
   });
-  assert.deepEqual(args.slice(0, 12), [
+  assert.deepEqual(args.slice(0, 14), [
     '-D', 'WORKSPACE=/Users/example/Work space', '-D', 'TEMPLATE=/Applications/OK Workbench/template',
-    '-D', 'PRIVATE_TMP=/private/tmp/ok-workbench-worker-123', '-D', 'NODE_BINARY=/opt/homebrew/Cellar/node/22.19.0/bin/node',
+    '-D', 'PRIVATE_TMP=/private/tmp/ok-workbench-worker-123', '-D', 'GRANTS=/private/tmp/ok-workbench-grants-123', '-D', 'NODE_BINARY=/opt/homebrew/Cellar/node/22.19.0/bin/node',
     '-D', 'NODE_RUNTIME=/opt/homebrew/Cellar/node/22.19.0', '-f', path.join(root, 'dist', 'macos-sandbox.sb'),
   ]);
   assert.deepEqual(args.slice(-4), ['/opt/homebrew/Cellar/node/22.19.0/bin/node', '--input-type=commonjs', '--eval', 'startWorker();']);
-  const networkArgs = macosSandboxArgs({
-    workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template',
-    temporaryDirectory: '/private/tmp/ok-workbench-worker-123', nodeBinary: '/opt/homebrew/Cellar/node/22.19.0/bin/node', workerSource: 'startWorker();', network: true,
-  });
-  assert.ok(networkArgs.includes(path.join(root, 'dist', 'macos-network-sandbox.sb')));
+  assert.ok(!args.includes(path.join(root, 'dist', 'macos-network-sandbox.sb')));
   assert.deepEqual(sandboxChildEnvironment({
-    platform: 'darwin', workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template', temporaryDirectory: '/private/tmp/ok-workbench-worker-123',
+    platform: 'darwin', workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template', temporaryDirectory: '/private/tmp/ok-workbench-worker-123', grants: '/private/tmp/ok-workbench-grants-123',
   }), {
     PATH: '/usr/bin:/bin', HOME: '/private/tmp/ok-workbench-worker-123', TMPDIR: '/private/tmp/ok-workbench-worker-123',
-    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template', __CF_USER_TEXT_ENCODING: `0x${process.getuid().toString(16)}:0:0`,
+    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template', OK_WORKBENCH_WORKSPACE_MODE: '0', OK_WORKBENCH_READ_GRANTS: '{}', __CF_USER_TEXT_ENCODING: `0x${process.getuid().toString(16)}:0:0`,
   });
   const profile = await readFile(path.join(root, 'dist', 'macos-sandbox.sb'), 'utf8');
   assert.match(profile, /^\(deny default\)$/m);
@@ -87,6 +84,31 @@ test('macOS Seatbelt worker can service workspace tools', { skip: process.platfo
   } finally {
     worker.close();
   }
+});
+test('Linux worker mounts only the selected project plus staged read grants', { skip: !linuxSandboxAvailable }, async () => {
+  const { createTurnWorker } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-capability-mounts-'));
+  const projectA = path.join(workspace, 'project-a'); const projectB = path.join(workspace, 'project-b');
+  await (await import('node:fs/promises')).mkdir(projectA); await (await import('node:fs/promises')).mkdir(projectB);
+  await writeFile(path.join(projectA, 'normal.md'), 'normal\n');
+  const privateFile = path.join(projectB, 'private.md'); await writeFile(privateFile, 'private\n');
+  const worker = await createTurnWorker(projectA, { readGrants: [{ id: 'grant-privatefile', canonicalPath: privateFile }] });
+  try {
+    assert.equal((await worker.call('read_file', { path: 'normal.md' })).content, 'normal\n');
+    await assert.rejects(worker.call('read_file', { path: '../project-b/private.md', scope: 'workspace' }));
+    assert.equal((await worker.call('read_granted_file', { grant_id: 'grant-privatefile' })).content, 'private\n');
+    await assert.rejects(worker.call('read_granted_file', { grant_id: 'grant-invented' }));
+  } finally { worker.close(); }
+});
+test('read grants are staged from one canonical no-follow file descriptor', async () => {
+  const { stageReadGrants } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-grant-staging-'));
+  const source = path.join(workspace, 'reference.md'); const alias = path.join(workspace, 'reference-alias.md');
+  await writeFile(source, 'granted content\n'); await symlink(source, alias);
+  await assert.rejects(stageReadGrants([{ id: 'grant-aliasedfile', canonicalPath: alias }]), /canonical path/);
+  const staged = await stageReadGrants([{ id: 'grant-referencefile', canonicalPath: await realpath(source) }]);
+  try { assert.equal(await readFile(staged.staged['grant-referencefile'], 'utf8'), 'granted content\n'); }
+  finally { await rm(staged.directory, { recursive: true, force: true }); }
 });
 test('project tool result preserves the Pi tool-result envelope and creation metadata', async () => {
   const { projectToolResult } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
@@ -144,21 +166,24 @@ test('agent instruction loader ignores an AGENTS.md symbolic link', async () => 
   await symlink(path.join(outside, 'AGENTS.md'), path.join(workspace, 'AGENTS.md'));
   assert.equal(await workspaceAgentInstructions(workspace, workspace), '');
 });
-test('project tool context maps default paths without allowing project escape', async () => {
-  const { createToolContext, projectToolPath, projectToolResultPath, projectToolErrorMessage } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+test('turn capabilities are project-scoped and accept only server-issued grants', async () => {
+  const { createTurnCapabilities } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-tool-context-'));
   const project = path.join(workspace, 'alpha');
-  await (await import('node:fs/promises')).mkdir(project);
-  const context = await createToolContext({ workspaceRoot: workspace, projectRoot: project });
-  assert.equal(context.projectPrefix, 'alpha');
-  assert.equal(projectToolPath(context, 'status.md'), 'alpha/status.md');
-  assert.equal(projectToolPath(context, '.'), 'alpha');
-  assert.equal(projectToolPath(context, 'index.md', 'workspace'), 'index.md');
-  assert.equal(projectToolResultPath(context, 'alpha/status.md'), 'status.md');
-  assert.equal(projectToolResultPath(context, 'beta/status.md', 'workspace'), 'beta/status.md');
-  assert.equal(projectToolErrorMessage(context, 'Substantive project update requires alpha/status.md'), 'Substantive project update requires status.md');
-  assert.throws(() => projectToolPath(context, '../beta/status.md'), /outside the selected scope/);
-  assert.throws(() => projectToolPath(context, 'status.md', 'invalid'), /Invalid tool scope/);
+  const other = path.join(workspace, 'beta');
+  await (await import('node:fs/promises')).mkdir(project); await (await import('node:fs/promises')).mkdir(other);
+  const granted = path.join(other, 'reference.md'); await writeFile(granted, 'explicit context\n');
+  const capabilities = await createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, readGrants: [{ id: 'grant-abcdefgh', canonicalPath: granted }] });
+  assert.equal(capabilities.selectedProject.root, await (await import('node:fs/promises')).realpath(project));
+  assert.equal(capabilities.workspaceMode, false);
+  assert.deepEqual(capabilities.extraReadGrants, [{ id: 'grant-abcdefgh', canonicalPath: await (await import('node:fs/promises')).realpath(granted) }]);
+  await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, readGrants: [{ id: 'invented', canonicalPath: granted }] }), /Invalid read grant/);
   const outside = await mkdtemp(path.join(tmpdir(), 'ok-workbench-tool-context-outside-'));
-  await assert.rejects(createToolContext({ workspaceRoot: workspace, projectRoot: outside }), /outside the workspace/);
+  await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: outside }), /outside the workspace/);
+  const source = await readFile(path.join(root, 'src', 'pi-harness.mjs'), 'utf8');
+  assert.doesNotMatch(source, /Type\.Literal\('workspace'\)/);
+  await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: workspace }), /explicit workspace mode/);
+  const workspaceCapabilities = await createTurnCapabilities({ workspaceRoot: workspace, projectRoot: workspace, workspaceMode: true });
+  assert.equal(workspaceCapabilities.workspaceMode, true);
+  await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, workspaceMode: true }), /requires the workspace root/);
 });

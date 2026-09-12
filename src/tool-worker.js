@@ -13,6 +13,8 @@ const readline = require('node:readline');
 const zlib = require('node:zlib');
 
 let ROOT = path.resolve(process.env.OK_WORKSPACE_ROOT || process.env.OKF_WORKSPACE_ROOT || '/workspace');
+let WORKSPACE_MODE = process.env.OK_WORKBENCH_WORKSPACE_MODE === '1';
+let READ_GRANTS = parseReadGrants(process.env.OK_WORKBENCH_READ_GRANTS);
 const MAX_READ = 256 * 1024;
 const MAX_DOCUMENT_READ = 25 * 1024 * 1024;
 const MAX_DOCUMENT_TEXT = 256 * 1024;
@@ -22,19 +24,36 @@ const MAX_TOOL_OUTPUT = 64 * 1024;
 const MAX_TOOL_ARGUMENTS = 32;
 const MAX_TOOL_ARGUMENT_LENGTH = 4 * 1024;
 const DEFAULT_TOOL_TIMEOUT_SECONDS = 30;
-const MAX_TOOL_TIMEOUT_SECONDS = 600;
 const MAX_TOOL_MANIFEST = 16 * 1024;
-const MAX_TOOL_ENVIRONMENT = 16;
 const CONTENT_HASH_LENGTH = 12;
-const DENIED = new Set(['.git', 'id_rsa', 'id_ed25519', 'known_hosts', 'credentials']);
+const ALWAYS_DENIED = new Set(['.git']);
+
+function parseReadGrants(value) {
+  if (!value) return new Map();
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
+    return new Map(Object.entries(parsed).filter(([id, target]) => /^grant-[A-Za-z0-9_-]{8,}$/.test(id) && typeof target === 'string' && path.isAbsolute(target)));
+  } catch { return new Map(); }
+}
+function isSensitiveName(name) {
+  const lower = name.toLowerCase();
+  return lower.startsWith('.') || /^\.?(?:env|npmrc|netrc|pypirc)$/.test(lower) || /\.(?:pem|key|p12|pfx)$/i.test(lower) || /^(?:credentials|secrets)/i.test(name) || ['id_rsa', 'id_ed25519', 'known_hosts'].includes(lower);
+}
+function isDeniedPath(parts) { return parts.some(part => ALWAYS_DENIED.has(part) || isSensitiveName(part)); }
 
 function send(value) { process.stdout.write(`${JSON.stringify(value)}\n`); }
 function safeRelative(value) {
   if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('A relative path is required');
   const normalized = path.posix.normalize(value.replace(/\\/g, '/')).replace(/^\.\//, '');
-  if (normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) throw new Error('Path is outside the workspace');
-  if (normalized.split('/').some(part => DENIED.has(part) || part.startsWith('.git') || part.startsWith('.env') || /\.(?:pem|key|p12|pfx)$/i.test(part))) throw new Error('Path is not available to the agent');
+  if (normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) throw new Error('Path is outside the selected project');
+  if (isDeniedPath(normalized.split('/'))) throw new Error('Path is not available to the agent');
   return normalized;
+}
+function isWithin(root, target) { return target === root || target.startsWith(`${root}${path.sep}`); }
+function deniedCanonicalPath(root, target) {
+  const relative = path.relative(root, target);
+  return !relative || path.isAbsolute(relative) || relative.split(path.sep).some(part => !part || isDeniedPath([part]));
 }
 async function targetFor(relative, write = false) {
   const safe = safeRelative(relative); const target = path.resolve(ROOT, safe);
@@ -43,17 +62,26 @@ async function targetFor(relative, write = false) {
   // realpath returns /private/var. Compare canonical paths so that alias is
   // not mistaken for an escape, while still rejecting a real symlink escape.
   const root = await fs.realpath(ROOT);
-  let ancestor = write ? path.dirname(target) : target; let real = null;
+  let ancestor = target; let real = null;
   while (!real) { real = await fs.realpath(ancestor).catch(() => null); if (!real) { const parent = path.dirname(ancestor); if (parent === ancestor) throw new Error('Cannot resolve workspace path'); ancestor = parent; } }
-  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw new Error('Symlink escapes workspace');
-  return { safe, target };
+  const canonical = path.resolve(real, path.relative(ancestor, target));
+  if (!isWithin(root, canonical)) throw new Error('Symlink escapes workspace');
+  // Check the final canonical location, not only user-controlled spelling.
+  // This prevents aliases such as docs -> .git or public.md -> .npmrc from
+  // bypassing the hidden-file policy.
+  if (deniedCanonicalPath(root, canonical)) throw new Error('Path is not available to the agent');
+  if (write) {
+    const lexicalInfo = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (lexicalInfo?.isSymbolicLink()) throw new Error('Refusing to modify a symbolic link');
+  }
+  return { safe, target: canonical };
 }
 async function listFiles(relative = '.') {
   const start = relative === '.' ? { safe: '', target: ROOT } : await targetFor(relative); const output = [];
   async function visit(directory, prefix) {
     if (output.length >= MAX_RESULTS) return;
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      if (entry.name.startsWith('.') || DENIED.has(entry.name)) continue;
+      if (isDeniedPath([entry.name])) continue;
       const child = path.join(directory, entry.name); const childRelative = path.posix.join(prefix, entry.name);
       if (entry.isDirectory()) await visit(child, childRelative);
       else if (entry.isFile()) output.push(childRelative);
@@ -67,6 +95,16 @@ async function readFile(relative) {
   const { safe, target } = await targetFor(relative); const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Path is not a file'); if (stat.size > MAX_READ) throw new Error('File is too large to read');
   const content = await fs.readFile(target, 'utf8'); if (content.includes('\0')) throw new Error('Binary files are not available'); return { path: safe, content, hash: contentHash(content) };
+}
+async function readGrantedFile(grantId) {
+  if (typeof grantId !== 'string' || !/^grant-[A-Za-z0-9_-]{8,}$/.test(grantId)) throw new Error('Unknown read grant');
+  const target = READ_GRANTS.get(grantId);
+  if (!target) throw new Error('Unknown read grant');
+  const info = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!info?.isFile() || info.isSymbolicLink() || info.size > MAX_READ) throw new Error('Granted file is unavailable');
+  const content = await fs.readFile(target, 'utf8');
+  if (content.includes('\0')) throw new Error('Granted file is binary');
+  return { grantId, content, hash: contentHash(content) };
 }
 function cappedDocumentText(value) {
   const text = String(value || '').replace(/\u0000/g, '').replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -173,8 +211,8 @@ function toolRuntime(shebang) {
 }
 function toolPath(relative) {
   const parts = safeRelative(relative).split('/');
-  const allowed = (parts.length === 2 && parts[0] === 'tools') || (parts.length === 3 && parts[1] === 'tools');
-  if (!allowed || !parts.at(-1) || parts.at(-1).startsWith('.')) throw new Error('Tools must be direct files in tools/ or <project>/tools/');
+  const allowed = parts.length === 2 && parts[0] === 'tools';
+  if (!allowed || !parts.at(-1) || parts.at(-1).startsWith('.')) throw new Error('Tools must be direct files in the selected project\'s tools/ directory');
   return parts.join('/');
 }
 async function workspaceTool(relative) {
@@ -189,18 +227,28 @@ async function workspaceTool(relative) {
 }
 function isToolFile(relative) {
   const parts = safeRelative(relative).split('/');
-  return (parts.length === 2 && parts[0] === 'tools') || (parts.length === 3 && parts[1] === 'tools');
-}
-function toolEnvironmentNames(value) {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > MAX_TOOL_ENVIRONMENT || value.some(name => typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) throw new Error('Tool manifest environment must be an array of up to 16 variable names');
-  return [...new Set(value)];
+  return parts.length === 2 && parts[0] === 'tools';
 }
 function toolTimeoutSeconds(value) {
   if (value === undefined) return DEFAULT_TOOL_TIMEOUT_SECONDS;
-  if (!Number.isInteger(value) || value < 1 || value > MAX_TOOL_TIMEOUT_SECONDS) throw new Error(`Tool manifest timeoutSeconds must be an integer from 1 to ${MAX_TOOL_TIMEOUT_SECONDS}`);
+  if (!Number.isInteger(value) || value < 1 || value > 120) throw new Error('Tool manifest timeoutSeconds must be an integer from 1 to 120');
   return value;
 }
+function toolSecretNames(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16 || value.some(name => typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(name) || /(?:openai|anthropic|gemini|mistral|openrouter|copilot|codex|llm[_-]?compatible)/i.test(name))) throw new Error('Tool manifest secrets must be logical, non-provider secret names');
+  return [...new Set(value)].sort();
+}
+function toolNetwork(value) {
+  if (value === undefined) return { hosts: [], ports: [] };
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => key !== 'hosts' && key !== 'ports')) throw new Error('Tool manifest network must describe hosts and optional ports');
+  const hosts = value.hosts === undefined ? [] : value.hosts; const ports = value.ports === undefined ? [443] : value.ports;
+  if (!Array.isArray(hosts) || hosts.length > 16 || hosts.some(host => typeof host !== 'string' || host === 'localhost' || !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,62}$/i.test(host))) throw new Error('Tool manifest network hosts must be public DNS names');
+  if (!Array.isArray(ports) || ports.length > 16 || ports.some(port => !Number.isInteger(port) || port < 1 || port > 65_535)) throw new Error('Tool manifest network ports must be valid TCP ports');
+  if (!hosts.length && ports.length) throw new Error('Tool manifest network ports require at least one host');
+  return { hosts: [...new Set(hosts.map(host => host.toLowerCase()))].sort(), ports: [...new Set(ports)].sort((a, b) => a - b) };
+}
+function toolRequirements(manifest) { return { secrets: toolSecretNames(manifest.secrets), network: toolNetwork(manifest.network), timeoutSeconds: toolTimeoutSeconds(manifest.timeoutSeconds) }; }
 async function workspaceToolPolicy(relative) {
   const tool = await workspaceTool(relative); const extension = path.posix.extname(tool.path);
   const manifestPaths = [...new Set([`${extension ? tool.path.slice(0, -extension.length) : tool.path}.tool.json`, `${tool.path}.tool.json`])];
@@ -211,17 +259,18 @@ async function workspaceToolPolicy(relative) {
   }
   if (manifests.length > 1) throw new Error('Tool has conflicting manifest files');
   const [{ target, info } = {}] = manifests;
-  if (!info) return { path: tool.path, runtime: tool.runtime, manifestPath: null, manifest: null, environment: [], network: false, timeoutSeconds: DEFAULT_TOOL_TIMEOUT_SECONDS };
+  const toolSource = await fs.readFile(tool.target);
+  const toolSha256 = crypto.createHash('sha256').update(toolSource).digest('hex');
+  if (!info) return { path: tool.path, runtime: tool.runtime, manifestPath: null, toolSha256, manifestSha256: null, requirements: { secrets: [], network: { hosts: [], ports: [] }, timeoutSeconds: DEFAULT_TOOL_TIMEOUT_SECONDS } };
   if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_TOOL_MANIFEST) throw new Error('Tool manifest must be a regular JSON file under 16 KiB');
+  const manifestSource = await fs.readFile(target);
   let manifest;
-  try { manifest = JSON.parse(await fs.readFile(target, 'utf8')); } catch { throw new Error('Tool manifest is not valid JSON'); }
-  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).some(key => key !== 'environment' && key !== 'network' && key !== 'timeoutSeconds')) throw new Error('Tool manifest may contain only environment, network, and timeoutSeconds');
-  if (manifest.network !== undefined && typeof manifest.network !== 'boolean') throw new Error('Tool manifest network must be true or false');
-  return { path: tool.path, runtime: tool.runtime, manifestPath: manifests[0].manifestPath, manifest, environment: toolEnvironmentNames(manifest.environment), network: manifest.network === true, timeoutSeconds: toolTimeoutSeconds(manifest.timeoutSeconds) };
+  try { manifest = JSON.parse(manifestSource); } catch { throw new Error('Tool manifest is not valid JSON'); }
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || Object.keys(manifest).some(key => key !== 'secrets' && key !== 'network' && key !== 'timeoutSeconds')) throw new Error('Tool manifest may contain only secrets, network, and timeoutSeconds requirements');
+  return { path: tool.path, runtime: tool.runtime, manifestPath: manifests[0].manifestPath, toolSha256, manifestSha256: crypto.createHash('sha256').update(manifestSource).digest('hex'), requirements: toolRequirements(manifest) };
 }
 async function listWorkspaceTools() {
   const directories = ['tools'];
-  for (const entry of await fs.readdir(ROOT, { withFileTypes: true })) if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'tools') directories.push(path.posix.join(entry.name, 'tools'));
   const tools = []; const diagnostics = [];
   for (const directory of directories) {
     const target = path.join(ROOT, directory);
@@ -256,20 +305,35 @@ function toolArguments(argumentsList) {
 }
 async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
   const [tool, policy] = await Promise.all([workspaceTool(relative), workspaceToolPolicy(relative)]); const args = toolArguments(argumentsList);
+  if (process.platform !== 'linux') throw new Error('Workspace tools require Linux resource controls in this build');
+  let approved;
+  try { approved = JSON.parse(process.env.OK_WORKBENCH_TOOL_EXECUTION_POLICY || ''); } catch { throw new Error('Workspace tool execution was not authorized by Workbench'); }
+  if (!approved || approved.path !== tool.path || approved.toolSha256 !== policy.toolSha256 || approved.manifestSha256 !== policy.manifestSha256 || JSON.stringify(approved.requirements) !== JSON.stringify(policy.requirements) || !Number.isInteger(approved.timeoutSeconds) || !approved.resourceLimits) throw new Error('Tool changed after approval or was not authorized by Workbench');
   const command = tool.runtime === 'python3' ? 'python3' : process.execPath;
+  const limits = approved.resourceLimits;
+  if (![limits.memoryBytes, limits.cpuSeconds, limits.processCount, limits.openFiles, limits.fileSizeBytes].every(value => Number.isInteger(value) && value > 0)) throw new Error('Invalid Workbench resource policy');
   return new Promise((resolve, reject) => {
-    const child = spawn(command, [tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const prlimit = '/usr/bin/prlimit';
+    const child = spawn(prlimit, [`--as=${limits.memoryBytes}`, `--cpu=${limits.cpuSeconds}`, `--nproc=${limits.processCount}`, `--nofile=${limits.openFiles}`, `--fsize=${limits.fileSizeBytes}`, '--', command, tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
     let stdout = ''; let stderr = ''; let timedOut = false;
     const capture = (current, chunk) => `${current}${chunk}`.slice(0, MAX_TOOL_OUTPUT);
     child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => { stdout = capture(stdout, chunk); });
     child.stderr.setEncoding('utf8'); child.stderr.on('data', chunk => { stderr = capture(stderr, chunk); });
-    const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, policy.timeoutSeconds * 1000);
-    child.once('error', error => { clearTimeout(timeout); reject(new Error(`Tool could not start: ${error.message}`)); });
-    child.once('close', (code, signal) => {
+    const killTree = signal => { try { process.kill(-child.pid, signal); } catch { child.kill(signal); } };
+    const timeout = setTimeout(() => { timedOut = true; killTree('SIGTERM'); setTimeout(() => killTree('SIGKILL'), 1_000).unref(); }, approved.timeoutSeconds * 1000);
+    let settled = false;
+    const finish = (code, signal) => {
+      if (settled) return; settled = true;
       clearTimeout(timeout);
-      if (timedOut) return reject(new Error(`Tool timed out after ${policy.timeoutSeconds} seconds`));
+      if (timedOut) return reject(new Error(`Tool timed out after ${approved.timeoutSeconds} seconds`));
       resolve({ path: tool.path, runtime: tool.runtime, arguments: args, exitCode: code, signal: signal || null, stdout, stderr, ok: code === 0 && !signal });
-    });
+    };
+    child.once('error', error => { if (!settled) { settled = true; clearTimeout(timeout); reject(new Error(`Tool could not start: ${error.message}`)); } });
+    // Do not wait for `close`: a malicious descendant can inherit stdout or
+    // stderr, detach into a different process group, and keep those pipes open.
+    // The supervisor immediately tears down the enclosing PID namespace after
+    // this result, which kills such descendants as well.
+    child.once('exit', finish);
   });
 }
 async function applyPatch({ path: relative, content }) {
@@ -327,7 +391,7 @@ function appendProjectLog(content, summary) {
   const date = new Date().toISOString().slice(0, 10);
   return `${String(content || '').trimEnd()}\n\n## ${date}\n\n- ${summary.trim()}\n`;
 }
-async function applyProjectUpdate({ kind, summary, changes }) {
+async function applyWorkspaceProjectUpdate({ kind, summary, changes }) {
   if (!Array.isArray(changes) || !changes.length || changes.length > 64) throw new Error('Provide 1–64 workspace file changes');
   if (!['correction', 'substantive'].includes(kind)) throw new Error('Project update kind must be correction or substantive');
   if (kind === 'substantive' && (typeof summary !== 'string' || !summary.trim())) throw new Error('Substantive project updates need a summary');
@@ -365,6 +429,42 @@ async function applyProjectUpdate({ kind, summary, changes }) {
   for (const [safe, content] of prepared) written.push(await applyPatch({ path: safe, content }));
   return { paths: written.map(item => item.path), bytes: written.reduce((sum, item) => sum + item.bytes, 0) };
 }
+async function applyProjectUpdate({ kind, summary, changes }) {
+  if (WORKSPACE_MODE) return applyWorkspaceProjectUpdate({ kind, summary, changes });
+  if (!Array.isArray(changes) || !changes.length || changes.length > 64) throw new Error('Provide 1–64 selected-project file changes');
+  if (!['correction', 'substantive'].includes(kind)) throw new Error('Project update kind must be correction or substantive');
+  if (kind === 'substantive' && (typeof summary !== 'string' || !summary.trim())) throw new Error('Substantive project updates need a summary');
+  const prepared = new Map();
+  for (const change of changes) {
+    if (!change || typeof change.content !== 'string' || change.content.length > 1024 * 1024) throw new Error('Each project change needs text content under 1 MiB');
+    const { safe } = await targetFor(change.path, true);
+    if (prepared.has(safe)) throw new Error(`Duplicate project change: ${safe}`);
+    prepared.set(safe, change.content);
+  }
+  const original = new Map(await Promise.all([...prepared.keys()].map(async safe => [safe, await existingContent(safe)])));
+  const changed = new Set([...prepared].filter(([safe, content]) => original.get(safe) === null || normalizeMarkdown(original.get(safe)) !== normalizeMarkdown(content)).map(([safe]) => safe));
+  const newDirectories = new Set();
+  for (const safe of prepared.keys()) for (let directory = path.posix.dirname(safe); directory && directory !== '.'; directory = path.posix.dirname(directory)) {
+    if (!(await directoryExists(path.join(ROOT, directory)))) {
+      newDirectories.add(directory);
+      if (!prepared.has(`${directory}/index.md`)) throw new Error(`New directory ${directory} requires ${directory}/index.md in the same update`);
+    }
+  }
+  if (kind === 'substantive') {
+    const meaningful = [...changed].filter(safe => safe !== 'log.md');
+    if (meaningful.length) {
+      const missing = [];
+      if (!changed.has('status.md')) missing.push('status.md');
+      const structural = newDirectories.size > 0 || meaningful.some(safe => original.get(safe) === null && path.posix.dirname(safe) === '.');
+      if (structural && !changed.has('index.md')) missing.push('index.md');
+      if (missing.length) throw new Error(`Substantive project update requires meaningful changes to: ${missing.join(', ')}. The summary is recorded in log.md automatically.`);
+      prepared.set('log.md', appendProjectLog(prepared.get('log.md') ?? await existingContent('log.md'), summary));
+    }
+  }
+  const written = [];
+  for (const [safe, content] of prepared) written.push(await applyPatch({ path: safe, content }));
+  return { paths: written.map(item => item.path), bytes: written.reduce((sum, item) => sum + item.bytes, 0) };
+}
 function projectId(value) {
   if (typeof value !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value)) throw new Error('Project ID must start with a letter and use only letters, numbers, hyphens, or underscores');
   return value;
@@ -375,6 +475,7 @@ function projectTitle(value, id) {
   return value.trim();
 }
 async function createProject({ id: requestedId, title: requestedTitle }) {
+  if (!WORKSPACE_MODE) throw new Error('Creating a project requires deliberate workspace mode');
   const id = projectId(requestedId); const title = projectTitle(requestedTitle, id);
   const target = path.join(ROOT, id);
   if (await fs.lstat(target).then(() => true).catch(error => error.code === 'ENOENT' ? false : Promise.reject(error))) throw new Error(`Project already exists: ${id}`);
@@ -399,9 +500,9 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
   return { id, path: id, location: `/workspace/${encodeURIComponent(id)}`, title, structure: 'OKF 0.2 project template' };
 }
 
-function setWorkspaceRoot(root) { ROOT = path.resolve(root); }
+function setWorkspaceRoot(root, { workspaceMode = false, readGrants = {} } = {}) { ROOT = path.resolve(root); WORKSPACE_MODE = workspaceMode; READ_GRANTS = new Map(Object.entries(readGrants)); }
 function startWorker() {
-  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), move_file: moveFile, edit_file: editFile, list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
+  const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), read_granted_file: ({ grant_id: grantId }) => readGrantedFile(grantId), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), move_file: moveFile, edit_file: editFile, list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   // The launcher waits for this acknowledgement before exposing file tools.
   // A spawn event alone does not prove that the OS sandbox accepted the worker.
@@ -422,6 +523,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, extractDocument, searchFiles, moveFile, editFile, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
+module.exports = { setWorkspaceRoot, listFiles, readFile, readGrantedFile, extractDocument, searchFiles, moveFile, editFile, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();

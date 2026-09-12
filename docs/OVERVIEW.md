@@ -172,12 +172,16 @@ search tool cannot read workspace files or provider credentials.
 
 Executable Python 3 and Node.js scripts placed in `tools/` or a project's
 `tools/` directory become assistant-callable workspace tools. An adjacent JSON
-policy controls which existing environment variables the script receives,
-whether it may use the network, and how long it may run.
+manifest declares logical secret, host-network, and timeout requirements. It
+does not grant authority: a user must approve the exact script and manifest
+hashes in Workbench before any version can run.
 
 Tools run directly without a shell, with separate arguments, captured output,
-and a bounded timeout. Secrets stay in the environment that launches OK
-Workbench—not in the workspace or tool policy file.
+and a bounded timeout with CPU, memory, process, file, and descriptor limits.
+Tool secrets live in Workbench state and are injected only after matching
+approval; provider credentials and arbitrary server environment values are
+never exposed. Network remains denied until a host-filtering broker exists;
+workspace-tool execution currently fails closed outside Linux `prlimit`.
 
 This provides a controlled path to issue trackers, exporters, fetchers, and
 other local automation without turning every chat turn into unrestricted command

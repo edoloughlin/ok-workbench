@@ -68,4 +68,5 @@
 (allow file-read* file-write*
   (subpath (param "WORKSPACE"))
   (subpath (param "PRIVATE_TMP")))
+(allow file-read* (subpath (param "GRANTS")))
 (allow file-read* (subpath (param "TEMPLATE")))

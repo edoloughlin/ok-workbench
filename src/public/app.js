@@ -478,7 +478,7 @@ const chatUi = {
   notificationsButton: document.querySelector('#turn-notifications-button'), notificationsMenu: document.querySelector('#turn-notifications-menu'), notificationsList: document.querySelector('#turn-notifications-list'), notificationsCount: document.querySelector('#turn-notifications-count'),
   splitter: document.querySelector('#chat-splitter'), project: document.querySelector('#chat-project'),
   provider: document.querySelector('#chat-provider'), model: document.querySelector('#chat-model'), effort: document.querySelector('#chat-effort'),
-  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'),
+  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'), tools: document.querySelector('#chat-tools'), toolSecretAdd: document.querySelector('#chat-tool-secret-add'),
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
@@ -541,6 +541,8 @@ let chatProjectPreferences = {};
 try { chatProjectPreferences = JSON.parse(localStorage.getItem(chatProjectPreferencesKey) || '{}'); } catch { /* ignore corrupt local preference */ }
 let dirtyProjectItems = {};
 let chatProjectId = null;
+let chatProjectTitle = '';
+let workspaceMode = false;
 let chatThreadId = null;
 let chatThreads = [];
 let chatThreadHasUserChat = false;
@@ -586,6 +588,8 @@ async function chatApi(path, options = {}) {
   return response;
 }
 function setChatStatus(message) { chatUi.status.textContent = message; }
+function renderChatProjectLabel() { chatUi.project.textContent = workspaceMode && chatProjectId === 'workspace' ? 'Workspace-wide mode' : (chatProjectTitle || chatProjectId || 'Loading'); }
+function workspaceModeRequired() { return chatProjectId === 'workspace' && !workspaceMode; }
 function dirtyItemsFor(project = chatProjectId) { return Array.isArray(dirtyProjectItems[project]) ? dirtyProjectItems[project] : []; }
 function renderDirtyProcessPrompt() {
   const items = dirtyItemsFor(); chatUi.processDirty.hidden = items.length === 0;
@@ -630,7 +634,7 @@ function syncChatTurnControls() {
   chatUi.stop.hidden = !turn; chatUi.send.textContent = turn && steering ? 'Steer' : 'Send'; chatUi.send.disabled = Boolean(turn) && !ready;
   chatUi.processDirty.disabled = processingDirtyChanges || Boolean(turn);
   chatUi.input.disabled = Boolean(turn) && !steering;
-  chatUi.input.placeholder = !turn ? 'Ask about this project…' : steering ? (turn.steeringReady ? 'Add a steering comment…' : 'Preparing steering…') : 'Cancel the current response to send another comment';
+  chatUi.input.placeholder = !turn ? (workspaceModeRequired() ? 'Send to enable workspace-wide agent access…' : 'Ask about this project…') : steering ? (turn.steeringReady ? 'Add a steering comment…' : 'Preparing steering…') : 'Cancel the current response to send another comment';
   chatUi.send.title = turn && !steering ? 'Cancel the current response before sending another comment.' : '';
 }
 function renderTurnNotifications() {
@@ -697,6 +701,8 @@ function setOptions(select, values, selected) {
   }));
 }
 let configuredApiKeys = [];
+let workspaceTools = [];
+let configuredToolSecrets = [];
 let setupPrompted = false;
 const apiKeyProviderOptions = [
   { id: 'anthropic', label: 'Anthropic' }, { id: 'openai', label: 'OpenAI' },
@@ -704,7 +710,7 @@ const apiKeyProviderOptions = [
   { id: 'openrouter', label: 'OpenRouter' },
 ];
 function closeChatSettings() { if (chatUi.settingsDialog.open) chatUi.settingsDialog.close(); chatUi.settings.setAttribute('aria-expanded', 'false'); }
-function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); }
+function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); void loadWorkspaceTools(); }
 function toggleChatSettings() { if (chatUi.settingsDialog.open) closeChatSettings(); else openChatSettings(); }
 function apiKeyRow(record = null, selectedProvider = '') {
   const row = document.createElement('div'); row.className = 'chat-api-key-row';
@@ -729,6 +735,43 @@ function renderApiKeyRows() {
   for (const record of configuredApiKeys) chatUi.apiKeys.append(apiKeyRow(record));
   if (!configuredApiKeys.length) { const empty = document.createElement('p'); empty.className = 'chat-api-keys-empty'; empty.textContent = 'No API keys saved.'; chatUi.apiKeys.append(empty); }
   const used = new Set(configuredApiKeys.map(record => record.provider)); chatUi.apiKeyAdd.disabled = apiKeyProviderOptions.every(option => used.has(option.id));
+}
+function toolRequirementSummary(tool) {
+  const requirements = tool.requirements || {}; const parts = ['selected project: read/write'];
+  if (requirements.secrets?.length) parts.push(`secrets: ${requirements.secrets.join(', ')}`);
+  if (requirements.network?.hosts?.length) parts.push(`network requested: ${requirements.network.hosts.map(host => `${host}:${(requirements.network.ports || [443]).join('/')}`).join(', ')} (currently denied)`);
+  if (requirements.timeoutSeconds) parts.push(`timeout: ${requirements.timeoutSeconds}s`);
+  return parts.join(' · ');
+}
+function renderWorkspaceTools() {
+  chatUi.tools.replaceChildren();
+  if (!workspaceTools.length) { const empty = document.createElement('p'); empty.className = 'chat-api-keys-empty'; empty.textContent = 'No runnable tools in this project.'; chatUi.tools.append(empty); return; }
+  for (const tool of workspaceTools) {
+    const row = document.createElement('div'); row.className = 'chat-api-key-row'; const detail = document.createElement('span'); detail.textContent = `${tool.path} (${tool.runtime}) — ${toolRequirementSummary(tool)}`;
+    const action = document.createElement('button'); action.type = 'button'; action.textContent = tool.approval?.approved ? 'Revoke' : 'Approve version';
+    action.addEventListener('click', async () => {
+      try {
+        if (tool.approval?.approved) {
+          if (!confirm(`Revoke approval for ${tool.path}?`)) return;
+          const response = await chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/tools/approvals`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: tool.path }) }); if (!response.ok) throw new Error((await response.json()).error || 'Could not revoke tool approval');
+        } else {
+          const fingerprint = `${tool.toolSha256.slice(0, 12)}${tool.manifestSha256 ? ` / ${tool.manifestSha256.slice(0, 12)}` : ''}`;
+          if (!confirm(`Approve this exact tool version?\n\n${tool.path}\n${toolRequirementSummary(tool)}\nFingerprint: ${fingerprint}\n\nChanging the tool or manifest revokes this approval automatically.`)) return;
+          const response = await chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/tools/approvals`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: tool.path }) }); if (!response.ok) throw new Error((await response.json()).error || 'Could not approve tool');
+        }
+        await loadWorkspaceTools();
+      } catch (error) { showSettingsError(error.message); }
+    });
+    row.append(detail, action); chatUi.tools.append(row);
+  }
+}
+async function loadWorkspaceTools() {
+  if (!chatProjectId) return;
+  try {
+    const [toolsResponse, secretsResponse] = await Promise.all([chatApi(`/api/projects/${encodeURIComponent(chatProjectId)}/tools`), chatApi('/api/chat/tool-secrets')]);
+    if (!toolsResponse.ok) throw new Error((await toolsResponse.json()).error || 'Could not load workspace tools');
+    workspaceTools = (await toolsResponse.json()).tools || []; configuredToolSecrets = secretsResponse.ok ? ((await secretsResponse.json()).secrets || []) : []; renderWorkspaceTools();
+  } catch (error) { showSettingsError(error.message); }
 }
 function showSettingsError(message) { chatUi.settingsError.textContent = message; chatUi.settingsError.hidden = false; }
 async function saveApiKey(provider, key) {
@@ -931,9 +974,10 @@ async function loadChatThread(threadId) {
 }
 async function createChatThread({ force = false } = {}) {
   if (creatingChatThread) return creatingChatThread;
+  if (workspaceModeRequired()) throw new Error('Enable workspace-wide mode before starting a workspace chat.');
   if (!force && chatThreadId && !chatThreadHasUserChat) return chatThreads.find(thread => thread.id === chatThreadId) || null;
   creatingChatThread = (async () => {
-    const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, workspaceMode, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     if (!response.ok) throw new Error((await response.json()).error || 'Could not create chat thread');
     const thread = await response.json(); chatThreads.unshift(thread); chatThreadId = thread.id; chatThreadHasUserChat = false; renderThreadSelect(); renderChatMessages([]); updateNewThreadAvailability(); syncChatTurnControls(); return thread;
   })();
@@ -942,6 +986,9 @@ async function createChatThread({ force = false } = {}) {
 }
 async function loadChatThreads() {
   if (!chatProjectId) return;
+  if (workspaceModeRequired()) {
+    chatThreads = []; chatThreadId = null; chatThreadHasUserChat = false; renderThreadSelect(); renderChatMessages([]); updateNewThreadAvailability(); setChatStatus('Workspace browsing is read-only for the agent. Send a message to explicitly enable workspace-wide mode.'); return;
+  }
   try { const response = await chatApi(`/api/chat/threads?project=${encodeURIComponent(chatProjectId)}`); if (!response.ok) throw new Error('Could not list chat threads'); const loadedThreads = await response.json(); let emptyConversationSeen = false; chatThreads = loadedThreads.filter(thread => { if (thread.title !== 'New conversation') return true; if (emptyConversationSeen) return false; emptyConversationSeen = true; return true; }); const requestedNotification = pendingChatThread?.projectId === chatProjectId ? pendingChatThread : null; const requested = requestedNotification?.threadId; if (requested && chatThreads.some(thread => thread.id === requested)) chatThreadId = requested; else if (!chatThreadId || !chatThreads.some(thread => thread.id === chatThreadId)) chatThreadId = chatThreads[0]?.id || null; if (requested) pendingChatThread = null; if (!chatThreadId) await createChatThread({ force: true }); else { renderThreadSelect(); await loadChatThread(chatThreadId); if (requestedNotification && focusTurnNotification(requestedNotification)) { dismissTurnNotification(requestedNotification.id); closeTurnNotifications(); } } } catch (error) { renderChatMessages([{ role: 'assistant', content: error.message, error: true }]); }
 }
 async function refreshGitStatus() {
@@ -951,7 +998,7 @@ async function refreshGitStatus() {
 }
 async function chatProjectChanged(project) {
   if (!project?.name || project.name === chatProjectId) return;
-  chatProjectId = project.name; chatThreadId = null; chatThreadHasUserChat = false; updateNewThreadAvailability(); chatUi.project.textContent = project.title || project.name; setChatStatus('Loading project chat…');
+  chatProjectId = project.name; chatProjectTitle = project.title || project.name; workspaceMode = false; chatThreadId = null; chatThreadHasUserChat = false; updateNewThreadAvailability(); renderChatProjectLabel(); setChatStatus('Loading project chat…');
   renderDirtyProcessPrompt();
   chatUi.messages.replaceChildren(); const loading = document.createElement('p'); loading.className = 'chat-empty loading'; loading.textContent = 'Loading chat history…'; chatUi.messages.append(loading);
   chatUi.input.disabled = true; chatUi.send.disabled = true;
@@ -977,8 +1024,16 @@ async function steerChatTurn(turn, message) {
     turn.activities.push({ kind: 'steering', label: 'Steering comment accepted', at: Date.now(), done: true }); renderActiveTurn(turn); setChatStatus('Steering accepted');
   } finally { turn.steeringSubmitting = false; syncChatTurnControls(); }
 }
+async function enableWorkspaceMode(initiator) {
+  if (!workspaceModeRequired()) return true;
+  if (initiator !== 'user' || !confirm('Enable workspace-wide mode? The agent will be able to read and write every project in this workspace for this chat.')) { setChatStatus('Workspace-wide mode was not enabled.'); return false; }
+  workspaceMode = true; renderChatProjectLabel(); chatThreadId = null; chatThreadHasUserChat = false; chatThreads = [];
+  await loadChatThreads();
+  return true;
+}
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   if (currentChatTurn()) { setChatStatus('Cancel or steer the active response first.'); return false; }
+  if (!(await enableWorkspaceMode(initiator))) return false;
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread({ force: true });
   const selectedModel = chatModels.find(item => item.id === model);
@@ -1092,6 +1147,12 @@ chatUi.apiKeyAdd.addEventListener('click', () => {
   const row = apiKeyRow(null, available.id); chatUi.apiKeys.append(row); row.querySelector('input').focus();
   chatUi.apiKeyAdd.disabled = apiKeyProviderOptions.every(option => used.has(option.id) || option.id === available.id);
 });
+chatUi.toolSecretAdd.addEventListener('click', async () => {
+  const name = prompt('Logical tool secret name (for example jira-token):'); if (!name) return;
+  const value = prompt(`Value for ${name}:`); if (!value) return;
+  try { const response = await chatApi(`/api/chat/tool-secrets/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value }) }); if (!response.ok) throw new Error((await response.json()).error || 'Could not save tool secret'); await loadWorkspaceTools(); }
+  catch (error) { showSettingsError(error.message); }
+});
 document.addEventListener('click', event => { if (!event.target.closest('.turn-notifications')) closeTurnNotifications(); });
 chatUi.titleModel.addEventListener('change', () => { const model = titleModels.find(item => titleModelKey(item) === chatUi.titleModel.value); if (!model) return; chatSettings.titleProvider = model.provider; chatSettings.titleModel = model.id; loadTitleEfforts(chatSettings.titleEffort); persistChatSettings(); });
 chatUi.titleEffort.addEventListener('change', () => { chatSettings.titleEffort = chatUi.titleEffort.value; persistChatSettings(); });
@@ -1102,6 +1163,7 @@ chatUi.thread.addEventListener('change', () => loadChatThread(chatUi.thread.valu
 chatUi.composer.addEventListener('submit', event => {
   event.preventDefault(); const message = chatUi.input.value.trim(); if (!message) return; const turn = currentChatTurn();
   if (turn) { if (!turn.supportsSteering || !turn.steeringReady) { setChatStatus('Cancel the active response before sending another comment.'); return; } chatUi.input.value = ''; void steerChatTurn(turn, message).catch(error => { if (!chatUi.input.value) chatUi.input.value = message; setChatStatus(error.message); }); return; }
+  if (workspaceModeRequired()) { void (async () => { if (!(await enableWorkspaceMode('user'))) return; chatUi.input.value = ''; addChatMessage('user', message); await streamChatTurn(message); })(); return; }
   chatUi.input.value = ''; addChatMessage('user', message); void streamChatTurn(message);
 });
 chatUi.input.addEventListener('keydown', event => { if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return; event.preventDefault(); chatUi.composer.requestSubmit(); });

@@ -121,7 +121,7 @@ These are per-process resource limits, not aggregate quotas. This implementation
 
 ### Assess security coverage
 
-The Python runner provides useful isolation, but it does not yet satisfy the full hardening checklist below. This assessment covers `run_python` only; existing trusted workspace tools retain their previous policy. Do not treat this implementation as fully hardened for hostile code.
+The Python runner provides useful isolation, but it does not yet satisfy the full hardening checklist below. This assessment covers `run_python`; normal workspace tools now use separate hash-bound approvals and comparable per-process resource limits. Do not treat either execution path as fully hardened for hostile code.
 
 | Requirement | Current protection | Remaining gap or limitation |
 | :--- | :--- | :--- |
