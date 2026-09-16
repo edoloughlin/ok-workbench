@@ -95,6 +95,12 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /xlsx: \['spreadsheet', 'spreadsheet'\]/);
   assert.match(html, /Check side effects with LLM/);
   assert.match(html, /id="todo-use-llm" type="checkbox" checked/);
+  assert.match(html, /class="todo-llm-row"/);
+  assert.match(html, /id="todo-model-field"/);
+  assert.match(script, /markerPrefix: task\?\.\[1\] \|\| '\* '/);
+  assert.match(script, /todoUi\.markdown\.value = task \? original\.slice\(task\[0\]\.length\) : original/);
+  assert.match(script, /todoUi\.model\.disabled = disabled; todoUi\.prompt\.disabled = disabled;/);
+  assert.match(css, /\.todo-popover \.todo-llm-row \{ display: grid; grid-template-columns: minmax\(0, 1fr\) 120px;/);
   assert.match(script, /Briefly check this project for related side effects/);
   assert.match(html, /Changes detected, click to process/);
   assert.match(script, /initiator: 'system'/);

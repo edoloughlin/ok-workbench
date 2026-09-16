@@ -518,20 +518,22 @@ const chatUi = {
   diffLayout: document.querySelector('#diff-layout'), diffPalette: document.querySelector('#diff-palette'),
   diffRevert: document.querySelector('#diff-revert'), diffUnstage: document.querySelector('#diff-unstage'), diffUndo: document.querySelector('#diff-undo')
 };
-const todoUi = { popover: document.querySelector('#todo-popover'), form: document.querySelector('#todo-form'), close: document.querySelector('#todo-close'), cancel: document.querySelector('#todo-cancel'), states: document.querySelector('#todo-states'), markdown: document.querySelector('#todo-markdown'), useLlm: document.querySelector('#todo-use-llm'), llmFields: document.querySelector('#todo-llm-fields'), prompt: document.querySelector('#todo-prompt'), model: document.querySelector('#todo-model'), apply: document.querySelector('#todo-apply') };
+const todoUi = { popover: document.querySelector('#todo-popover'), form: document.querySelector('#todo-form'), close: document.querySelector('#todo-close'), cancel: document.querySelector('#todo-cancel'), states: document.querySelector('#todo-states'), markdown: document.querySelector('#todo-markdown'), useLlm: document.querySelector('#todo-use-llm'), prompt: document.querySelector('#todo-prompt'), model: document.querySelector('#todo-model'), apply: document.querySelector('#todo-apply') };
 let activeTodo = null;
 function smallModel(models) { return models.find(model => /(?:mini|small|haiku|flash)/i.test(model.label || model.id))?.id || models[0]?.id || ''; }
 function todoModels() {
   if (chatModels.length) return chatModels;
   return [...chatUi.model.options].filter(option => option.value).map(option => ({ id: option.value, label: option.textContent }));
 }
+function updateTodoLlmFields() { const disabled = !todoUi.useLlm.checked; todoUi.model.disabled = disabled; todoUi.prompt.disabled = disabled; }
 function closeTodo() { todoUi.popover.hidden = true; activeTodo = null; }
 function openTodo(button) {
   if (!displayedDocument?.text || !button.dataset.taskStartLine) return;
   const startLine = Number(button.dataset.taskStartLine), endLine = Number(button.dataset.taskEndLine); const lines = displayedDocument.text.replace(/\r/g, '').split('\n');
   const original = lines.slice(startLine - 1, endLine).join('\n'); if (!original) return;
-  activeTodo = { path: button.dataset.taskSourcePath, startLine, endLine, original, state: (original.match(/^\s*[-*+]\s+\[([ xX!~\-])\]/)?.[1] || ' ').toLowerCase() };
-  todoUi.markdown.value = original; todoUi.prompt.value = ''; todoUi.useLlm.checked = true; todoUi.llmFields.hidden = false;
+  const task = original.match(/^(\s*[-*+]\s+)\[([ xX!~\-])\]\s*/);
+  activeTodo = { path: button.dataset.taskSourcePath, startLine, endLine, original, markerPrefix: task?.[1] || '* ', state: (task?.[2] || ' ').toLowerCase() };
+  todoUi.markdown.value = task ? original.slice(task[0].length) : original; todoUi.prompt.value = ''; todoUi.useLlm.checked = true; updateTodoLlmFields();
   const models = todoModels(); setOptions(todoUi.model, models.length ? models : [{ id: '', label: 'No configured model' }], smallModel(models)); todoUi.model.disabled = false;
   for (const state of todoUi.states.querySelectorAll('[data-todo-state]')) { const current = state.dataset.todoState === activeTodo.state; state.hidden = current; state.setAttribute('aria-pressed', String(current)); }
   const rect = button.getBoundingClientRect(); todoUi.popover.style.left = `${Math.max(8, Math.min(rect.left, innerWidth - 368))}px`; todoUi.popover.style.top = `${Math.min(rect.bottom + 8, innerHeight - 80)}px`; todoUi.popover.hidden = false;
@@ -539,7 +541,7 @@ function openTodo(button) {
 }
 function todoMarkdown(state) {
   const source = todoUi.markdown.value.replace(/\r/g, '').trimEnd(); const marker = state === ' ' ? '[ ]' : `[${state}]`;
-  return /^\s*[-*+]\s+\[[ xX!~\-]\]\s*/.test(source) ? source.replace(/^(\s*[-*+]\s+)\[[ xX!~\-]\]\s*/, `$1${marker} `) : `* ${marker} ${source}`;
+  return `${activeTodo?.markerPrefix || '* '}${marker} ${source}`;
 }
 async function applyTodo() {
   if (!activeTodo) return; const replacement = todoMarkdown(activeTodo.state); todoUi.apply.disabled = true;
@@ -556,7 +558,7 @@ async function applyTodo() {
 }
 documentPane.addEventListener('click', event => { const marker = event.target.closest('.task-marker'); if (!marker) return; event.preventDefault(); openTodo(marker); });
 todoUi.states.addEventListener('click', event => { const button = event.target.closest('[data-todo-state]'); if (!button || !activeTodo) return; activeTodo.state = button.dataset.todoState; for (const state of todoUi.states.querySelectorAll('[data-todo-state]')) { const current = state === button; state.hidden = current; state.setAttribute('aria-pressed', String(current)); } });
-todoUi.useLlm.addEventListener('change', () => { todoUi.llmFields.hidden = !todoUi.useLlm.checked; });
+todoUi.useLlm.addEventListener('change', updateTodoLlmFields);
 todoUi.close.addEventListener('click', closeTodo); todoUi.cancel.addEventListener('click', closeTodo);
 todoUi.form.addEventListener('submit', event => { event.preventDefault(); void applyTodo(); });
 document.addEventListener('pointerdown', event => { if (!todoUi.popover.hidden && !todoUi.popover.contains(event.target) && !event.target.closest('.task-marker')) closeTodo(); });

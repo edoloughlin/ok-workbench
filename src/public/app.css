@@ -513,10 +513,13 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .todo-popover label { display: grid; gap: 4px; color: var(--muted); font: 600 10px var(--font-ui); letter-spacing: 0.05em; text-transform: uppercase; }
 .todo-popover textarea, .todo-popover select { width: 100%; padding: 6px 8px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 12px/1.4 var(--font-ui); letter-spacing: normal; text-transform: none; resize: vertical; }
 .todo-popover textarea:focus, .todo-popover select:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
+.todo-popover textarea:disabled, .todo-popover select:disabled { color: var(--muted); background: var(--panel); cursor: not-allowed; opacity: .7; }
 .todo-popover .todo-llm { display: flex; align-items: center; gap: 6px; color: var(--ink); font: 12px var(--font-ui); letter-spacing: normal; text-transform: none; cursor: pointer; }
 .todo-popover .todo-llm input { margin: 0; accent-color: var(--accent); }
-.todo-popover .todo-llm-fields { display: grid; grid-template-columns: 1fr 120px; gap: 8px; }
+.todo-popover .todo-llm-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px; align-items: end; gap: 8px; }
+.todo-popover .todo-llm-row > label:last-child { min-width: 0; }
+.todo-popover .todo-llm-fields { display: grid; }
 .todo-popover footer { display: flex; justify-content: flex-end; gap: 6px; }
 .todo-popover footer button { padding: 5px 11px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 500 12px var(--font-ui); cursor: pointer; }
 .todo-popover footer #todo-apply { border-color: var(--accent); color: white; background: var(--accent); font-weight: 600; }
-@media (max-width: 420px) { .todo-popover .todo-llm-fields { grid-template-columns: 1fr; } }
+@media (max-width: 420px) { .todo-popover .todo-llm-row { grid-template-columns: 1fr; } }
