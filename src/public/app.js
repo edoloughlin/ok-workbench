@@ -169,7 +169,35 @@ function highlightCode(source, language = 'plaintext') {
 function table(lines, sourcePath, sectionHeadings) {
   const rows = lines.filter(line => !/^\s*\|?\s*:?-{3,}/.test(line)).map(line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
   if (!rows.length) return '';
-  return `<table><thead><tr>${rows[0].map(cell => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none">${inline(cell, sourcePath, sectionHeadings)}</th>`).join('')}</tr></thead><tbody>${rows.slice(1).map(row => `<tr>${row.map(cell => `<td>${inline(cell, sourcePath, sectionHeadings)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return dataTable(rows, (cell) => inline(cell, sourcePath, sectionHeadings), 'markdown-table');
+}
+
+function parseCsv(source) {
+  const rows = []; let row = []; let cell = ''; let quoted = false;
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"' && source[index + 1] === '"') { cell += '"'; index++; }
+      else if (character === '"') quoted = false;
+      else cell += character;
+    } else if (character === '"' && cell === '') quoted = true;
+    else if (character === ',') { row.push(cell.trim()); cell = ''; }
+    else if (character === '\n') { row.push(cell.trim()); rows.push(row); row = []; cell = ''; }
+    else if (character !== '\r') cell += character;
+  }
+  if (cell || row.length) { row.push(cell.trim()); rows.push(row); }
+  return rows.filter(values => values.some(value => value !== ''));
+}
+
+function dataTable(rows, renderCell, className) {
+  const width = Math.max(...rows.map(row => row.length));
+  const normalized = rows.map(row => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
+  return `<table class="data-table ${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}">${renderCell(cell, rowIndex + 1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+}
+
+function csvTable(source) {
+  const rows = parseCsv(source);
+  return rows.length ? dataTable(rows, cell => escapeHtml(cell), 'csv-table') : '<p class="empty-table">This CSV file is empty.</p>';
 }
 
 const TASK_STATES = {
@@ -354,6 +382,7 @@ function formatBytes(bytes) {
 
 function renderFile(file, kicker) {
   const header = `<p class="doc-kicker">${escapeHtml(kicker)}</p><div class="file-header"><h1>${escapeHtml(file.name)}</h1><span>${escapeHtml(file.fileType)} · ${formatBytes(file.size)}</span></div>`;
+  if (file.kind === 'code' && file.language === 'csv') return `${header}${csvTable(file.text)}`;
   if (file.kind === 'code') return `${header}<pre class="source-view" data-language="${escapeHtml(file.language)}"><code>${highlightCode(file.text, file.language)}</code></pre>`;
   if (file.kind === 'media' && file.mediaType === 'image') return `${header}<figure class="media-view"><a href="${file.url}" target="_blank" rel="noopener noreferrer"><img src="${file.url}" alt="${escapeHtml(file.name)}"></a></figure>`;
   if (file.kind === 'media' && file.mediaType === 'pdf') return `${header}<iframe class="document-view" src="${file.url}" title="${escapeHtml(file.name)}"></iframe>`;

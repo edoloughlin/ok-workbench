@@ -8,9 +8,16 @@ import test from 'node:test';
 const root = path.resolve(import.meta.dirname, '..');
 test('document table headers stay visible while their table is in view', async () => {
   const css = await readFile(path.join(root, 'src', 'public', 'app.css'), 'utf8');
+  const script = await readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8');
   assert.match(css, /\.document \{[^}]*padding: 0 clamp\(40px, 7vw, 72px\) 100px;/);
   assert.match(css, /\.document::before \{[^}]*height: 52px;/);
   assert.match(css, /\.document th \{ position: sticky;[^}]*top: var\(--topbar-h\);[^}]*background: var\(--panel\);/);
+  assert.match(css, /\.document \.data-table \{/);
+  assert.match(css, /\.document \.data-table :is\(th, td\):nth-child\(8n \+ 1\)/);
+  assert.match(css, /@media \(prefers-color-scheme: dark\)[\s\S]*?\.document \.data-table \{ --table-col-1:/);
+  assert.match(script, /function parseCsv\(source\)/);
+  assert.match(script, /function csvTable\(source\)/);
+  assert.match(script, /file\.kind === 'code' && file\.language === 'csv'/);
   assert.match(css, /@media \(min-width: 901px\) \{[\s\S]*?\.document th \{ top: 0; \}/);
 });
 test('Mermaid fences render with the locally bundled browser distribution', async () => {
