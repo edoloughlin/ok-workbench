@@ -192,7 +192,7 @@ function parseCsv(source) {
 function dataTable(rows, renderCell, className) {
   const width = Math.max(...rows.map(row => row.length));
   const normalized = rows.map(row => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
-  return `<table class="data-table ${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}">${renderCell(cell, rowIndex + 1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return `<table class="${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}">${renderCell(cell, rowIndex + 1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
 function csvTable(source) {

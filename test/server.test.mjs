@@ -12,11 +12,13 @@ test('document table headers stay visible while their table is in view', async (
   assert.match(css, /\.document \{[^}]*padding: 0 clamp\(40px, 7vw, 72px\) 100px;/);
   assert.match(css, /\.document::before \{[^}]*height: 52px;/);
   assert.match(css, /\.document th \{ position: sticky;[^}]*top: var\(--topbar-h\);[^}]*background: var\(--panel\);/);
-  assert.match(css, /\.document \.data-table \{/);
-  assert.match(css, /\.document \.data-table :is\(th, td\):nth-child\(8n \+ 1\)/);
-  assert.match(css, /@media \(prefers-color-scheme: dark\)[\s\S]*?\.document \.data-table \{ --table-col-1:/);
+  assert.match(css, /\.document \.csv-table \{/);
+  assert.match(css, /\.document \.csv-table :is\(th, td\):nth-child\(8n \+ 1\)/);
+  assert.doesNotMatch(css, /\.document \.data-table/);
+  assert.match(css, /@media \(prefers-color-scheme: dark\)[\s\S]*?\.document \.csv-table \{ --table-col-1:/);
   assert.match(script, /function parseCsv\(source\)/);
   assert.match(script, /function csvTable\(source\)/);
+  assert.match(script, /<table class="\$\{className\}">/);
   assert.match(script, /file\.kind === 'code' && file\.language === 'csv'/);
   assert.match(css, /@media \(min-width: 901px\) \{[\s\S]*?\.document th \{ top: 0; \}/);
 });
