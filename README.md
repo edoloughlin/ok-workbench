@@ -8,6 +8,8 @@ Everything lives in a portable `workspace/` bundle of plain Markdown, structured
 
 This is an early local-first release for Linux and macOS. It is designed for local project knowledge and reviewable LLM-assisted edits, not hosted multi-user collaboration, a cloud credential manager, an autonomous background agent, or a replacement for Git review. The bundled starter workflow is original minimal material, not a redistribution of any private workflow.
 
+For Windows, see the [suggested WSL2 installation guide](docs/WINDOWS.md). The author has not tested this setup; native Windows is not supported.
+
 ## Requirements
 
 - Node.js 22.19.0 or newer.
