@@ -125,6 +125,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(server, /turn-event/);
   assert.match(server, /turnId, outcome, durationMs/);
   assert.match(server, /turnId, createdAt/);
+  assert.match(server, /withCurrentDateTime\(systemPrompt \|\| projectAssistantSystemPrompt/);
   assert.match(harness, /spawnToReadyMs/);
   assert.match(harness, /pi-session-event/);
   assert.match(harness, /onStatus/);

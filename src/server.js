@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { workspaceAgentInstructions } = require('./agent-instructions.js');
 const toolApprovals = require('./tool-approvals.js');
+const { withCurrentDateTime } = require('./time-context.js');
 
 function configuredPort(name, fallback) {
   const value = Number(process.env[name] || fallback);
@@ -825,12 +826,12 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   if (provider === 'anthropic') {
     endpoint = 'https://api.anthropic.com/v1/messages';
     headers = { 'content-type': 'application/json', 'x-api-key': (await effectiveProviderEnvironment()).ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode), messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, system: withCurrentDateTime(systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode)), messages: messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content })) };
   } else {
     endpoint = provider === 'openai' ? 'https://api.openai.com/v1/chat/completions' : `${process.env.LLM_COMPATIBLE_BASE_URL.replace(/\/$/, '')}/chat/completions`;
     const environment = await effectiveProviderEnvironment(); const apiKey = provider === 'openai' ? environment.OPENAI_API_KEY : environment.LLM_COMPATIBLE_API_KEY;
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
-    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
+    body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: withCurrentDateTime(systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode)) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) {
