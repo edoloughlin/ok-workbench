@@ -1203,7 +1203,7 @@ async function handleRequest(req, res) {
           if (tool.result?.path) diagnostic.path = tool.result.path;
           if (tool.error) logError(`[ok-workbench] tool ${JSON.stringify(diagnostic)}`);
           const type = tool.phase === 'started' ? 'tool.started' : tool.phase === 'failed' ? 'tool.failed' : 'tool.completed';
-          writeEvent(type, { tool: tool.name, result: tool.result, error: tool.error });
+          writeEvent(type, { tool: tool.name, targets: tool.targets, result: tool.result, error: tool.error });
           if (tool.changed) writeEvent('workspace.changed', { project: thread.project, paths: tool.result?.paths || (tool.result?.path ? [tool.result.path] : []) });
         } });
         const title = titlePromise ? await titlePromise : '';

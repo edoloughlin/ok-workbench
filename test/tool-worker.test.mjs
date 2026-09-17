@@ -83,6 +83,7 @@ test('worker moves files and applies selective edits against a fresh content has
   const read = await worker.readFile('draft.md'); assert.match(read.hash, /^[a-f0-9]{12}$/);
   const edited = await worker.editFile({ path: 'draft.md', hash: read.hash, edits: [{ startLine: 2, endLine: 2, replacement: 'second' }, { startLine: 3, endLine: 3, replacement: 'third\nfinal' }] });
   assert.equal(await readFile(path.join(workspace, 'draft.md'), 'utf8'), 'one\nsecond\nthird\nfinal\n'); assert.match(edited.hash, /^[a-f0-9]{12}$/);
+  const current = await worker.readFile('draft.md'); await assert.rejects(worker.editFile({ path: 'draft.md', hash: current.hash, edits: [{ start_line: 1, end_line: 1, replacement: 'first' }] }), /Invalid edit 1: startLine must be a positive integer; endLine must be an integer from startLine through 4\. Use \{ startLine, endLine, replacement \}/);
   await assert.rejects(worker.editFile({ path: 'draft.md', hash: read.hash, edits: [{ startLine: 1, endLine: 1, replacement: 'stale' }] }), /content changed/);
   assert.deepEqual(await worker.moveFile({ from: 'draft.md', to: 'notes/final.md' }), { from: 'draft.md', to: 'notes/final.md' });
   assert.equal(await readFile(path.join(workspace, 'notes', 'final.md'), 'utf8'), 'one\nsecond\nthird\nfinal\n');

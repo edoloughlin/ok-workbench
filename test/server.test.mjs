@@ -81,6 +81,10 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /'~': \{ name: 'In progress'/);
   assert.match(script, /data-task-start-line/);
   assert.match(script, /function renderUserMarkdown\(element, content\)/);
+  assert.match(script, /className = 'chat-tool-lozenge'/);
+  assert.match(script, /tool\.textContent = activity\.tool/);
+  assert.match(script, /targets: Array\.isArray\(event\.targets\) \? event\.targets : \[\]/);
+  assert.match(css, /\.chat-tool-lozenge \{ display: inline-flex;/);
   assert.match(script, /renderChatMarkdown\(element, content, '\/workspace\/index\.md'\)/);
   assert.match(script, /encodeURIComponent\(decodeURIComponent\(part\)\)/);
   assert.match(script, /Project pages/);
@@ -111,6 +115,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /Discover and run relevant available project checks/);
   assert.match(script, /If you cannot resolve a reported error/);
   assert.match(server, /event\.userCode \|\| event\.user_code/);
+  assert.match(server, /targets: tool\.targets/);
   assert.match(server, /openai-codex\|github-copilot/);
   assert.match(server, /workspace-relative Markdown paths/);
   assert.match(server, /chat: discovered/);

@@ -372,8 +372,13 @@ async function editFile({ path: relative, hash, edits }) {
   if (!info.isFile() || info.isSymbolicLink()) throw new Error('Path is not a regular file'); if (info.size > MAX_READ) throw new Error('File is too large to edit');
   const original = await fs.readFile(target, 'utf8'); if (original.includes('\0')) throw new Error('Binary files are not available');
   if (contentHash(original) !== hash) throw new Error('File content changed since it was read; re-read the file and use its current hash');
-  const { lines, newline, finalNewline } = linesForEdit(original); const prepared = edits.map(edit => {
-    if (!edit || !Number.isInteger(edit.startLine) || !Number.isInteger(edit.endLine) || edit.startLine < 1 || edit.endLine < edit.startLine || edit.endLine > lines.length || typeof edit.replacement !== 'string' || edit.replacement.length > 1024 * 1024) throw new Error('Each edit needs valid startLine, endLine, and replacement text');
+  const { lines, newline, finalNewline } = linesForEdit(original); const prepared = edits.map((edit, index) => {
+    const issues = [];
+    if (!Number.isInteger(edit?.startLine) || edit.startLine < 1) issues.push('startLine must be a positive integer');
+    if (!Number.isInteger(edit?.endLine) || edit.endLine < edit?.startLine || edit.endLine > lines.length) issues.push(`endLine must be an integer from startLine through ${lines.length}`);
+    if (typeof edit?.replacement !== 'string') issues.push('replacement must be a string (use an empty string to delete lines)');
+    else if (edit.replacement.length > 1024 * 1024) issues.push('replacement is too large');
+    if (issues.length) throw new Error(`Invalid edit ${index + 1}: ${issues.join('; ')}. Use { startLine, endLine, replacement } with these exact field names.`);
     return { startLine: edit.startLine, endLine: edit.endLine, replacement: replacementLines(edit.replacement) };
   }).sort((left, right) => left.startLine - right.startLine);
   for (let index = 1; index < prepared.length; index++) if (prepared[index - 1].endLine >= prepared[index].startLine) throw new Error('Line-range edits must not overlap');

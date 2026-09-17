@@ -403,7 +403,10 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-markdown .mermaid-diagram-error { display: block; white-space: pre; border-color: color-mix(in srgb, var(--danger) 45%, var(--rule)); }
 .chat-markdown blockquote { padding-left: 9px; border-left: 2px solid var(--accent); color: var(--muted); }
 .chat-markdown a { color: var(--link); }
-.chat-tool-activity { margin: 0; padding: 4px 8px; color: var(--muted); border-left: 2px solid var(--accent); font: 11px var(--font-mono); }
+.chat-tool-activity { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 0; padding: 4px 0; color: var(--muted); font: 11px var(--font-mono); }
+.chat-tool-lozenge { display: inline-flex; align-items: center; padding: 2px 6px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--rule)); border-radius: 999px; color: var(--accent); background: var(--accent-soft); font: 600 10px var(--font-mono); white-space: nowrap; }
+.chat-tool-target { min-width: 0; padding: 1px 3px; border-radius: 3px; color: var(--ink); background: color-mix(in srgb, var(--rule-strong) 40%, transparent); overflow-wrap: anywhere; }
+.chat-tool-outcome { color: var(--muted); font: 10px var(--font-ui); }
 .chat-turn-thinking { margin: 7px 0 0; padding: 7px 9px; color: var(--muted); border-left: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 5%, transparent); font: 12px/1.45 var(--font-ui); font-style: italic; white-space: pre-wrap; }
 .chat-turn-status { display: flex; align-items: center; gap: 8px; margin: 7px 0 0; color: var(--muted); font: 11px var(--font-ui); }
 .chat-turn-status-text { min-width: 0; flex: 1 1 auto; }
