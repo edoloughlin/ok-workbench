@@ -62,9 +62,11 @@ Chat state and provider credentials live outside the bundle under the XDG state 
 
 The `okf-workbench` CLI name, `OKF_*` variables, its config directory, `AGENTS_BROWSER_STATE_DIR`, old CSRF headers, `/agents/`, and `AGENTS_BUNDLE_ROOT` are one-release compatibility paths. Use `ok-workbench migrate-state --yes` only after reviewing the paths: it copies legacy state only if the destination does not exist and never deletes old data. Browser `localStorage` preferences may need to be set again when the route, origin, or port changes.
 
+Projects can selectively approve a symlink to an external file or directory. Approval grants browser and model read access only through that project-relative alias. Each chat turn receives a fresh private snapshot; writes, tool execution, Python inputs, workspace-mode chats, and nested symlinks remain unavailable. Revoke approval from the project's external-links section to stop future reads.
+
 ## Security model
 
-The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes. File-changing model tools fail closed without Bubblewrap; when available, the worker receives a cleared environment, no network, a temporary root, the served workspace, and a read-only packaged OKF template. The agent can create a discoverable top-level project only through the template-backed `create_project` tool; the workspace is initialized as a Git worktree before that operation. Git review actions use project-scoped pathspecs. See the full [threat model](THREAT-MODEL.md) and [security policy](SECURITY.md).
+The server binds loopback. Workspace paths, worker operations, and served assets reject traversal and symlink escapes except for an explicitly approved, read-only external-link alias. File-changing model tools fail closed without Bubblewrap; when available, the worker receives a cleared environment, no network, a temporary root, the served workspace, private external snapshots, and a read-only packaged OKF template. The agent can create a discoverable top-level project only through the template-backed `create_project` tool; the workspace is initialized as a Git worktree before that operation. Git review actions use project-scoped pathspecs. See the full [threat model](THREAT-MODEL.md) and [security policy](SECURITY.md).
 
 ## Development and release
 

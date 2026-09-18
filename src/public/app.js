@@ -408,7 +408,8 @@ async function loadPage() {
   const navigation = data.catalog.length
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
     : `<div class="nav-section-heading"><p class="nav-label">Project pages</p>${data.project.name === 'workspace' ? '' : entryCreationActions(data.project.path)}</div><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
-  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
+  const external = data.project.name === 'workspace' ? '' : `<hr class="nav-rule"><p class="nav-label">External links</p><div class="external-links">${(data.externalLinks || []).map(item => item.status === 'approved' ? `<a class="nav-link tree-link tree-page" href="${data.project.path}/${item.path}"><span>External · read only</span><span>${escapeHtml(item.path)}</span></a>` : `<button class="external-link-request" type="button" data-external-link="${escapeHtml(item.path)}" data-external-status="${escapeHtml(item.status)}">External link · ${escapeHtml(item.status)}: ${escapeHtml(item.path)}</button>`).join('')}<button class="external-link-request" type="button" data-manage-external-link>Manage external links</button></div>`;
+  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}${external}`;
   if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
   const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
   const kicker = `${contextLabel} / ${documentData.name}`;
@@ -466,11 +467,24 @@ async function commitEntryRename(form) {
   } catch (error) { form.dataset.saving = 'false'; input.disabled = false; alert(error.message || 'Could not rename item'); input.focus(); input.select(); }
 }
 nav.addEventListener('click', event => {
+  const external = event.target.closest('[data-external-link]');
+  if (external) { event.preventDefault(); void approveExternalLink(external.dataset.externalLink).catch(showError); return; }
+  if (event.target.closest('[data-manage-external-link]')) { event.preventDefault(); const linkPath = prompt('Project-relative symlink path to inspect:'); if (linkPath) void approveExternalLink(linkPath).catch(showError); return; }
   const button = event.target.closest('[data-create-entry]');
   if (button) { event.preventDefault(); event.stopPropagation(); void createProjectEntry(button); return; }
   const entry = event.target.closest('[data-entry-type].active');
   if (entry) { event.preventDefault(); event.stopPropagation(); void beginEntryRename(entry); }
 });
+
+async function approveExternalLink(linkPath) {
+  if (!displayedDocument?.project || displayedDocument.project === 'workspace') throw new Error('Select a project before approving an external link.');
+  const inspect = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/external-links/inspect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: linkPath }) });
+  const details = await inspect.json(); if (!inspect.ok) throw new Error(details.error?.message || details.error || 'Could not inspect the external link.');
+  if (!confirm(`Allow read-only browser and model access to ${linkPath}?\n\nResolved destination: ${details.canonicalTarget}\n\nChat turns receive a fresh private snapshot.`)) return;
+  const approval = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/external-links`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inspectionToken: details.inspectionToken }) });
+  if (!approval.ok) { const failure = await approval.json(); throw new Error(failure.error?.message || failure.error || 'Could not approve the external link.'); }
+  await loadPage();
+}
 nav.addEventListener('submit', event => { const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); void commitEntryRename(form); });
 nav.addEventListener('keydown', event => { if (event.key !== 'Escape') return; const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });
 nav.addEventListener('focusout', event => { const form = event.target.closest('.tree-inline-rename'); if (!form || form.dataset.saving === 'true' || event.relatedTarget && form.contains(event.relatedTarget)) return; form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });

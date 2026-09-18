@@ -115,6 +115,9 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .project-icon { width: 18px; height: 18px; color: var(--accent); }
 .project-link.active .project-icon { color: currentColor; }
 .project-tree { padding-bottom: 16px; }
+.external-links { display: grid; gap: 3px; padding-bottom: 16px; }
+.external-link-request { width: 100%; border: 0; border-radius: 6px; padding: 6px 10px; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.external-link-request:hover { background: var(--nav-hover); }
 .tree-directory { position: relative; }
 .tree-directory summary { position: relative; min-height: 38px; padding: 8px 58px 8px 34px; color: var(--muted); cursor: pointer; border-radius: 6px; list-style: none; }
 .tree-directory summary::-webkit-details-marker { display: none; }

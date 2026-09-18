@@ -66,6 +66,8 @@ Chat state and provider credentials live outside the bundle under the XDG state 
 
 The project assistant can search the public web when it needs current or externally verifiable information. Searches are sent to DuckDuckGo and return bounded titles, snippets, and source URLs; the assistant is instructed to treat that content as untrusted and cite the URLs it uses. Search does not expose workspace files or provider credentials.
 
+Projects can selectively approve a symlink to an external file or directory. Approval grants browser and model read access only through that project-relative alias. Each chat turn receives a fresh private snapshot; writes, tool execution, Python inputs, workspace-mode chats, and nested symlinks remain unavailable. Revoke approval from the project's external-links section to stop future reads.
+
 ## Workspace tools
 
 For general Python calculations, file processing, and image conversion, you can enable the isolated `run_python` tool on Linux. It uses your local Python interpreter and can install allowlisted dependencies into temporary directories. See [Python setup, usage, and security limits](docs/PYTHON.md).

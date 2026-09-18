@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, chmod, mkdtemp, open, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,7 @@ import agentInstructions from './agent-instructions.js';
 import timeContext from './time-context.js';
 import { runPython } from './python-runner.mjs';
 import toolApprovals from './tool-approvals.js';
+import externalLinks from './external-links.js';
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -46,7 +47,7 @@ export function sandboxBackend(platform = process.platform) {
   return null;
 }
 
-export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, grants, readGrants = {}, workspaceMode = false, platform, toolEnvironment = {}, executionPolicy = null }) {
+export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, grants, readGrants = {}, externalReadGrants = {}, workspaceMode = false, platform, toolEnvironment = {}, executionPolicy = null }) {
   const sandboxRoot = platform === 'linux' ? '/workspace' : workspace;
   const sandboxTemplate = platform === 'linux' ? '/ok-workbench-template' : template;
   const sandboxGrants = platform === 'linux' ? '/grants' : grants;
@@ -57,6 +58,7 @@ export function sandboxChildEnvironment({ workspace, template, temporaryDirector
     OK_WORKBENCH_PROJECT_TEMPLATE: sandboxTemplate,
     OK_WORKBENCH_WORKSPACE_MODE: workspaceMode ? '1' : '0',
     OK_WORKBENCH_READ_GRANTS: JSON.stringify(Object.fromEntries(Object.keys(readGrants).map(id => [id, path.join(sandboxGrants, id)]))),
+    OK_WORKBENCH_EXTERNAL_READ_GRANTS: JSON.stringify(Object.fromEntries(Object.entries(externalReadGrants).map(([alias, grant]) => [alias, { ...grant, snapshotPath: path.join(sandboxGrants, 'external', grant.id) }]))),
     ...(executionPolicy ? { OK_WORKBENCH_TOOL_EXECUTION_POLICY: JSON.stringify(executionPolicy) } : {}),
   };
   // Avoid CoreFoundation falling back to ~/.CFUserTextEncoding. The worker has
@@ -109,7 +111,7 @@ export async function stageReadGrants(readGrants = []) {
   } catch (error) { await rm(directory, { recursive: true, force: true }); throw error; }
 }
 
-async function workerConfiguration(projectRoot, platform, readGrants) {
+async function workerConfiguration(projectRoot, platform, readGrants, externalReadGrants) {
   const [workspace, template, nodeBinary] = await Promise.all([realpath(projectRoot), realpath(PROJECT_TEMPLATE), realpath(process.execPath)]);
   const [workspaceInfo, templateInfo] = await Promise.all([stat(workspace), stat(template)]);
   if (!workspaceInfo.isDirectory()) throw new Error('Workspace root is not a directory');
@@ -120,11 +122,25 @@ async function workerConfiguration(projectRoot, platform, readGrants) {
   const workerScript = (await readFile(WORKER, 'utf8')).replace(/^#![^\r\n]*(?:\r?\n|$)/, '');
   const workerSource = `${workerScript}\nstartWorker();`;
   const [{ directory: grants, staged: readGrantsById }, temporaryDirectory] = await Promise.all([stageReadGrants(readGrants), platform === 'darwin' ? mkdtemp(path.join(tmpdir(), 'ok-workbench-worker-')) : null]);
+  let externalReadGrantsByAlias = {};
+  try {
+    if (externalReadGrants.length) {
+      const external = await externalLinks.stageExternalGrants(externalReadGrants);
+      try {
+        await mkdir(path.join(grants, 'external'), { mode: 0o700 });
+        for (const [alias, grant] of Object.entries(external.staged)) {
+          const destination = path.join(grants, 'external', grant.id);
+          await rename(grant.snapshotPath, destination);
+          externalReadGrantsByAlias[alias] = { ...grant, snapshotPath: destination };
+        }
+      } finally { await rm(external.directory, { recursive: true, force: true }); }
+    }
+  } catch (error) { await rm(grants, { recursive: true, force: true }); await rm(temporaryDirectory, { recursive: true, force: true }); throw error; }
   if (temporaryDirectory) {
     await chmod(temporaryDirectory, 0o700);
-    return { workspace, template, nodeBinary, workerSource, grants: await realpath(grants), readGrants: readGrantsById, temporaryDirectory: await realpath(temporaryDirectory) };
+    return { workspace, template, nodeBinary, workerSource, grants: await realpath(grants), readGrants: readGrantsById, externalReadGrants: externalReadGrantsByAlias, temporaryDirectory: await realpath(temporaryDirectory) };
   }
-  return { workspace, template, nodeBinary, workerSource, grants: await realpath(grants), readGrants: readGrantsById, temporaryDirectory: null };
+  return { workspace, template, nodeBinary, workerSource, grants: await realpath(grants), readGrants: readGrantsById, externalReadGrants: externalReadGrantsByAlias, temporaryDirectory: null };
 }
 
 async function cleanupTemporaryDirectories(...directories) {
@@ -187,18 +203,18 @@ export class TurnWorker {
   close() { this.closedByCaller = true; this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
 
-export async function createTurnWorker(projectRoot, { platform = process.platform, toolEnvironment = {}, executionPolicy = null, readGrants = [], workspaceMode = false } = {}) {
+export async function createTurnWorker(projectRoot, { platform = process.platform, toolEnvironment = {}, executionPolicy = null, readGrants = [], externalReadGrants = [], workspaceMode = false } = {}) {
   const spawnStartedAt = TURN_DIAGNOSTICS ? Date.now() : 0;
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
   let configuration;
-  try { configuration = await workerConfiguration(projectRoot, platform, readGrants); }
+  try { configuration = await workerConfiguration(projectRoot, platform, readGrants, externalReadGrants); }
   catch (error) { throw new Error(`Sandbox worker setup failed: ${error.message}`); }
   let args;
   if (backend === 'bubblewrap') {
     // The worker source is evaluated so the sandbox never mounts the package
     // installation or seed bundle. Its only user-data mount is /workspace.
-    args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--setenv', 'OK_WORKBENCH_WORKSPACE_MODE', workspaceMode ? '1' : '0', '--setenv', 'OK_WORKBENCH_READ_GRANTS', JSON.stringify(Object.fromEntries(Object.keys(configuration.readGrants).map(id => [id, `/grants/${id}`]))), ...(executionPolicy ? ['--setenv', 'OK_WORKBENCH_TOOL_EXECUTION_POLICY', JSON.stringify(executionPolicy)] : []), '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--dir', '/grants', '--ro-bind', configuration.grants, '/grants', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
+    args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--setenv', 'OK_WORKBENCH_WORKSPACE_MODE', workspaceMode ? '1' : '0', '--setenv', 'OK_WORKBENCH_READ_GRANTS', JSON.stringify(Object.fromEntries(Object.keys(configuration.readGrants).map(id => [id, `/grants/${id}`]))), '--setenv', 'OK_WORKBENCH_EXTERNAL_READ_GRANTS', JSON.stringify(Object.fromEntries(Object.entries(configuration.externalReadGrants).map(([alias, grant]) => [alias, { ...grant, snapshotPath: `/grants/external/${grant.id}` }]))), ...(executionPolicy ? ['--setenv', 'OK_WORKBENCH_TOOL_EXECUTION_POLICY', JSON.stringify(executionPolicy)] : []), '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--dir', '/grants', '--ro-bind', configuration.grants, '/grants', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
     for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
     if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
     for (const [name, value] of Object.entries(toolEnvironment)) args.push('--setenv', name, value);
@@ -329,7 +345,7 @@ export async function searchWeb(query, { maxResults = 5, fetchImpl = fetch, sign
   return { query: query.trim(), results };
 }
 
-export async function createTurnCapabilities({ workspaceRoot, projectRoot, readGrants = [], workspaceMode = false }) {
+export async function createTurnCapabilities({ workspaceRoot, projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false }) {
   const [workspace, project] = await Promise.all([realpath(workspaceRoot), realpath(projectRoot)]);
   const relative = path.relative(workspace, project);
   if (relative && (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) throw new Error('Project root is outside the workspace');
@@ -344,9 +360,19 @@ export async function createTurnCapabilities({ workspaceRoot, projectRoot, readG
     if (!metadata.isFile()) throw new Error('Read grant is not a file');
     grants.push({ id: grant.id, canonicalPath }); seen.add(grant.id);
   }
+  const external = [];
+  const aliases = new Set(); const externalIds = new Set();
+  for (const grant of externalReadGrants) {
+    if (!grant || typeof grant.id !== 'string' || !/^external-[A-Za-z0-9_-]{8,}$/.test(grant.id) || typeof grant.linkPath !== 'string' || typeof grant.canonicalTarget !== 'string' || !['file', 'directory'].includes(grant.kind) || aliases.has(grant.linkPath) || externalIds.has(grant.id)) throw new Error('Invalid external read grant');
+    const alias = grant.linkPath.replace(/^\.\//, '');
+    if (!alias || alias.includes('\\') || alias.startsWith('../') || path.isAbsolute(alias) || alias.split('/').some(part => !part || part === '..' || part.startsWith('.'))) throw new Error('Invalid external read grant');
+    const target = await realpath(grant.canonicalTarget); const metadata = await stat(target);
+    if ((grant.kind === 'file' && !metadata.isFile()) || (grant.kind === 'directory' && !metadata.isDirectory())) throw new Error('Invalid external read grant');
+    external.push({ id: grant.id, linkPath: alias, canonicalTarget: target, kind: grant.kind, capturedAt: new Date().toISOString() }); aliases.add(alias); externalIds.add(grant.id);
+  }
   if (workspaceMode && project !== workspace) throw new Error('Workspace mode requires the workspace root');
   if (project === workspace && !workspaceMode) throw new Error('Workspace-wide access requires explicit workspace mode');
-  return { workspace, selectedProject: { root: project, read: true, write: true }, workspaceMode, extraReadGrants: grants };
+  return { workspace, selectedProject: { root: project, read: true, write: true }, workspaceMode, extraReadGrants: grants, externalReadGrants: external };
 }
 export function projectToolResult(toolResult, git) {
   if (!git) return toolResult;
@@ -354,10 +380,10 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
-  const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, workspaceMode });
-  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
+  const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, externalReadGrants, workspaceMode });
+  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
   const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
   const agentDir = path.join(stateDir, 'pi-agent');
   const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });

@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { workspaceAgentInstructions } = require('./agent-instructions.js');
 const toolApprovals = require('./tool-approvals.js');
+const externalLinks = require('./external-links.js');
 const { withCurrentDateTime } = require('./time-context.js');
 
 function configuredPort(name, fallback) {
@@ -74,6 +75,8 @@ const ENTRY_RENAMES = new Map();
 const ACTIVE_TURNS = new Map();
 const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
+const EXTERNAL_INSPECTIONS = new Map();
+const EXTERNAL_LINK_WRITES = new Map();
 const API_KEY_PROVIDERS = {
   anthropic: { label: 'Anthropic', environment: 'ANTHROPIC_API_KEY' },
   openai: { label: 'OpenAI', environment: 'OPENAI_API_KEY' },
@@ -88,6 +91,12 @@ let ignoreRulesCache = { signature: null, rules: [] };
 let dirtyMonitorTimer = null;
 let dirtyMonitorRun = null;
 function activeTurnForThread(threadId) { return [...ACTIVE_TURNS.values()].find(turn => turn.threadId === threadId) || null; }
+async function withExternalLinkWrite(project, work) {
+  const previous = EXTERNAL_LINK_WRITES.get(project) || Promise.resolve(); let release;
+  const finished = new Promise(resolve => { release = resolve; }); const tail = previous.then(() => finished);
+  EXTERNAL_LINK_WRITES.set(project, tail); await previous;
+  try { return await work(); } finally { release(); if (EXTERNAL_LINK_WRITES.get(project) === tail) EXTERNAL_LINK_WRITES.delete(project); }
+}
 
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
@@ -151,6 +160,33 @@ async function bundlePath(target) {
     const [root, resolved] = await Promise.all([fs.realpath(BUNDLE_ROOT), fs.realpath(target)]);
     return resolved === root || resolved.startsWith(`${root}${path.sep}`) ? resolved : null;
   } catch { return null; }
+}
+
+async function externalBrowserPath(routePath) {
+  const lexical = safePath(routePath); if (!lexical) return null;
+  const parts = path.relative(BUNDLE_ROOT, lexical).split(path.sep).filter(Boolean); if (parts.length < 2) return null;
+  const project = parts[0]; const projectRoot = projectRootForId(project); if (!(await isDirectory(projectRoot))) return null;
+  const relative = parts.slice(1).join('/'); const grants = await externalProjectGrants(project);
+  const grant = grants.filter(item => relative === item.linkPath || relative.startsWith(`${item.linkPath}/`)).sort((left, right) => right.linkPath.length - left.linkPath.length)[0];
+  if (!grant) return null;
+  const suffix = relative === grant.linkPath ? '' : relative.slice(grant.linkPath.length + 1);
+  if (grant.kind === 'file' && suffix) return null;
+  let target = path.resolve(grant.canonicalTarget, suffix); if (!externalLinks.within(grant.canonicalTarget, target)) return null;
+  const suffixParts = suffix ? suffix.split('/') : [];
+  for (let index = 0; index < suffixParts.length; index++) {
+    if (externalLinks.isSensitiveName(suffixParts[index])) return null;
+    const current = path.join(grant.canonicalTarget, ...suffixParts.slice(0, index + 1)); const info = await fs.lstat(current).catch(() => null);
+    if (!info || info.isSymbolicLink()) return null;
+  }
+  const metadata = await fs.lstat(target).catch(() => null); if (!metadata || metadata.isSymbolicLink() || (!metadata.isFile() && !metadata.isDirectory()) || (metadata.isFile() && metadata.nlink !== 1)) return null;
+  return { target, lexical, grant };
+}
+
+async function readableWorkspacePath(routePath) {
+  const lexical = safePath(routePath); const internal = lexical && await bundlePath(lexical);
+  if (internal) return { target: internal, lexical, external: false };
+  const external = await externalBrowserPath(routePath);
+  return external && { ...external, external: true };
 }
 
 function publicPath(file) {
@@ -321,17 +357,28 @@ async function navigationTree(folder, isRoot = false, depth = 0) {
   });
 }
 
+async function externalLinkEntries(projectRoot) {
+  if (projectRoot === BUNDLE_ROOT) return [];
+  let stored = [];
+  try { stored = await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, projectRoot, externalLinkOptions()); } catch { return []; }
+  const entries = new Map(stored.map(item => [item.linkPath, { path: item.linkPath, status: item.status, kind: item.kind }]));
+  for (const entry of await fs.readdir(projectRoot, { withFileTypes: true })) if (entry.isSymbolicLink() && !entry.name.startsWith('.')) {
+    const existing = entries.get(entry.name); if (!existing) entries.set(entry.name, { path: entry.name, status: 'unapproved', kind: 'unknown' });
+  }
+  return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
 async function isProjectDirectory(directory) {
   return (await isDirectory(directory)) && !(await isIgnored(directory));
 }
 
 async function projectData(requested) {
-  let requestedPath = safePath(requested || '/workspace');
-  requestedPath = requestedPath && await bundlePath(requestedPath);
+  const requestedRoute = requested || '/workspace'; const requestedLexical = safePath(requestedRoute);
+  const readable = await readableWorkspacePath(requestedRoute); let requestedPath = readable?.target;
   if (!requestedPath || !(await exists(requestedPath))) throw new Error('Project not found');
   if (!(await isDirectory(requestedPath))) requestedPath = path.dirname(requestedPath);
 
-  const relativeParts = path.relative(BUNDLE_ROOT, requestedPath).split(path.sep).filter(Boolean);
+  const relativeParts = path.relative(BUNDLE_ROOT, requestedLexical).split(path.sep).filter(Boolean);
   const projectRoot = relativeParts.length ? path.join(BUNDLE_ROOT, relativeParts[0]) : BUNDLE_ROOT;
   const bundleIndexFile = path.join(BUNDLE_ROOT, 'index.md');
   const bundleIndex = await readWorkspaceTextPrefix(bundleIndexFile);
@@ -371,11 +418,12 @@ async function projectData(requested) {
   const stats = { documents: projectFiles.filter(item => item.isFile() && /\.md$/i.test(item.name)).length, folders: projectFiles.filter(item => item.isDirectory()).length, indexed: projectLinks.length };
   const isBundleRoot = projectRoot === BUNDLE_ROOT;
   const tree = isBundleRoot ? [] : await navigationTree(projectRoot, true);
+  const external = isBundleRoot ? [] : await externalLinkEntries(projectRoot);
   const catalog = isBundleRoot ? projects.slice(1) : [];
 
   const projectName = path.relative(BUNDLE_ROOT, projectRoot) || 'workspace';
   const projectTitle = titleFromMarkdown(projectIndex, path.basename(projectRoot));
-  const selectedParts = path.relative(projectRoot, requestedPath).split(path.sep).filter(Boolean);
+  const selectedParts = path.relative(projectRoot, requestedLexical).split(path.sep).filter(Boolean);
   const breadcrumbs = [{ label: projectTitle, path: publicPath(projectRoot) }];
   let breadcrumbPath = projectRoot;
   for (const part of selectedParts) {
@@ -385,26 +433,27 @@ async function projectData(requested) {
 
   return {
     project: { name: projectName, path: publicPath(projectRoot), title: projectTitle },
-    context: { name: path.relative(projectRoot, requestedPath) || projectName, path: publicPath(requestedPath), title: titleFromMarkdown(contextIndex, path.basename(requestedPath)), breadcrumbs },
+    context: { name: path.relative(projectRoot, requestedLexical) || projectName, path: publicPath(requestedLexical), title: titleFromMarkdown(contextIndex, path.basename(requestedLexical)), breadcrumbs },
     projects,
     catalog,
     common,
     tree,
+    externalLinks: external,
     stats
   };
 }
 
 async function documentData(requested) {
-  let target = safePath(requested);
-  target = target && await bundlePath(target);
-  if (!target) throw new Error('Not found');
-  if (await isDirectory(target)) target = path.join(target, 'index.md');
-  target = await bundlePath(target);
-  if (!target || !(await exists(target))) throw new Error('Not found');
+  let resolved = await readableWorkspacePath(requested);
+  if (!resolved) throw new Error('Not found');
+  if (await isDirectory(resolved.target)) resolved = await readableWorkspacePath(`${String(requested).replace(/\/$/, '')}/index.md`);
+  if (!resolved || !(await exists(resolved.target))) throw new Error('Not found');
+  const target = resolved.target;
   const stat = await fs.stat(target);
   if (!stat.isFile()) throw new Error('Not found');
   const classification = classifyFile(target, await readPrefix(target, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
-  const base = { ...classification, name: path.basename(target), path: publicPath(target), url: `${ASSET_ORIGIN}${publicPath(target)}`, size: stat.size };
+  const displayPath = publicPath(resolved.lexical);
+  const base = { ...classification, name: path.basename(target), path: displayPath, url: `${ASSET_ORIGIN}${displayPath}`, size: stat.size, external: resolved.external === true, readOnly: resolved.external === true };
   if (classification.kind === 'markdown' || classification.kind === 'code') {
     const limit = classification.kind === 'markdown' ? MAX_MARKDOWN_PREVIEW_BYTES : MAX_CODE_PREVIEW_BYTES;
     if (stat.size > limit && classification.kind === 'code') return { ...base, kind: 'binary', fileType: `${classification.fileType} · preview too large`, truncated: true };
@@ -419,8 +468,8 @@ async function documentData(requested) {
 }
 
 async function asset(req, res, pathname) {
-  const target = safePath(pathname);
-  const resolved = target && await bundlePath(target);
+  const result = await readableWorkspacePath(pathname);
+  const resolved = result?.target;
   const stat = resolved && await fs.stat(resolved).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
   if (!resolved || !stat?.isFile()) return respond(res, 404, 'Not found', 'text/plain');
   const classification = classifyFile(resolved, await readPrefix(resolved, Math.min(stat.size, MAX_CLASSIFICATION_BYTES)));
@@ -680,6 +729,31 @@ async function projectToolPolicies(project) {
   }
   return { tools };
 }
+function externalLinkOptions() { return { deniedRoots: [CHAT_STATE_DIR] }; }
+async function externalProjectRoot(project) {
+  if (project === 'workspace') throw externalLinks.error('EXTERNAL_LINK_DENIED', 'Workspace-wide external links are not supported', 403);
+  const root = projectRootForId(project); if (!(await isDirectory(root))) throw new Error('Project not found');
+  return root;
+}
+async function inspectExternalLink(project, linkPath) {
+  const root = await externalProjectRoot(project);
+  const inspection = await externalLinks.inspectLink({ workspaceRoot: BUNDLE_ROOT, projectRoot: root, linkPath, ...externalLinkOptions() });
+  const token = crypto.randomBytes(32).toString('base64url'); const expiresAt = Date.now() + 5 * 60_000;
+  EXTERNAL_INSPECTIONS.set(token, { project, inspection, expiresAt }); setTimeout(() => EXTERNAL_INSPECTIONS.delete(token), 5 * 60_000).unref();
+  return { ...inspection, status: 'unapproved', inspectionToken: token, expiresAt: new Date(expiresAt).toISOString() };
+}
+async function approveExternalLink(project, token) {
+  if (typeof token !== 'string') throw externalLinks.error('EXTERNAL_APPROVAL_STALE', 'Inspect the external link before approving it', 409);
+  const pending = EXTERNAL_INSPECTIONS.get(token); EXTERNAL_INSPECTIONS.delete(token);
+  if (!pending || pending.expiresAt < Date.now() || pending.project !== project) throw externalLinks.error('EXTERNAL_APPROVAL_STALE', 'The external-link inspection expired; inspect it again', 409);
+  const root = await externalProjectRoot(project); const current = await externalLinks.inspectLink({ workspaceRoot: BUNDLE_ROOT, projectRoot: root, linkPath: pending.inspection.linkPath, ...externalLinkOptions() });
+  if (JSON.stringify([current.linkText, current.canonicalTarget, current.kind]) !== JSON.stringify([pending.inspection.linkText, pending.inspection.canonicalTarget, pending.inspection.kind])) throw externalLinks.error('EXTERNAL_APPROVAL_STALE', 'The external link changed; inspect it again', 409);
+  return externalLinks.approveGrant(CHAT_STATE_DIR, current);
+}
+async function externalProjectGrants(project) {
+  const root = await externalProjectRoot(project);
+  return externalLinks.activeGrants(CHAT_STATE_DIR, BUNDLE_ROOT, root, externalLinkOptions());
+}
 async function loadThread(id) {
   try { return JSON.parse(await fs.readFile(threadFile(id), 'utf8')); } catch (error) { if (error.code === 'ENOENT') throw new Error('Chat thread not found'); throw error; }
 }
@@ -810,7 +884,7 @@ function projectAssistantSystemPrompt(agentInstructions = '', workspaceMode = fa
   const scope = workspaceMode ? 'The user deliberately enabled workspace-wide mode for this turn.' : 'Filesystem paths are relative to the selected project; the model cannot widen that authority.';
   return `You are a project-scoped coding assistant. ${scope} Explicitly issued read grants are one-turn and read-only. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -820,7 +894,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, readGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -1123,6 +1197,13 @@ async function handleRequest(req, res) {
     if (toolSecretMatch && req.method === 'DELETE') { assertChatRequest(req); await toolApprovals.removeToolSecret(CHAT_STATE_DIR, toolSecretMatch[1]); return respond(res, 204, ''); }
     const projectToolsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/tools$/);
     if (projectToolsMatch && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await projectToolPolicies(decodeURIComponent(projectToolsMatch[1]))); }
+    const externalLinksMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/external-links$/);
+    if (externalLinksMatch && req.method === 'GET') { assertChatRequest(req); const project = decodeURIComponent(externalLinksMatch[1]); const root = await externalProjectRoot(project); return json(res, 200, { links: await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, root, externalLinkOptions()) }); }
+    if (externalLinksMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(externalLinksMatch[1]); const body = await readJson(req); if (!body || Object.keys(body).some(key => key !== 'inspectionToken')) throw new Error('Invalid external-link approval request'); return json(res, 201, await withExternalLinkWrite(project, () => approveExternalLink(project, body.inspectionToken))); }
+    const externalInspectMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/external-links\/inspect$/);
+    if (externalInspectMatch && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || Object.keys(body).some(key => key !== 'path')) throw new Error('Invalid external-link inspection request'); return json(res, 200, await inspectExternalLink(decodeURIComponent(externalInspectMatch[1]), body.path)); }
+    const externalRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/external-links\/(external-[A-Za-z0-9_-]+)$/);
+    if (externalRevokeMatch && req.method === 'DELETE') { assertChatRequest(req); const project = decodeURIComponent(externalRevokeMatch[1]); await withExternalLinkWrite(project, async () => { const root = await externalProjectRoot(project); await externalLinks.revokeGrant(CHAT_STATE_DIR, BUNDLE_ROOT, root, externalRevokeMatch[2]); for (const [token, item] of EXTERNAL_INSPECTIONS) if (item.project === project) EXTERNAL_INSPECTIONS.delete(token); for (const active of ACTIVE_TURNS.values()) if (active.project === project) active.abort.abort(); }); return respond(res, 204, ''); }
     const toolApprovalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/tools\/approvals$/);
     if (toolApprovalsMatch && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const project = decodeURIComponent(toolApprovalsMatch[1]); const root = projectRootForId(project); if (!(await isDirectory(root))) throw new Error('Project not found');
@@ -1182,7 +1263,7 @@ async function handleRequest(req, res) {
         const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
         const initiator = body.initiator === 'system' ? 'system' : 'user';
         current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, createdAt: new Date().toISOString() }); await saveThread(current);
-        active = { threadId: current.id, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); return current;
+        active = { threadId: current.id, project: current.project, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); return current;
       }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
@@ -1193,10 +1274,10 @@ async function handleRequest(req, res) {
         const selectedProjectRoot = projectRootForId(thread.project);
         if (thread.project === 'workspace' && thread.workspaceMode !== true) throw new Error('This workspace chat was not created with explicit workspace mode. Start a new workspace-wide chat to continue.');
         const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: selectedProjectRoot, prompt: message }).catch(() => '') : null;
-        const grants = await explicitProjectContext(message, thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
+        const grants = await explicitProjectContext(message, thread.project); const externalReadGrants = thread.workspaceMode === true ? [] : await externalProjectGrants(thread.project); const turnMessages = thread.messages.map(item => ({ ...item }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context and one-turn read grants]\n${grants.map(grant => `[${grant.id}] @${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ id: grant.id, project: grant.project, path: grant.path })) }); }
         const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, externalReadGrants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
@@ -1243,7 +1324,7 @@ async function handleRequest(req, res) {
     }
     if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
-  } catch (error) { json(res, error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400, { error: error.message }); }
+  } catch (error) { json(res, error.status || (error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400), error.code ? { error: { code: error.code, message: error.message } } : { error: error.message }); }
 }
 
 async function handleAssetRequest(req, res) {

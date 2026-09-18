@@ -15,6 +15,7 @@ const zlib = require('node:zlib');
 let ROOT = path.resolve(process.env.OK_WORKSPACE_ROOT || process.env.OKF_WORKSPACE_ROOT || '/workspace');
 let WORKSPACE_MODE = process.env.OK_WORKBENCH_WORKSPACE_MODE === '1';
 let READ_GRANTS = parseReadGrants(process.env.OK_WORKBENCH_READ_GRANTS);
+let EXTERNAL_READ_GRANTS = parseExternalReadGrants(process.env.OK_WORKBENCH_EXTERNAL_READ_GRANTS);
 const MAX_READ = 256 * 1024;
 const MAX_DOCUMENT_READ = 25 * 1024 * 1024;
 const MAX_DOCUMENT_TEXT = 256 * 1024;
@@ -34,6 +35,14 @@ function parseReadGrants(value) {
     const parsed = JSON.parse(value);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
     return new Map(Object.entries(parsed).filter(([id, target]) => /^grant-[A-Za-z0-9_-]{8,}$/.test(id) && typeof target === 'string' && path.isAbsolute(target)));
+  } catch { return new Map(); }
+}
+function parseExternalReadGrants(value) {
+  if (!value) return new Map();
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
+    return new Map(Object.entries(parsed).flatMap(([alias, grant]) => typeof alias === 'string' && alias && !alias.startsWith('/') && !alias.includes('..') && grant && typeof grant === 'object' && /^external-[A-Za-z0-9_-]{8,}$/.test(grant.id) && ['file', 'directory'].includes(grant.kind) && typeof grant.snapshotPath === 'string' && path.isAbsolute(grant.snapshotPath) ? [[alias.replace(/^\.\//, ''), grant]] : []));
   } catch { return new Map(); }
 }
 function isSensitiveName(name) {
@@ -56,7 +65,19 @@ function deniedCanonicalPath(root, target) {
   return !relative || path.isAbsolute(relative) || relative.split(path.sep).some(part => !part || isDeniedPath([part]));
 }
 async function targetFor(relative, write = false) {
-  const safe = safeRelative(relative); const target = path.resolve(ROOT, safe);
+  const safe = safeRelative(relative); const external = externalGrantFor(safe);
+  if (external) {
+    if (write) throw new Error('External links are read-only');
+    const suffix = safe === external.alias ? '' : safe.slice(external.alias.length + 1);
+    if (external.grant.kind === 'file' && suffix) throw new Error('Path is not a file');
+    const target = path.resolve(external.grant.snapshotPath, suffix);
+    if (!isWithin(external.grant.snapshotPath, target)) throw new Error('Path is outside the external read grant');
+    const info = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!info) throw new Error('External snapshot is unavailable');
+    if (info.isSymbolicLink()) throw new Error('External nested symbolic links are unavailable');
+    return { safe, target, external: true };
+  }
+  const target = path.resolve(ROOT, safe);
   if (!target.startsWith(`${ROOT}${path.sep}`)) throw new Error('Path is outside the workspace');
   // macOS commonly presents temporary directories through /var even though
   // realpath returns /private/var. Compare canonical paths so that alias is
@@ -74,10 +95,17 @@ async function targetFor(relative, write = false) {
     const lexicalInfo = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
     if (lexicalInfo?.isSymbolicLink()) throw new Error('Refusing to modify a symbolic link');
   }
-  return { safe, target: canonical };
+  return { safe, target: canonical, external: false };
+}
+function externalGrantFor(safe) {
+  let selected = null;
+  for (const [alias, grant] of EXTERNAL_READ_GRANTS) if (safe === alias || safe.startsWith(`${alias}/`)) {
+    if (!selected || alias.length > selected.alias.length) selected = { alias, grant };
+  }
+  return selected;
 }
 async function listFiles(relative = '.') {
-  const start = relative === '.' ? { safe: '', target: ROOT } : await targetFor(relative); const output = [];
+  const start = relative === '.' ? { safe: '', target: ROOT, external: false } : await targetFor(relative); const output = [];
   async function visit(directory, prefix) {
     if (output.length >= MAX_RESULTS) return;
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
@@ -88,7 +116,13 @@ async function listFiles(relative = '.') {
       if (output.length >= MAX_RESULTS) return;
     }
   }
-  await visit(start.target, start.safe); return output;
+  await visit(start.target, start.safe);
+  if (relative === '.') for (const [alias, grant] of EXTERNAL_READ_GRANTS) {
+    const info = await fs.lstat(grant.snapshotPath).catch(() => null); if (!info) continue;
+    if (grant.kind === 'file' && info.isFile()) output.push(alias);
+    else if (grant.kind === 'directory') await visit(grant.snapshotPath, alias);
+  }
+  return [...new Set(output)].slice(0, MAX_RESULTS);
 }
 function contentHash(content) { return crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, CONTENT_HASH_LENGTH); }
 async function readFile(relative) {
@@ -349,6 +383,7 @@ function managedPath(relative) { return isToolFile(relative) || safeRelative(rel
 async function moveFile({ from, to }) {
   if (managedPath(from) || managedPath(to)) throw new Error('Workspace tools and their manifests are managed outside agent file updates');
   const [source, destination] = await Promise.all([targetFor(from), targetFor(to, true)]);
+  if (source.external) throw new Error('External links are read-only');
   if (source.safe === destination.safe) throw new Error('Source and destination paths must differ');
   const sourceInfo = await fs.lstat(source.target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
   if (!sourceInfo?.isFile() || sourceInfo.isSymbolicLink()) throw new Error('Source must be a regular file');
@@ -505,7 +540,7 @@ async function createProject({ id: requestedId, title: requestedTitle }) {
   return { id, path: id, location: `/workspace/${encodeURIComponent(id)}`, title, structure: 'OKF 0.2 project template' };
 }
 
-function setWorkspaceRoot(root, { workspaceMode = false, readGrants = {} } = {}) { ROOT = path.resolve(root); WORKSPACE_MODE = workspaceMode; READ_GRANTS = new Map(Object.entries(readGrants)); }
+function setWorkspaceRoot(root, { workspaceMode = false, readGrants = {}, externalReadGrants = {} } = {}) { ROOT = path.resolve(root); WORKSPACE_MODE = workspaceMode; READ_GRANTS = new Map(Object.entries(readGrants)); EXTERNAL_READ_GRANTS = parseExternalReadGrants(JSON.stringify(externalReadGrants)); }
 function startWorker() {
   const operations = { list_files: ({ path }) => listFiles(path || '.'), read_file: ({ path }) => readFile(path), read_granted_file: ({ grant_id: grantId }) => readGrantedFile(grantId), extract_document: ({ path }) => extractDocument(path), search_files: ({ query, path }) => searchFiles(query, path || '.'), move_file: moveFile, edit_file: editFile, list_workspace_tools: listWorkspaceTools, workspace_tool_policy: ({ path }) => workspaceToolPolicy(path), run_workspace_tool: runWorkspaceTool, apply_project_update: applyProjectUpdate, create_project: createProject };
   const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

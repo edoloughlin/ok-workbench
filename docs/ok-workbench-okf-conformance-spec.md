@@ -456,7 +456,7 @@ They MUST:
 Example from `project-a/decision.md` to `project-b/architecture.md`:
 
 ```markdown
-See [Project B architecture](../project-b/architecture.md).
+See Project B architecture at ../project-b/architecture.md.
 ```
 
 A workspace-aware validator SHOULD verify the target when both projects are

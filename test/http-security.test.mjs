@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -49,6 +49,26 @@ async function stop(child) {
   child.kill();
   await new Promise(resolve => child.once('exit', resolve));
 }
+
+test('external-link approval grants only the approved browser alias', { skip: !process.env.OK_WORKBENCH_INTEGRATION }, async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-external-http-workspace-'));
+  const state = await mkdtemp(path.join(tmpdir(), 'ok-workbench-external-http-state-'));
+  const outside = await mkdtemp(path.join(tmpdir(), 'ok-workbench-external-http-source-'));
+  const port = await availablePort(); let assetPort = await availablePort(); while (assetPort === port) assetPort = await availablePort(); let child;
+  try {
+    const project = path.join(workspace, 'alpha'); await mkdir(project); await writeFile(path.join(workspace, 'index.md'), '# Workspace\n'); await writeFile(path.join(project, 'index.md'), '# Alpha\n'); await writeFile(path.join(outside, 'guide.md'), '# External guide\n'); await symlink(outside, path.join(project, 'reference'));
+    child = await startWorkbench({ workspace, state, port, assetPort });
+    const page = await request({ port, host: `localhost:${port}`, pathname: '/workspace/' }); const csrf = page.body.toString().match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
+    const linkPath = '/workspace/alpha/reference/guide.md';
+    assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` })).status, 404);
+    const inspect = await request({ port, host: `localhost:${port}`, pathname: '/api/projects/alpha/external-links/inspect', method: 'POST', body: JSON.stringify({ path: 'reference' }), headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(inspect.status, 200); const inspected = JSON.parse(inspect.body); assert.equal(inspected.kind, 'directory'); assert.equal(inspected.linkPath, 'reference'); assert.equal(inspected.canonicalTarget, outside);
+    const approved = await request({ port, host: `localhost:${port}`, pathname: '/api/projects/alpha/external-links', method: 'POST', body: JSON.stringify({ inspectionToken: inspected.inspectionToken }), headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(approved.status, 201);
+    const document = await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` }); assert.equal(document.status, 200); const body = JSON.parse(document.body); assert.equal(body.text, '# External guide\n'); assert.equal(body.path, linkPath); assert.equal(body.external, true); assert.doesNotMatch(JSON.stringify(body), new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const asset = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: linkPath }); assert.equal(asset.status, 200); assert.equal(asset.body.toString(), '# External guide\n');
+    const revoked = await request({ port, host: `localhost:${port}`, pathname: `/api/projects/alpha/external-links/${JSON.parse(approved.body).id}`, method: 'DELETE', headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(revoked.status, 204);
+    assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` })).status, 404);
+  } finally { await stop(child); await rm(workspace, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
 
 test('HTTP routes isolate untrusted workspace assets on a separate local origin and remain bounded', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-http-security-'));

@@ -47,7 +47,7 @@ test('sandbox backend selection and Seatbelt arguments are platform-specific', a
     platform: 'darwin', workspace: '/Users/example/Work space', template: '/Applications/OK Workbench/template', temporaryDirectory: '/private/tmp/ok-workbench-worker-123', grants: '/private/tmp/ok-workbench-grants-123',
   }), {
     PATH: '/usr/bin:/bin', HOME: '/private/tmp/ok-workbench-worker-123', TMPDIR: '/private/tmp/ok-workbench-worker-123',
-    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template', OK_WORKBENCH_WORKSPACE_MODE: '0', OK_WORKBENCH_READ_GRANTS: '{}', __CF_USER_TEXT_ENCODING: `0x${process.getuid().toString(16)}:0:0`,
+    OK_WORKSPACE_ROOT: '/Users/example/Work space', OKF_WORKSPACE_ROOT: '/Users/example/Work space', OK_WORKBENCH_PROJECT_TEMPLATE: '/Applications/OK Workbench/template', OK_WORKBENCH_WORKSPACE_MODE: '0', OK_WORKBENCH_READ_GRANTS: '{}', OK_WORKBENCH_EXTERNAL_READ_GRANTS: '{}', __CF_USER_TEXT_ENCODING: `0x${process.getuid().toString(16)}:0:0`,
   });
   const profile = await readFile(path.join(root, 'dist', 'macos-sandbox.sb'), 'utf8');
   assert.match(profile, /^\(deny default\)$/m);
