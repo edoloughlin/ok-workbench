@@ -26,8 +26,7 @@ const MACOS_SANDBOX_PROFILE = path.join(APP_DIR, 'macos-sandbox.sb');
 const WORKER_READY_TIMEOUT = 5_000;
 const WEB_SEARCH_TIMEOUT = 15_000;
 const WEB_SEARCH_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
-  || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
+function turnDiagnostics() { return process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1' || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1'; }
 
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
@@ -204,7 +203,7 @@ export class TurnWorker {
 }
 
 export async function createTurnWorker(projectRoot, { platform = process.platform, toolEnvironment = {}, executionPolicy = null, readGrants = [], externalReadGrants = [], workspaceMode = false } = {}) {
-  const spawnStartedAt = TURN_DIAGNOSTICS ? Date.now() : 0;
+  const spawnStartedAt = turnDiagnostics() ? Date.now() : 0;
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
   let configuration;
@@ -225,7 +224,7 @@ export async function createTurnWorker(projectRoot, { platform = process.platfor
     cleanup: () => cleanupTemporaryDirectories(configuration.temporaryDirectory, configuration.grants),
     onUnexpectedExit: details => logError('[ok-workbench] sandbox worker exited unexpectedly', { backend, ...details }),
   });
-  try { await waitForSpawn(child); await turnWorker.waitForReady(); if (TURN_DIAGNOSTICS) log('[ok-workbench] worker-ready', { backend, network: false, spawnToReadyMs: Date.now() - spawnStartedAt }); return turnWorker; }
+  try { await waitForSpawn(child); await turnWorker.waitForReady(); if (turnDiagnostics()) log('[ok-workbench] worker-ready', { backend, network: false, spawnToReadyMs: Date.now() - spawnStartedAt }); return turnWorker; }
   catch (error) { turnWorker.close(); turnWorker.removeTemporaryDirectory(); throw error; }
 }
 
@@ -513,7 +512,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   const reportStatus = state => { if (state !== lastStatus) { lastStatus = state; onStatus?.({ state }); } };
   const unsubscribe = session.subscribe(event => {
     const assistantType = event.assistantMessageEvent?.type;
-    if (TURN_DIAGNOSTICS) log('[ok-workbench] pi-session-event', { type: event.type, assistantMessageEventType: assistantType });
+    if (turnDiagnostics()) log('[ok-workbench] pi-session-event', { type: event.type, assistantMessageEventType: assistantType });
     if (event.type === 'message_start' && event.message?.role === 'assistant') onResponseStart?.();
     if (event.type === 'message_update' && assistantType === 'text_delta') { reportStatus('responding'); onDelta(event.assistantMessageEvent.delta); return; }
     // These event names are part of Pi's assistant stream vocabulary. Their

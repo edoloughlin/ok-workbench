@@ -22,8 +22,7 @@ const PORT = configuredPort('PORT', 3477);
 const ASSET_PORT = configuredPort('OK_WORKBENCH_ASSET_PORT', PORT + 1);
 if (ASSET_PORT === PORT) throw new Error('OK_WORKBENCH_ASSET_PORT must differ from PORT');
 const ASSET_ORIGIN = `http://localhost:${ASSET_PORT}`;
-const TURN_DIAGNOSTICS = process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1'
-  || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1';
+function turnDiagnostics() { return process.env.OK_WORKBENCH_TURN_DIAGNOSTICS === '1' || process.env.OKF_WORKBENCH_TURN_DIAGNOSTICS === '1'; }
 // Resolve the bundle from this project's location so both `node server.js` and
 // `node ok-workbench/server.js` work from a checked-out bundle.
 const LEGACY_BUNDLE_ROOT = process.env.AGENTS_BUNDLE_ROOT;
@@ -672,6 +671,29 @@ async function writeAtomic(file, value) {
   await fs.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await fs.rename(temporary, file);
 }
+const RUNTIME_SETTINGS_FIELDS = ['directProvider', 'turnDiagnostics', 'timeZone', 'python', 'pythonPackages'];
+const DEFAULT_PYTHON_PACKAGES = 'Pillow,CairoSVG,opencv-python-headless,numpy';
+function runtimeSettingsFile() { return path.join(CHAT_STATE_DIR, 'runtime-settings.json'); }
+function runtimeSettingsFromEnvironment() { return { directProvider: process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1', turnDiagnostics: turnDiagnostics(), timeZone: process.env.OK_WORKBENCH_TIME_ZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', python: process.env.OK_WORKBENCH_PYTHON === '1', pythonPackages: process.env.OK_WORKBENCH_PYTHON_PACKAGES ?? DEFAULT_PYTHON_PACKAGES }; }
+function validateRuntimeSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !RUNTIME_SETTINGS_FIELDS.includes(key))) throw new Error('Invalid runtime settings');
+  for (const key of ['directProvider', 'turnDiagnostics', 'python']) if (typeof value[key] !== 'boolean') throw new Error('Runtime setting toggles must be booleans');
+  if (typeof value.timeZone !== 'string' || value.timeZone.length > 100 || (value.timeZone && (() => { try { new Intl.DateTimeFormat('en-IE', { timeZone: value.timeZone }); return false; } catch { return true; } })())) throw new Error('Use a valid IANA time zone');
+  if (typeof value.pythonPackages !== 'string' || value.pythonPackages.length > 2048 || value.pythonPackages.split(',').filter(Boolean).some(name => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(name.trim()))) throw new Error('Python packages must be a comma-separated package allowlist');
+  return { directProvider: value.directProvider, turnDiagnostics: value.turnDiagnostics, timeZone: value.timeZone.trim(), python: value.python, pythonPackages: value.pythonPackages.trim() };
+}
+function applyRuntimeSettings(value) {
+  process.env.OK_WORKBENCH_DIRECT_PROVIDER = value.directProvider ? '1' : '';
+  process.env.OK_WORKBENCH_TURN_DIAGNOSTICS = value.turnDiagnostics ? '1' : '';
+  process.env.OK_WORKBENCH_TIME_ZONE = value.timeZone;
+  process.env.OK_WORKBENCH_PYTHON = value.python ? '1' : '';
+  process.env.OK_WORKBENCH_PYTHON_PACKAGES = value.pythonPackages;
+}
+async function loadRuntimeSettings() {
+  try { const value = validateRuntimeSettings(JSON.parse(await fs.readFile(runtimeSettingsFile(), 'utf8'))); applyRuntimeSettings(value); return value; }
+  catch (error) { if (error.code === 'ENOENT') return runtimeSettingsFromEnvironment(); throw error; }
+}
+async function saveRuntimeSettings(value) { const settings = validateRuntimeSettings(value); await writeAtomic(runtimeSettingsFile(), settings); applyRuntimeSettings(settings); return settings; }
 function apiKeyFile() { return path.join(CHAT_STATE_DIR, 'provider-api-keys.json'); }
 async function storedApiKeys() {
   try {
@@ -859,7 +881,7 @@ function turnWriter(res, threadId, turnId) {
   let sequence = 0;
   return (type, payload = {}) => {
     const event = { type, thread_id: threadId, turn_id: turnId, sequence: ++sequence, ...payload };
-    if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-event', { turnId, threadId, type, sequence: event.sequence, deltaLength: payload.delta?.length });
+    if (turnDiagnostics()) log('[ok-workbench] turn-event', { turnId, threadId, type, sequence: event.sequence, deltaLength: payload.delta?.length });
     return res.write(`${JSON.stringify(event)}\n`);
   };
 }
@@ -1190,6 +1212,8 @@ async function handleRequest(req, res) {
     if (dirtyMatch && req.method === 'GET') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, storedDirtyState(project)); }
     if (dirtyMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, await markDirtyProjectProcessed(project)); }
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
+    if (url.pathname === '/api/chat/runtime-settings' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { settings: await loadRuntimeSettings() }); }
+    if (url.pathname === '/api/chat/runtime-settings' && req.method === 'PUT') { assertChatRequest(req); return json(res, 200, { settings: await saveRuntimeSettings(await readJson(req)) }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     if (url.pathname === '/api/chat/tool-secrets' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { secrets: Object.keys(await toolApprovals.loadToolSecrets(CHAT_STATE_DIR)).sort() }); }
     const toolSecretMatch = url.pathname.match(/^\/api\/chat\/tool-secrets\/([a-z][a-z0-9-]{0,63})$/);
@@ -1268,7 +1292,7 @@ async function handleRequest(req, res) {
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
       let reply = ''; let pendingSteeringBoundary = false; const startedAt = Date.now(); req.on('aborted', () => abort.abort());
-      if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
+        if (turnDiagnostics()) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
       let outcome = 'failed';
       try {
         const selectedProjectRoot = projectRootForId(thread.project);
@@ -1306,7 +1330,7 @@ async function handleRequest(req, res) {
         }
         writeEvent('turn.failed', { error: errorMessage });
       }
-      finally { ACTIVE_TURNS.delete(turnId); if (TURN_DIAGNOSTICS) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
+      finally { ACTIVE_TURNS.delete(turnId); if (turnDiagnostics()) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
       return res.end();
     }
     const gitStatusMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/status$/);
@@ -1355,6 +1379,7 @@ function listen(serverInstance, host, port) {
 
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
+  await loadRuntimeSettings();
   await refreshDirtyMonitor();
   const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
   dirtyReconciliation.unref();

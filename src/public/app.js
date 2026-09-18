@@ -521,7 +521,7 @@ const chatUi = {
   notificationsButton: document.querySelector('#turn-notifications-button'), notificationsMenu: document.querySelector('#turn-notifications-menu'), notificationsList: document.querySelector('#turn-notifications-list'), notificationsCount: document.querySelector('#turn-notifications-count'),
   splitter: document.querySelector('#chat-splitter'), project: document.querySelector('#chat-project'),
   provider: document.querySelector('#chat-provider'), model: document.querySelector('#chat-model'), effort: document.querySelector('#chat-effort'),
-  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'), tools: document.querySelector('#chat-tools'), toolSecretAdd: document.querySelector('#chat-tool-secret-add'),
+  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'), tools: document.querySelector('#chat-tools'), toolSecretAdd: document.querySelector('#chat-tool-secret-add'), runtimeSave: document.querySelector('#runtime-settings-save'), runtimeDirectProvider: document.querySelector('#runtime-direct-provider'), runtimeTurnDiagnostics: document.querySelector('#runtime-turn-diagnostics'), runtimePython: document.querySelector('#runtime-python'), runtimeTimeZone: document.querySelector('#runtime-time-zone'), runtimePythonPackages: document.querySelector('#runtime-python-packages'),
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
@@ -755,7 +755,7 @@ const apiKeyProviderOptions = [
   { id: 'openrouter', label: 'OpenRouter' },
 ];
 function closeChatSettings() { if (chatUi.settingsDialog.open) chatUi.settingsDialog.close(); chatUi.settings.setAttribute('aria-expanded', 'false'); }
-function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); void loadWorkspaceTools(); }
+function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); void loadWorkspaceTools(); void loadRuntimeSettings(); }
 function toggleChatSettings() { if (chatUi.settingsDialog.open) closeChatSettings(); else openChatSettings(); }
 function apiKeyRow(record = null, selectedProvider = '') {
   const row = document.createElement('div'); row.className = 'chat-api-key-row';
@@ -819,6 +819,19 @@ async function loadWorkspaceTools() {
   } catch (error) { showSettingsError(error.message); }
 }
 function showSettingsError(message) { chatUi.settingsError.textContent = message; chatUi.settingsError.hidden = false; }
+function renderRuntimeSettings(settings) { chatUi.runtimeDirectProvider.checked = Boolean(settings.directProvider); chatUi.runtimeTurnDiagnostics.checked = Boolean(settings.turnDiagnostics); chatUi.runtimePython.checked = Boolean(settings.python); chatUi.runtimeTimeZone.value = settings.timeZone || ''; chatUi.runtimePythonPackages.value = settings.pythonPackages || ''; }
+async function loadRuntimeSettings() {
+  try { const response = await chatApi('/api/chat/runtime-settings'); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not load server settings'); renderRuntimeSettings(data.settings || {}); }
+  catch (error) { showSettingsError(error.message); }
+}
+async function saveRuntimeSettings() {
+  chatUi.runtimeSave.disabled = true; chatUi.settingsError.hidden = true;
+  try {
+    const settings = { directProvider: chatUi.runtimeDirectProvider.checked, turnDiagnostics: chatUi.runtimeTurnDiagnostics.checked, python: chatUi.runtimePython.checked, timeZone: chatUi.runtimeTimeZone.value.trim(), pythonPackages: chatUi.runtimePythonPackages.value.trim() };
+    const response = await chatApi('/api/chat/runtime-settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(settings) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not save server settings'); renderRuntimeSettings(data.settings); await loadChatStatus();
+  } catch (error) { showSettingsError(error.message); }
+  finally { chatUi.runtimeSave.disabled = false; }
+}
 async function saveApiKey(provider, key) {
   const response = await chatApi(`/api/chat/api-keys/${encodeURIComponent(provider)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key }) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not save API key'); configuredApiKeys = data.apiKeys || []; renderApiKeyRows(); await loadChatStatus();
 }
@@ -1185,6 +1198,7 @@ chatUi.settings.addEventListener('click', toggleChatSettings);
 chatUi.settingsClose.addEventListener('click', closeChatSettings);
 chatUi.settingsForm.addEventListener('submit', event => event.preventDefault());
 chatUi.settingsDialog.addEventListener('close', () => chatUi.settings.setAttribute('aria-expanded', 'false'));
+chatUi.runtimeSave.addEventListener('click', () => { void saveRuntimeSettings(); });
 chatUi.apiKeyAdd.addEventListener('click', () => {
   const used = new Set([...configuredApiKeys.map(record => record.provider), ...[...chatUi.apiKeys.querySelectorAll('select')].map(select => select.value)]);
   const available = apiKeyProviderOptions.find(option => !used.has(option.id)); if (!available) return;

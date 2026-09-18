@@ -364,6 +364,13 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .api-key-remove { color: var(--muted); font-weight: 500; }
 .chat-title-settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 11px; }
 .chat-title-settings-fields label { display: grid; gap: 4px; color: var(--muted); font: 600 10px var(--font-ui); letter-spacing: .05em; text-transform: uppercase; }
+.runtime-toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin-top: 12px; color: var(--ink); font-size: 13px; }
+.runtime-toggle-grid label { display: flex; align-items: center; gap: 7px; }
+.runtime-toggle-grid input { accent-color: var(--accent); }
+.runtime-settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.runtime-settings-fields label { display: grid; gap: 4px; color: var(--muted); font: 600 10px var(--font-ui); letter-spacing: .05em; text-transform: uppercase; }
+.runtime-settings-fields input { min-width: 0; width: 100%; padding: 8px 9px; border: 1px solid var(--rule-strong); border-radius: 7px; color: var(--ink); background: var(--paper); font: 13px var(--font-ui); }
+.runtime-settings-fields input:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
 .chat-settings-error { margin: -8px 0 0; color: var(--danger); font-size: 13px; }
 .chat-controls { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) minmax(0,.72fr); gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--rule); }
 .chat-controls label { display: grid; min-width: 0; gap: 3px; color: var(--muted); font: 600 10px var(--font-ui); text-transform: uppercase; letter-spacing: 0.04em; }
