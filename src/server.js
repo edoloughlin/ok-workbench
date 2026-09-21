@@ -10,7 +10,8 @@ const { spawn } = require('node:child_process');
 const { workspaceAgentInstructions } = require('./agent-instructions.js');
 const toolApprovals = require('./tool-approvals.js');
 const externalLinks = require('./external-links.js');
-const { withCurrentDateTime } = require('./time-context.js');
+const { withCurrentDateTime, currentTimeZone } = require('./time-context.js');
+const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired } = require('./workspace-review.js');
 
 function configuredPort(name, fallback) {
   const value = Number(process.env[name] || fallback);
@@ -89,6 +90,7 @@ const DIRTY_WATCHERS = new Map();
 let ignoreRulesCache = { signature: null, rules: [] };
 let dirtyMonitorTimer = null;
 let dirtyMonitorRun = null;
+let workspaceReview = null;
 function activeTurnForThread(threadId) { return [...ACTIVE_TURNS.values()].find(turn => turn.threadId === threadId) || null; }
 async function withExternalLinkWrite(project, work) {
   const previous = EXTERNAL_LINK_WRITES.get(project) || Promise.resolve(); let release;
@@ -317,7 +319,7 @@ function linksFromIndex(markdown, folder) {
   return found;
 }
 
-async function navigationTree(folder, isRoot = false, depth = 0) {
+async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, externalGrants = new Map() } = {}) {
   if (depth > 12) return [];
   const indexFile = path.join(folder, 'index.md');
   const index = await readWorkspaceTextPrefix(indexFile);
@@ -339,7 +341,7 @@ async function navigationTree(folder, isRoot = false, depth = 0) {
         type: 'directory',
         label: navigationLabel(exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name, 'directory'),
         path: route,
-        children: await navigationTree(fullPath, false, depth + 1)
+        children: await navigationTree(fullPath, { depth: depth + 1, projectRoot, externalGrants })
       });
     } else if (entry.isFile()) {
       candidates.push({
@@ -347,11 +349,22 @@ async function navigationTree(folder, isRoot = false, depth = 0) {
         label: exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name,
         path: route
       });
+    } else if (entry.isSymbolicLink()) {
+      const linkPath = path.relative(projectRoot, fullPath).split(path.sep).join('/');
+      let destination = null;
+      try { destination = await fs.realpath(fullPath); } catch { /* Keep a dangling link discoverable. */ }
+      if (!destination || !externalLinks.within(BUNDLE_ROOT, destination)) {
+        const grant = externalGrants.get(linkPath);
+        candidates.push({ type: 'external-link', label: entry.name, path: route, linkPath, status: grant?.status || (destination ? 'unapproved' : 'missing'), kind: grant?.kind || 'unknown' });
+      } else {
+        candidates.push({ type: 'internal-link', label: entry.name, path: route });
+      }
     }
   }
 
   return candidates.sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'file' ? -1 : 1;
+    const order = { file: 0, 'internal-link': 1, 'external-link': 1, directory: 2 };
+    if (a.type !== b.type) return order[a.type] - order[b.type];
     return a.label.localeCompare(b.label);
   });
 }
@@ -361,9 +374,6 @@ async function externalLinkEntries(projectRoot) {
   let stored = [];
   try { stored = await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, projectRoot, externalLinkOptions()); } catch { return []; }
   const entries = new Map(stored.map(item => [item.linkPath, { path: item.linkPath, status: item.status, kind: item.kind }]));
-  for (const entry of await fs.readdir(projectRoot, { withFileTypes: true })) if (entry.isSymbolicLink() && !entry.name.startsWith('.')) {
-    const existing = entries.get(entry.name); if (!existing) entries.set(entry.name, { path: entry.name, status: 'unapproved', kind: 'unknown' });
-  }
   return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
@@ -416,8 +426,9 @@ async function projectData(requested) {
   const projectLinks = linksFromIndex(projectIndex, projectRoot);
   const stats = { documents: projectFiles.filter(item => item.isFile() && /\.md$/i.test(item.name)).length, folders: projectFiles.filter(item => item.isDirectory()).length, indexed: projectLinks.length };
   const isBundleRoot = projectRoot === BUNDLE_ROOT;
-  const tree = isBundleRoot ? [] : await navigationTree(projectRoot, true);
   const external = isBundleRoot ? [] : await externalLinkEntries(projectRoot);
+  const externalGrants = new Map(external.map(item => [item.path, item]));
+  const tree = isBundleRoot ? [] : await navigationTree(projectRoot, { isRoot: true, projectRoot, externalGrants });
   const catalog = isBundleRoot ? projects.slice(1) : [];
 
   const projectName = path.relative(BUNDLE_ROOT, projectRoot) || 'workspace';
@@ -806,7 +817,7 @@ async function providerCatalog() {
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
   if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
-  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true })) }));
+  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id) })) }));
 }
 function providerUsesPi(provider) {
   const direct = process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1';
@@ -935,7 +946,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
     try { const parsed = JSON.parse(payload); detail = parsed.error?.message || parsed.message || ''; } catch { detail = payload.trim(); }
     throw new Error(`${providerLabel(provider)} request failed (${response.status})${detail ? `: ${detail}` : ''}`);
   }
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let eventName = '';
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let eventName = ''; let outputLimitReached = false;
   while (true) {
     const { value, done } = await reader.read(); if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -947,10 +958,62 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
       if (!data || data === '[DONE]') continue;
       try {
         const item = JSON.parse(data); const delta = provider === 'anthropic' ? (eventName === 'content_block_delta' ? item.delta?.text : '') : item.choices?.[0]?.delta?.content;
+        if (provider === 'anthropic' ? item.delta?.stop_reason === 'max_tokens' : item.choices?.[0]?.finish_reason === 'length') outputLimitReached = true;
         if (delta) onDelta(delta);
       } catch { /* ignore malformed provider event */ }
     }
   }
+  if (outputLimitReached && noWorkspaceTools) throw new Error('The selected model stopped before completing the review response (output limit)');
+}
+
+async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal }) {
+  let output = ''; const abort = new AbortController();
+  const forwardAbort = () => abort.abort(); signal?.addEventListener('abort', forwardAbort, { once: true });
+  if (signal?.aborted) abort.abort();
+  const timer = setTimeout(() => abort.abort(), timeout || 120_000); timer.unref?.();
+  try {
+    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: 16384, messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; } });
+    return output;
+  } catch (error) {
+    if (abort.signal.aborted) throw Object.assign(new Error('The review exceeded its 120-second limit'), { code: 'REVIEW_TIMEOUT' });
+    throw Object.assign(new Error(error?.message || 'The selected provider is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', forwardAbort); }
+}
+
+async function validateWorkspaceReviewSettings(value, projects) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Invalid review settings'), { code: 'INVALID_REQUEST' });
+  const allowed = new Set(['provider', 'model', 'effort', 'automatic', 'excludedProjects', 'reportableProjects', 'activityTracking', 'timezone', 'dailyAutomaticLimit', 'confirmations', 'expectedRevision']);
+  if (Object.keys(value).some(key => !allowed.has(key))) throw Object.assign(new Error('Invalid review settings field'), { code: 'INVALID_REQUEST' });
+  const ids = new Set(projects); const list = (field) => { const values = value[field] === undefined ? [] : value[field]; if (!Array.isArray(values) || values.some(item => typeof item !== 'string' || !ids.has(item)) || new Set(values).size !== values.length) throw Object.assign(new Error(`Invalid ${field}`), { code: 'INVALID_REQUEST' }); return values; };
+  const zone = typeof value.timezone === 'string' ? value.timezone : 'UTC'; try { new Intl.DateTimeFormat('en-IE', { timeZone: zone }); } catch { throw Object.assign(new Error('Invalid review time zone'), { code: 'INVALID_REQUEST' }); }
+  const limit = Number(value.dailyAutomaticLimit ?? 6); if (!Number.isInteger(limit) || limit < 1 || limit > 24) throw Object.assign(new Error('Daily automatic limit must be 1 to 24'), { code: 'INVALID_REQUEST' });
+  const confirmations = value.confirmations || {}; if (!confirmations || typeof confirmations !== 'object' || Array.isArray(confirmations) || Object.keys(confirmations).some(key => !['meteredAutomatic', 'belowRecommendedModel'].includes(key)) || Object.values(confirmations).some(flag => typeof flag !== 'boolean')) throw Object.assign(new Error('Invalid review confirmations'), { code: 'INVALID_REQUEST' });
+  if (value.provider !== null && typeof value.provider !== 'string') throw Object.assign(new Error('Invalid review provider'), { code: 'INVALID_REQUEST' }); if (value.model !== null && typeof value.model !== 'string') throw Object.assign(new Error('Invalid review model'), { code: 'INVALID_REQUEST' });
+  if (value.provider || value.model) {
+    const catalog = await providerCatalog(); const provider = catalog.find(item => item.id === value.provider); const model = provider?.models.find(item => item.id === value.model);
+    if (!provider || !model) throw Object.assign(new Error('The selected review provider or model is no longer available'), { code: 'MODEL_UNSUITABLE' });
+    const requiredTokens = reviewContextTokensRequired();
+    if (model.contextWindow && model.contextWindow < requiredTokens) throw Object.assign(new Error(`This model exposes a ${model.contextWindow.toLocaleString()}-token context window, below the ${requiredTokens.toLocaleString()}-token review input-plus-response budget`), { code: 'MODEL_UNSUITABLE' });
+    const tier = reviewModelTier(provider.id, model.id);
+    if (tier !== 'recommended' && confirmations.belowRecommendedModel !== true) throw Object.assign(new Error(`This model's review capability tier is "${tier}", below recommended; validation will reject fabrication, but a weaker model may misjudge priorities without any visible error. Confirm to proceed.`), { code: 'MODEL_UNSUITABLE' });
+    if (value.automatic === true && ['compatible', 'openai', 'anthropic'].includes(provider.id) && confirmations.meteredAutomatic !== true) throw Object.assign(new Error('Enable the metered-provider acknowledgement before automatic reviews'), { code: 'MODEL_UNSUITABLE' });
+  }
+  const selectedEffort = typeof value.effort === 'string' && value.effort ? value.effort : null;
+  if (value.provider && selectedEffort) { const model = (await providerCatalog()).find(item => item.id === value.provider)?.models.find(item => item.id === value.model); if (model?.thinkingLevels?.length && !model.thinkingLevels.includes(selectedEffort)) throw Object.assign(new Error('This reasoning effort is not supported by the selected model'), { code: 'MODEL_UNSUITABLE' }); }
+  const defaultEffort = value.provider ? (await providerCatalog()).find(item => item.id === value.provider)?.models.find(item => item.id === value.model)?.thinkingLevels?.at(-1) || null : null;
+  return { provider: value.provider || null, model: value.model || null, effort: selectedEffort || defaultEffort, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), reportableProjects: list('reportableProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit };
+}
+function validateWorkspaceReviewControl(value, projects) {
+  if (!value || typeof value !== 'object' || typeof value.requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.requestId) || !Number.isInteger(value.expectedRevision) || !value.operation || typeof value.operation !== 'object') throw Object.assign(new Error('Invalid review control request'), { code: 'INVALID_REQUEST' });
+  const operation = value.operation; const ids = new Set(projects); const text = input => typeof input === 'string' && input.trim() && input.length <= 2000;
+  if (['priority', 'clear_priority', 'cadence'].includes(operation.operation) && !ids.has(operation.projectId)) throw Object.assign(new Error('Unknown project'), { code: 'NOT_FOUND' });
+  if (operation.operation === 'priority' && (!['focus', 'next', 'maintain', 'parked'].includes(operation.tier) || !text(operation.reason) || (operation.expiresAt !== null && operation.expiresAt !== undefined && Number.isNaN(Date.parse(operation.expiresAt)))) ) throw Object.assign(new Error('Invalid priority override'), { code: 'INVALID_REQUEST' });
+  if (operation.operation === 'cadence' && operation.cadence !== null && !['daily', 'weekly', 'monthly'].includes(operation.cadence)) throw Object.assign(new Error('Invalid cadence'), { code: 'INVALID_REQUEST' });
+  if (operation.operation === 'guidance' && (!text(operation.text) || (operation.projectId !== null && operation.projectId !== undefined && !ids.has(operation.projectId)))) throw Object.assign(new Error('Invalid guidance'), { code: 'INVALID_REQUEST' });
+  if (operation.operation === 'feedback' && (!['snooze', 'dismiss', 'resolved', 'strip_dismiss'].includes(operation.action) || typeof operation.issueId !== 'string' || typeof operation.evidenceSignature !== 'string' || (operation.action === 'snooze' && (!operation.until || Date.parse(operation.until) <= Date.now())))) throw Object.assign(new Error('Invalid feedback'), { code: 'INVALID_REQUEST' });
+  if (operation.operation === 'remove_guidance' && typeof operation.guidanceId !== 'string') throw Object.assign(new Error('Invalid guidance ID'), { code: 'INVALID_REQUEST' });
+  if (operation.operation === 'undo_feedback' && typeof operation.feedbackId !== 'string') throw Object.assign(new Error('Invalid feedback ID'), { code: 'INVALID_REQUEST' });
+  return { expectedRevision: value.expectedRevision, requestId: value.requestId, operation };
 }
 
 function cleanThreadTitle(value) {
@@ -1119,9 +1182,15 @@ async function refreshDirtyMonitor() {
     for (const project of projects) {
       const audit = await projectDirtyState(project.name); let state = DIRTY_PROJECT_STATE.get(project.name);
       if (!state) { state = { items: new Map(), scannedAt: null }; DIRTY_PROJECT_STATE.set(project.name, state); }
+      const priorItems = new Set(state.items.keys()); const hadPriorScan = Boolean(state.scannedAt);
       for (const item of audit.items) state.items.set(`${item.kind}:${item.path}`, item);
       const snapshot = await dirtyProjectSnapshot(project.root); const previous = DIRTY_PROJECT_SNAPSHOTS.get(project.name);
       if (previous) for (const [key, item] of previous) if (!snapshot.has(key)) state.items.set(`deleted:${key}`, { path: `${item.path}${item.kind === 'directory' ? '/' : ''} (deleted)`, kind: 'deleted' });
+      if (hadPriorScan) {
+        const introduced = [...state.items.keys()].filter(key => !priorItems.has(key)).length;
+        for (let index = 0; index < introduced; index++) void workspaceReview?.recordActivity(project.name, 'change').catch(() => {});
+        if (introduced) void workspaceReview?.noteChange().catch(() => {});
+      }
       DIRTY_PROJECT_SNAPSHOTS.set(project.name, snapshot);
       state.scannedAt = new Date().toISOString(); await dirtyWatchDirectories(project.root, directories);
     }
@@ -1204,6 +1273,22 @@ async function handleRequest(req, res) {
     }
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
+    if (url.pathname === '/api/workspace-review' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await workspaceReview.state()); }
+    if (url.pathname === '/api/workspace-review/runs' && req.method === 'POST') { assertChatRequest(req); const result = await workspaceReview.run('manual'); return json(res, result.reused ? 200 : 202, result); }
+    if (url.pathname === '/api/workspace-review/pause' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body.paused !== 'boolean') throw Object.assign(new Error('A paused boolean is required'), { code: 'INVALID_REQUEST' }); return json(res, 200, await workspaceReview.setPaused(body.paused)); }
+    if (url.pathname === '/api/workspace-review/settings' && req.method === 'PUT') {
+      assertChatRequest(req); const body = await readJson(req); const catalog = await projectData('/workspace'); const settings = await validateWorkspaceReviewSettings(body, catalog.projects.filter(item => item.name !== 'workspace').map(item => item.name));
+      return json(res, 200, { settings: await workspaceReview.settings(settings, body.expectedRevision) });
+    }
+    if (url.pathname === '/api/workspace-review/controls' && req.method === 'GET') { assertChatRequest(req); const state = await workspaceReview.state(); return json(res, 200, { revision: state.controlsRevision, controls: await workspaceReview.store.controls() }); }
+    if (url.pathname === '/api/workspace-review/controls' && req.method === 'POST') {
+      assertChatRequest(req); const body = await readJson(req); const catalog = await projectData('/workspace'); return json(res, 200, await workspaceReview.control(validateWorkspaceReviewControl(body, catalog.projects.filter(item => item.name !== 'workspace').map(item => item.name))));
+    }
+    if (url.pathname === '/api/workspace-review/strip' && req.method === 'GET') { assertChatRequest(req); const projectId = url.searchParams.get('projectId'); const catalog = await projectData('/workspace'); if (!projectId || !catalog.projects.some(item => item.name === projectId && item.name !== 'workspace')) throw Object.assign(new Error('Project not found'), { code: 'NOT_FOUND' }); return json(res, 200, await workspaceReview.strip(projectId)); }
+    if (url.pathname === '/api/workspace-review/brief' && req.method === 'GET') { assertChatRequest(req); const projectId = url.searchParams.get('projectId'); const catalog = await projectData('/workspace'); if (!projectId || !catalog.projects.some(item => item.name === projectId && item.name !== 'workspace')) throw Object.assign(new Error('Project not found'), { code: 'NOT_FOUND' }); return json(res, 200, await workspaceReview.brief(projectId)); }
+    if (url.pathname === '/api/workspace-review/focus' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await workspaceReview.focus()); }
+    if (url.pathname === '/api/workspace-review/reports' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (typeof body.projectId !== 'string') throw Object.assign(new Error('A project ID is required'), { code: 'INVALID_REQUEST' }); return json(res, 202, await workspaceReview.runReport(body.projectId)); }
+    if (url.pathname === '/api/workspace-review/reports' && req.method === 'GET') { assertChatRequest(req); const projectId = url.searchParams.get('projectId'); if (!projectId) throw Object.assign(new Error('A project ID is required'), { code: 'INVALID_REQUEST' }); const catalog = await projectData('/workspace'); if (!catalog.projects.some(item => item.name === projectId && item.name !== 'workspace')) throw Object.assign(new Error('Project not found'), { code: 'NOT_FOUND' }); return json(res, 200, await workspaceReview.reportStatus(projectId)); }
     if (url.pathname === '/api/projects' && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createWorkspaceProject(await readJson(req))); }
     const entryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries$/);
     if (entryMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
@@ -1287,7 +1372,7 @@ async function handleRequest(req, res) {
         const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
         const initiator = body.initiator === 'system' ? 'system' : 'user';
         current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, createdAt: new Date().toISOString() }); await saveThread(current);
-        active = { threadId: current.id, project: current.project, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); return current;
+        active = { threadId: current.id, project: current.project, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); if (current.project !== 'workspace') void workspaceReview?.recordActivity(current.project, 'chat').catch(() => {}); return current;
       }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
@@ -1348,7 +1433,13 @@ async function handleRequest(req, res) {
     }
     if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
-  } catch (error) { json(res, error.status || (error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400), error.code ? { error: { code: error.code, message: error.message } } : { error: error.message }); }
+  } catch (error) {
+    if (error?.code && ['INVALID_REQUEST', 'STALE_REVISION', 'NOT_FOUND', 'NOT_CONFIGURED', 'MODEL_UNSUITABLE', 'INVALID_REVIEW', 'INPUT_TOO_LARGE', 'SUPERSEDED', 'PROVIDER_UNAVAILABLE', 'REVIEW_TIMEOUT', 'STORAGE_ERROR'].includes(error.code)) {
+      const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'STALE_REVISION' || error.code === 'NOT_CONFIGURED' || error.code === 'MODEL_UNSUITABLE' ? 409 : error.code === 'PROVIDER_UNAVAILABLE' || error.code === 'REVIEW_TIMEOUT' ? 503 : 400;
+      return json(res, status, { error: error.message, code: error.code });
+    }
+    json(res, error.status || (error.message === 'Not found' || error.message === 'Chat thread not found' ? 404 : 400), error.code ? { error: { code: error.code, message: error.message } } : { error: error.message });
+  }
 }
 
 async function handleAssetRequest(req, res) {
@@ -1359,7 +1450,13 @@ async function handleAssetRequest(req, res) {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname.startsWith('/workspace/')) return asset(req, res, url.pathname);
     return respond(res, 404, 'Not found', 'text/plain; charset=utf-8');
-  } catch (error) { return respond(res, 400, 'Bad request', 'text/plain; charset=utf-8'); }
+  } catch (error) {
+    if (error?.code && ['INVALID_REQUEST', 'STALE_REVISION', 'NOT_FOUND', 'NOT_CONFIGURED', 'MODEL_UNSUITABLE', 'INVALID_REVIEW', 'INPUT_TOO_LARGE', 'SUPERSEDED', 'PROVIDER_UNAVAILABLE', 'REVIEW_TIMEOUT', 'STORAGE_ERROR'].includes(error.code)) {
+      const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'STALE_REVISION' || error.code === 'NOT_CONFIGURED' || error.code === 'MODEL_UNSUITABLE' ? 409 : error.code === 'PROVIDER_UNAVAILABLE' || error.code === 'REVIEW_TIMEOUT' ? 503 : 400;
+      return json(res, status, { error: error.message, code: error.code });
+    }
+    return respond(res, 400, 'Bad request', 'text/plain; charset=utf-8');
+  }
 }
 
 const server = http.createServer(handleRequest);
@@ -1380,6 +1477,8 @@ function listen(serverInstance, host, port) {
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
   await loadRuntimeSettings();
+  workspaceReview = new WorkspaceReviewCoordinator({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT, provider: workspaceReviewProvider, timeZone: currentTimeZone(), isChatActive: () => ACTIVE_TURNS.size > 0, isIgnored });
+  workspaceReview.start();
   await refreshDirtyMonitor();
   const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
   dirtyReconciliation.unref();

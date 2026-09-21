@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Echo project home · OK Workbench mockup</title>
+  <link rel="stylesheet" href="workspace-overview.css">
+  <script src="project-home.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to project</a>
+  <div class="prototype-bar">
+    <span><strong>INTERACTIVE CONCEPT</strong><span class="prototype-note"> Project-level companion to the workspace overview · fictional content · no live AI</span></span>
+    <a href="workspace-overview.html">Workspace overview mockup ↗</a>
+  </div>
+  <header class="topbar">
+    <a class="brand" href="workspace-overview.html">OK<span>Workbench</span></a>
+    <span class="workspace-name">Personal workspace <span class="muted">/ Echo</span></span>
+    <button class="quiet-button" id="project-chat">Project chat <span aria-hidden="true">↗</span></button>
+  </header>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <nav aria-label="Workspace navigation">
+        <p class="nav-label">Workspace</p>
+        <a class="nav-item" href="workspace-overview.html"><span aria-hidden="true">◫</span> Overview</a>
+        <button class="nav-item" data-preview="Workspace documents"><span aria-hidden="true">▤</span> Documents</button>
+        <details class="mobile-projects" open>
+          <summary class="nav-label">Projects <span class="project-count">6</span></summary>
+          <div id="project-nav"></div>
+        </details>
+        <p class="nav-label">Echo documents</p>
+        <button class="nav-item" data-preview="echo/index.md"><span aria-hidden="true">▤</span> index.md</button>
+        <button class="nav-item" data-preview="echo/status.md"><span aria-hidden="true">▤</span> status.md</button>
+        <button class="nav-item" data-preview="echo/log.md"><span aria-hidden="true">▤</span> log.md</button>
+      </nav>
+      <div class="sidebar-footer"><span class="local-mark" aria-hidden="true"></span> Local workspace<span>The brief below renders from the saved review.<br>No provider call is made to show it.</span></div>
+    </aside>
+    <main id="main" tabindex="-1">
+      <div class="preview-controls"><span class="muted">Project-home concept · companion to the overview mockup</span><button id="reset" class="text-button">Reset demo</button></div>
+
+      <div id="strip" class="attention-strip" role="note" aria-label="Attention elsewhere">
+        <span class="strip-label" aria-hidden="true">Elsewhere</span>
+        <span class="strip-text"><strong>Atlas</strong> needs a scope decision before final testing <span class="runway" title="Evidenced date: 2026-09-25">4 days left</span></span>
+        <span class="strip-actions"><a href="workspace-overview.html">Open overview</a><button class="text-button" id="strip-dismiss" aria-label="Dismiss this notice for its current evidence">×</button></span>
+      </div>
+
+      <div class="page-heading project-heading">
+        <div><p class="eyebrow">PROJECT</p><h1>Echo</h1><p class="review-meta">Ship the public beta · brief from the review 5 minutes ago</p></div>
+        <div class="header-actions"><button id="session-button">I have 30 minutes</button><button id="discuss-button" class="primary-button">Discuss next step <span aria-hidden="true">↗</span></button></div>
+      </div>
+
+      <section class="project-brief" aria-labelledby="brief-title">
+        <div class="brief-top">
+          <h2 id="brief-title" class="visually-hidden">Project brief</h2>
+          <div class="brief-chips">
+            <button class="priority-control" data-dialog="priority" aria-label="Change priority for Echo">Next<span aria-hidden="true">⌄</span><small>Inferred</small></button>
+            <span class="badge">Drifting</span>
+            <span class="muted brief-chip-note">Same milestone deferred twice · reviewed 5 minutes ago</span>
+          </div>
+          <button class="text-button" id="brief-toggle" aria-expanded="true" aria-controls="brief-body">Collapse brief</button>
+        </div>
+        <div id="brief-body">
+          <div class="brief-grid">
+            <div class="brief-cell">
+              <p class="eyebrow">WHERE YOU LEFT OFF</p>
+              <p><strong>Last completed:</strong> export settings screen merged (log.md · 18 Sep).</p>
+              <p><strong>Recorded next action:</strong> choose a smaller beta scope. <button class="text-button" data-preview="echo/status.md">status.md ↗</button></p>
+            </div>
+            <div class="brief-cell">
+              <p class="eyebrow">NEXT USEFUL STEP</p>
+              <p class="first-step"><strong>Start here (≈15 min)</strong> Write the one-sentence minimum beta scope in echo/status.md.</p>
+              <p class="escalation-note"><strong>Raised in 3 reviews without a response.</strong> If no smaller scope is agreed before October, the 2 October check-in arrives with nothing finishable to show (echo/log.md).</p>
+            </div>
+          </div>
+          <div class="item-actions brief-actions">
+            <button class="text-button" data-dialog="park">Park Echo…</button>
+            <button class="text-button" data-dialog="correct">Correct assessment</button>
+            <button class="text-button" data-preview="echo/log.md">Cited evidence ↗</button>
+          </div>
+        </div>
+      </section>
+
+      <article class="document-view">
+        <p class="eyebrow">ECHO / INDEX.MD · EXISTING DOCUMENT VIEW</p>
+        <h2>Echo — public beta</h2>
+        <p>Outcome: ship a public beta that one external user can complete end to end.</p>
+        <h3>Concepts</h3>
+        <ul>
+          <li><button class="text-button" data-preview="echo/status.md">Current status</button></li>
+          <li><button class="text-button" data-preview="echo/log.md">Project log</button></li>
+          <li><button class="text-button" data-preview="echo/beta-scope.md">Beta scope (draft)</button></li>
+        </ul>
+        <p class="muted">This block stands in for the existing Markdown document view. The project brief above is additive; the document experience is unchanged.</p>
+      </article>
+
+      <p class="demo-footnote">Design preview · Monday, 21 September 2026, 09:45 · Europe/Dublin<br>No project files are read or changed by this page.</p>
+    </main>
+  </div>
+  <div id="announcement" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header"><div><p class="eyebrow" id="dialog-kicker">ECHO</p><h2 id="dialog-title">Details</h2></div><form method="dialog"><button class="close-button" aria-label="Close dialog">×</button></form></div>
+    <div id="dialog-body"></div>
+  </dialog>
+</body>
+</html>

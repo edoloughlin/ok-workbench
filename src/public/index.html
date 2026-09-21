@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="/app.css">
   </head>
   <body>
+    <a class="skip-link" href="#document">Skip to main content</a>
     <header class="topbar">
       <a class="brand" href="/workspace/">OK<span>Workbench</span></a>
       <div class="project-summary"><span id="project-name">Loading</span><span class="stats" id="stats"></span></div>
@@ -26,7 +27,7 @@
       </div>
     </header>
     <div class="layout" id="app-layout">
-      <aside class="sidebar"><nav id="file-nav" aria-label="Project files"></nav></aside>
+      <aside class="sidebar"><details class="sidebar-disclosure" open><summary class="sidebar-disclosure-summary">Workspace navigation</summary><nav id="file-nav" aria-label="Project files"></nav></details></aside>
       <div class="workspace">
         <main id="document" class="document" aria-live="polite"><p class="loading">Opening document…</p></main>
         <div id="chat-splitter" class="chat-splitter" role="separator" tabindex="0" aria-label="Resize chat pane"></div>
@@ -69,6 +70,15 @@
         <label>Description <textarea id="create-project-description" name="description" rows="2" maxlength="280" placeholder="A brief statement of the project’s purpose"></textarea></label>
         <p id="create-project-error" class="create-project-error" role="alert" hidden></p>
         <footer><button id="create-project-cancel" type="button">Cancel</button><button id="create-project-submit" type="submit">Create project</button></footer>
+      </form>
+    </dialog>
+    <dialog id="external-link-dialog" class="external-link-dialog" aria-labelledby="external-link-title">
+      <form id="external-link-form">
+        <header class="external-link-header"><div><span class="chat-kicker">External symlink</span><h2 id="external-link-title">Enable linked content?</h2></div><button id="external-link-close" type="button" aria-label="Close">×</button></header>
+        <p>This link is outside the workspace. Enabling it gives this project read-only browser access and lets new chat turns use a private snapshot of its contents.</p>
+        <dl class="external-link-details"><div><dt>Project path</dt><dd id="external-link-alias"></dd></div><div><dt>Resolved destination</dt><dd id="external-link-target"></dd></div></dl>
+        <p id="external-link-error" class="create-project-error" role="alert" hidden></p>
+        <footer><button id="external-link-cancel" type="button">Cancel</button><button id="external-link-approve" type="submit">Enable read access</button></footer>
       </form>
     </dialog>
     <dialog id="chat-auth-dialog" class="chat-auth-dialog" aria-labelledby="chat-auth-dialog-title">

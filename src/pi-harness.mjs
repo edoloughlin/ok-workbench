@@ -261,6 +261,7 @@ export async function configuredPiProviders({ stateDir, env = process.env } = {}
         models: models.map(model => ({
           id: model.id,
           label: model.name || model.id,
+          contextWindow: Number(model.contextWindow || model.contextLength || model.context_size || 0) || null,
           supportsSteering: true,
           // Pi maps only exceptional values. Unmapped low-through-high levels
           // use the provider default; xhigh and max require explicit support.
@@ -344,7 +345,7 @@ export async function searchWeb(query, { maxResults = 5, fetchImpl = fetch, sign
   return { query: query.trim(), results };
 }
 
-export async function createTurnCapabilities({ workspaceRoot, projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false }) {
+export async function createTurnCapabilities({ workspaceRoot, projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, noWorkspaceTools = false }) {
   const [workspace, project] = await Promise.all([realpath(workspaceRoot), realpath(projectRoot)]);
   const relative = path.relative(workspace, project);
   if (relative && (relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) throw new Error('Project root is outside the workspace');
@@ -370,7 +371,12 @@ export async function createTurnCapabilities({ workspaceRoot, projectRoot, readG
     external.push({ id: grant.id, linkPath: alias, canonicalTarget: target, kind: grant.kind, capturedAt: new Date().toISOString() }); aliases.add(alias); externalIds.add(grant.id);
   }
   if (workspaceMode && project !== workspace) throw new Error('Workspace mode requires the workspace root');
-  if (project === workspace && !workspaceMode) throw new Error('Workspace-wide access requires explicit workspace mode');
+  // The explicit-workspace-mode guard exists to stop an ordinary, tooled
+  // chat turn from silently getting broad workspace file access. A
+  // no-tools turn (the workspace review's zero-tool provider call) never
+  // creates a tool worker or grants any filesystem capability from this
+  // value, so the guard does not apply to it.
+  if (project === workspace && !workspaceMode && !noWorkspaceTools) throw new Error('Workspace-wide access requires explicit workspace mode');
   return { workspace, selectedProject: { root: project, read: true, write: true }, workspaceMode, extraReadGrants: grants, externalReadGrants: external };
 }
 export function projectToolResult(toolResult, git) {
@@ -381,8 +387,8 @@ export function projectToolResult(toolResult, git) {
 
 export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
-  const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, externalReadGrants, workspaceMode });
-  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: true, maxRetries: 2 } });
+  const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, externalReadGrants, workspaceMode, noWorkspaceTools });
+  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: !noWorkspaceTools }, retry: { enabled: !noWorkspaceTools, maxRetries: noWorkspaceTools ? 0 : 2 } });
   const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
   const agentDir = path.join(stateDir, 'pi-agent');
   const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
@@ -527,5 +533,12 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
   });
   const abort = () => session.abort().catch(() => {}); signal?.addEventListener('abort', abort, { once: true });
   onSteerReady?.(message => session.steer(message));
-  try { await session.prompt(historyPrompt(messages)); } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
+  try {
+    await session.prompt(historyPrompt(messages));
+    if (noWorkspaceTools) {
+      const lastAssistant = session.messages.findLast(message => message.role === 'assistant');
+      if (lastAssistant?.stopReason === 'length') throw new Error('The selected model stopped before completing the review response (output limit)');
+      if (lastAssistant?.stopReason === 'error') throw new Error(lastAssistant.errorMessage || 'The selected model failed during the review');
+    }
+  } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
 }

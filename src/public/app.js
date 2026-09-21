@@ -7,6 +7,10 @@ const createProjectUi = {
   name: document.querySelector('#create-project-name'), id: document.querySelector('#create-project-id'), description: document.querySelector('#create-project-description'),
   cancel: document.querySelector('#create-project-cancel'), close: document.querySelector('.create-project-header button'), submit: document.querySelector('#create-project-submit'), error: document.querySelector('#create-project-error')
 };
+const externalLinkUi = {
+  dialog: document.querySelector('#external-link-dialog'), form: document.querySelector('#external-link-form'), alias: document.querySelector('#external-link-alias'), target: document.querySelector('#external-link-target'),
+  close: document.querySelector('#external-link-close'), cancel: document.querySelector('#external-link-cancel'), approve: document.querySelector('#external-link-approve'), error: document.querySelector('#external-link-error')
+};
 let displayedDocument = null;
 let pageLoadSequence = 0;
 let pendingEntryRename = null;
@@ -369,6 +373,12 @@ function treeNode(item) {
     const renamable = item.path.split('/').pop() !== 'index.md';
     return `<a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}" ${renamable ? 'data-entry-type="page"' : ''}>${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a>`;
   }
+  if (item.type === 'external-link') {
+    const status = item.status === 'approved' ? 'External · read only' : item.status === 'changed' ? 'External link changed' : item.status === 'missing' ? 'External link missing' : 'External link · enable';
+    if (item.status === 'approved') return `<a class="nav-link tree-link tree-page external-link-approved ${active(item.path) ? 'active' : ''}" href="${item.path}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></a>`;
+    return `<button class="external-link-request tree-link tree-page" type="button" data-external-link="${escapeHtml(item.linkPath)}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></button>`;
+  }
+  if (item.type === 'internal-link') return `<a class="nav-link tree-link tree-page" href="${item.path}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>Linked inside workspace</small></span></a>`;
   if (pendingEntryRename?.path === item.path) return `<div class="tree-inline-directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}"><input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Directory name"></form></div>`;
   const containsPendingEntry = pendingEntryRename?.path.startsWith(`${item.path}/`);
   return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-entry-type="directory">${escapeHtml(item.label)}</a>${entryCreationActions(item.path)}</summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
@@ -391,30 +401,258 @@ function renderFile(file, kicker) {
   return `${header}<div class="binary-view"><p>This file cannot be previewed safely in the browser.</p><a href="${file.url}" target="_blank" rel="noopener">Open or download file ↗</a></div>`;
 }
 
+let workspaceReviewState = null;
+let workspaceReviewPoll = null;
+let workspaceReviewShowAll = false;
+let workspaceReviewNotice = null;
+let workspaceReviewNoticeTimer = null;
+function setWorkspaceReviewNotice(message, feedbackId) {
+  if (workspaceReviewNoticeTimer) clearTimeout(workspaceReviewNoticeTimer);
+  workspaceReviewNotice = { message, feedbackId };
+  const region = document.querySelector('#workspace-review-status');
+  if (region) region.innerHTML = `${reviewEscape(message)} ${feedbackId ? `<button class="quiet" data-review-undo-feedback="${reviewEscape(feedbackId)}">Undo</button>` : ''}`;
+  workspaceReviewNoticeTimer = setTimeout(() => { workspaceReviewNotice = null; if (region) region.textContent = ''; }, 12000);
+}
+function stopWorkspaceReviewPolling() { if (workspaceReviewPoll) clearTimeout(workspaceReviewPoll); workspaceReviewPoll = null; }
+function scheduleWorkspaceReviewPolling(state) {
+  stopWorkspaceReviewPolling(); if (document.hidden || routePath() !== '/workspace' || location.hash) return;
+  const delay = state?.job?.state === 'running' ? 2000 : 30000;
+  workspaceReviewPoll = setTimeout(async () => { try { await refreshWorkspaceOverview(); } catch { /* Retain the last rendered, non-live state. */ } finally { if (routePath() === '/workspace' && !location.hash) scheduleWorkspaceReviewPolling(workspaceReviewState); } }, delay);
+}
+function reviewEscape(value) { return escapeHtml(String(value || '')); }
+function reviewUrgency(value, kind) { return value === 'now' ? 'Act now' : value === 'soon' ? 'This week' : kind === 'drift' ? 'Recover direction' : kind === 'update' ? 'Needs context' : 'Prevent drift'; }
+function reviewPriority(value) { return ({ focus: 'First', next: 'Next', maintain: 'Maintain', parked: 'Parked' })[value] || value; }
+function reviewTrajectory(value) { return ({ on_course: 'On course', watch: 'Losing momentum', at_risk: 'At risk', drifting: 'Drifting', unknown: 'Needs an update' })[value] || value; }
+function reviewLifecycleLabel(project) { return project.effectiveLifecycle === 'active' || project.effectiveLifecycle === 'unknown' ? reviewTrajectory(project.trajectory) : project.effectiveLifecycle; }
+function reviewTierLabel(tier) { return ({ recommended: 'Recommended', capable: 'Capable', unverified: 'Unverified', unsupported: 'Not supported' })[tier] || 'Unverified'; }
+function reviewTierHint(tier) { return ({ recommended: 'This model is verified as recommended for workspace reviews.', capable: 'This model is verified as capable but not the top tier; judgment may be less thorough on complex portfolios.', unsupported: 'Fixture evaluation found this model unsuitable for review judgment; a below-recommended confirmation is required.', unverified: 'This model has not been evaluated against the review fixtures; a below-recommended confirmation is required.' })[tier] || ''; }
+function reviewRunway(item) { return item.runway?.label ? `<span class="workspace-runway">${reviewEscape(item.runway.label)}</span>` : ''; }
+function reviewErrorMessage(error) {
+  // Only show fixed, safe explanations for known validation failures. Never
+  // display a raw model response or arbitrary validator/provider text here.
+  if (error?.code === 'INVALID_REVIEW') {
+    if (error.message?.startsWith('claimEvidence excerpt is not in its cited source')) return 'A supporting quote did not exactly match its cited document. The review was not saved.';
+    if (error.message?.startsWith('projects must contain')) return 'The model omitted one or more projects from the review. The review was not saved.';
+    if (error.message?.startsWith('project evidenceIds must contain')) return 'A project assessment did not cite any collected evidence. The review was not saved.';
+    if (error.message?.startsWith('non-active lifecycle needs supporting claimEvidence')) return 'A project was marked waiting, parked, or complete without the required supporting quote. The review was not saved.';
+    return 'Could not produce a supported review.';
+  }
+  return error?.message || String(error || '');
+}
+function reviewErrorBanner(error) {
+  if (!error) return '';
+  // state.error is the last *recorded* attempt, persisted across restarts so
+  // a failure is never silently hidden: it is not a live health check and
+  // will not clear on its own. Say so, so a reload is never mistaken for a
+  // fresh check, and point at the one action that can clear it.
+  const at = error.at ? new Date(error.at) : null;
+  const meta = at ? `<span class="workspace-error-meta">Last attempted <time title="${reviewEscape(at.toISOString())}">${reviewEscape(at.toLocaleString())}</time>; this stays until you try again.</span>` : '';
+  return `<p class="workspace-error">Review unavailable: ${reviewEscape(reviewErrorMessage(error))}</p>${meta ? `<p class="workspace-error-meta-line">${meta}</p>` : ''}`;
+}
+function reviewSource(item, sources) { const source = sources?.find(value => value.id === item.evidenceIds?.[0]); if (!source?.path) return ''; const prefix = source.projectId ? `/workspace/${encodeURIComponent(source.projectId)}/` : '/workspace/'; const href = `${prefix}${source.path.split('/').map(encodeURIComponent).join('/')}`; return `<a class="workspace-source" href="${href}">Evidence: ${reviewEscape(source.path)}${source.heading ? ` · ${reviewEscape(source.heading)}` : ''}</a>`; }
+async function loadWorkspaceReview() {
+  const response = await chatApi('/api/workspace-review'); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not load workspace review'); workspaceReviewState = data; return data;
+}
+function workspaceOverviewNav(data) {
+  const projects = data.projects.filter(item => item.name !== 'workspace');
+  return `<div class="breadcrumbs" aria-label="Current location"><a href="/workspace/" aria-current="page">Workspace overview</a></div><p class="nav-label">Workspace</p><a class="nav-link active" href="/workspace/">Overview</a><a class="nav-link" href="/workspace/index.md">Documents</a><hr class="nav-rule"><p class="nav-label">Projects</p><div class="project-list">${projects.map(projectLink).join('')}</div>`;
+}
+function renderWorkspaceOverview(state) {
+  const review = state.review; const sources = review?.sources || []; const tab = sessionStorage.getItem('ok-workbench-workspace-tab') || 'today'; const active = ['today', 'projects', 'focus'].includes(tab) ? tab : 'today';
+  if (!review) {
+    const running = state.job?.state === 'running';
+    const label = running ? 'Reviewing\u2026' : (state.settings?.provider ? 'Review now' : 'Set up reviews');
+    const action = running ? '' : (state.settings?.provider ? 'data-review-run' : 'data-review-settings');
+    const heading = running ? 'Reviewing your projects for the first time\u2026' : (state.settings?.provider ? 'Review your projects when you are ready.' : 'Set up a read-only workspace review.');
+    documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite">${running ? 'Reviewing\u2026 this can take a little while on the first run.' : ''}</p><p class="doc-kicker">WORKSPACE</p><h1>Workspace overview</h1>${reviewErrorBanner(state.error)}${state.modelWarning ? `<p class="workspace-error">${reviewEscape(state.modelWarning)}</p>` : ''}<div class="workspace-empty"><h2>${reviewEscape(heading)}</h2><p>The review reads bounded project evidence, highlights priorities and risks, and never edits your files or starts work.</p><div class="workspace-actions"><button class="workspace-primary" ${action} ${running ? 'disabled' : ''}>${reviewEscape(label)}</button>${state.settings?.provider ? '<button data-review-settings>Review settings</button>' : ''}</div></div></section>`;
+    scheduleWorkspaceReviewPolling(state);
+    return;
+  }
+  const attention = review.attention || []; const visible = workspaceReviewShowAll ? attention : attention.slice(0, 3); const projects = review.projects || []; const focus = projects.find(project => project.projectId === review.assessment?.focusProjectId) || projects[0];
+  const tabs = `<div class="workspace-tabs" role="tablist" aria-label="Workspace overview"><button role="tab" id="review-tab-today" aria-selected="${active === 'today'}" aria-controls="review-panel-today" data-review-tab="today">Today</button><button role="tab" id="review-tab-projects" aria-selected="${active === 'projects'}" aria-controls="review-panel-projects" data-review-tab="projects">All projects <span>${projects.length}</span></button>${state.settings?.activityTracking !== false ? `<button role="tab" id="review-tab-focus" aria-selected="${active === 'focus'}" aria-controls="review-panel-focus" data-review-tab="focus">Focus report</button>` : ''}</div>`;
+  const itemMarkup = visible.length ? visible.map(item => `<article class="workspace-attention"><div><span class="workspace-project">${reviewEscape(projects.find(project => project.projectId === item.projectId)?.outcome || item.projectId)}</span><span class="workspace-urgency ${item.urgency}">${reviewUrgency(item.urgency, item.kind)}</span>${reviewRunway(item)}</div><h3>${reviewEscape(item.title)}</h3><p>${reviewEscape(item.inference)}</p>${item.escalation?.mode === 'consequence' ? `<p class="workspace-escalation"><strong>Consequence to avoid:</strong> ${reviewEscape(item.action)} Start with the recovery step below.</p>` : item.escalation?.mode === 'pattern' ? '<p class="workspace-escalation">This has remained visible across reviews. You can choose a smaller scope or park the project without losing the record.</p>' : ''}<p class="workspace-first-step"><strong>Start here:</strong> ${reviewEscape(item.firstStep)}</p><div class="workspace-actions"><button data-review-discuss="${reviewEscape(item.id)}">Discuss next step</button><button data-review-session="${reviewEscape(item.id)}">I have 30 minutes</button><button class="quiet" data-review-revisit="${reviewEscape(item.id)}">Revisit…</button>${item.escalation?.mode === 'pattern' ? `<button class="quiet" data-review-park="${reviewEscape(item.projectId)}">Park this project</button>` : ''}</div><details><summary>Why this matters</summary><p><strong>Observed:</strong> ${reviewEscape(item.observation)}</p><p><strong>Proposed:</strong> ${reviewEscape(item.action)}</p>${reviewSource(item, sources)}<div class="workspace-actions"><button class="quiet" data-review-correct="${reviewEscape(item.id)}">Correct assessment</button><button class="quiet" data-review-dismiss="${reviewEscape(item.id)}">Dismiss</button><button class="quiet" data-review-resolved="${reviewEscape(item.id)}">Resolved elsewhere</button></div></details></article>`).join('') : '<p class="workspace-quiet">No immediate action surfaced from the saved evidence.</p>';
+  const changes = review.assessment?.changes || []; const sinceLastReview = changes.length ? `<section class="workspace-since-last"><p class="doc-kicker">SINCE THE LAST REVIEW</p><ul>${changes.map(item => `<li>${reviewEscape(item.text)} ${reviewSource(item, sources)}</li>`).join('')}</ul></section>` : '';
+  const deferred = review.deferred || []; const deferredSection = deferred.length ? `<section class="workspace-deferred"><p class="doc-kicker">DEFERRED</p><ul>${deferred.map(item => `<li><span>${reviewEscape(item.title)}</span><small>Revisit ${reviewEscape(new Date(item.feedback.until).toLocaleString())}</small><button class="quiet" data-review-undo-feedback="${reviewEscape(item.feedback.id)}">Undo</button></li>`).join('')}</ul></section>` : '';
+  const closure = !attention.length && !deferred.length && !review.assessment?.question ? '<p class="workspace-closure">Nothing else here needs a decision right now.</p>' : '';
+  const today = `<section id="review-panel-today" role="tabpanel" aria-labelledby="review-tab-today" ${active === 'today' ? '' : 'hidden'}><div class="workspace-brief"><p class="doc-kicker">RECOMMENDED FOCUS</p><h2>${reviewEscape(review.assessment?.headline || `Focus on ${focus?.projectId || 'your next project'}`)}</h2><p>${reviewEscape(review.assessment?.summary || 'Review the project evidence to choose the next useful action.')}</p>${focus ? `<button data-review-session-focus="${reviewEscape(focus.projectId)}">I have 30 minutes</button>` : ''}</div>${sinceLastReview}<section class="workspace-attention-list"><div class="workspace-section-heading"><div><h2>Needs attention</h2><p>Small, evidenced next steps across your projects.</p></div>${attention.length > 3 ? `<button class="quiet" data-review-show-all>${workspaceReviewShowAll ? 'Show fewer' : `Show all ${attention.length}`}</button>` : ''}</div>${itemMarkup}</section>${deferredSection}${review.assessment?.question ? `<section class="workspace-question"><p class="doc-kicker">ONE THING TO CLARIFY</p><h2>${reviewEscape(review.assessment.question.text)}</h2><p>${reviewEscape(review.assessment.question.reason)}</p>${review.assessment.question.options.map(option => `<button data-review-answer="${reviewEscape(option)}">${reviewEscape(option)}</button>`).join(' ')} <button class="quiet" data-review-guidance>Add context…</button></section>` : ''}${closure}</section>`;
+  const rows = projects.map(project => `<tr><td data-label="Project / outcome"><strong>${reviewEscape(project.projectId)}</strong><small>${reviewEscape(project.outcome)}</small></td><td data-label="Priority"><button class="workspace-priority" data-review-priority="${reviewEscape(project.projectId)}">${reviewEscape(reviewPriority(project.effectivePriority?.priority || project.priority))} <small>${project.effectivePriority?.source === 'user' ? 'Your priority' : 'Inferred'}</small></button></td><td data-label="Trajectory"><span class="workspace-trajectory ${reviewEscape(project.trajectory)}">${reviewEscape(reviewLifecycleLabel(project))}</span><small>${reviewEscape(project.assessment)}</small></td><td data-label="Next useful step">${reviewEscape(project.nextAction || 'No next action recorded')}${state.settings?.reportableProjects?.includes(project.projectId) ? `<br><button class="quiet" data-review-report="${reviewEscape(project.projectId)}">Draft progress report</button>` : ''}</td></tr>`).join('');
+  const projectsPanel = `<section id="review-panel-projects" role="tabpanel" aria-labelledby="review-tab-projects" ${active === 'projects' ? '' : 'hidden'}><div class="workspace-section-heading"><div><h2>All projects</h2><p>Priority and trajectory remain separate judgments.</p></div></div><div class="workspace-table-wrap"><table class="workspace-table"><thead><tr><th>Project / outcome</th><th>Priority</th><th>Trajectory</th><th>Next useful step</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
+  const focusPanel = `<section id="review-panel-focus" role="tabpanel" aria-labelledby="review-tab-focus" ${active === 'focus' ? '' : 'hidden'}><div class="workspace-section-heading"><div><h2>Where your attention went</h2><p>Activity is not progress. Counts include chat turns and changed-file events.</p></div></div><div id="workspace-focus-content" class="workspace-focus-loading">Loading local activity…</div></section>`;
+  const reviewedTime = review.completedAt ? new Date(review.completedAt) : null; const staleNotice = state.freshness === 'stale' ? '<span class="workspace-stale">Changed since this review</span>' : '';
+  const nextCheck = state.nextCheckAt ? `<time title="${reviewEscape(state.nextCheckAt)}">Next check ${new Date(state.nextCheckAt).toLocaleString()}</time>` : 'No automatic check scheduled'; const monitor = state.settings?.automatic ? `${state.monitor === 'paused' ? 'Automatic reviews are paused' : 'Automatic reviews are enabled'} while Workbench is running. ${nextCheck}. Scope: ${review.coverage?.filter(item => item.included).length || 0} included projects; saved reviews never edit files or start work.` : 'Automatic reviews are off. You can request a manual review; saved reviews never edit files or start work.';
+  documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite"></p><header class="workspace-overview-header"><div><p class="doc-kicker">THE BIG PICTURE</p><h1>Workspace overview</h1><p>${state.job?.state === 'running' ? 'Reviewing changes… ' : ''}${reviewedTime ? `<time title="${reviewedTime.toISOString()}">Last reviewed ${reviewedTime.toLocaleString()}</time>` : 'No completed review'} · ${review.coverage?.filter(item => item.included).length || 0} projects covered ${staleNotice}</p></div><div class="workspace-header-actions"><button data-review-settings>Monitoring</button>${state.settings?.automatic ? `<button data-review-pause="${state.monitor !== 'paused'}">${state.monitor === 'paused' ? 'Resume reviews' : 'Pause reviews'}</button>` : ''}<button class="workspace-primary" data-review-run ${state.job?.state === 'running' ? 'disabled' : ''}>${state.job?.state === 'running' ? 'Reviewing…' : 'Review now'}</button></div></header>${reviewErrorBanner(state.error)}${state.modelWarning ? `<p class="workspace-error">${reviewEscape(state.modelWarning)}</p>` : ''}${tabs}${today}${projectsPanel}${focusPanel}<footer class="workspace-monitor">${monitor}</footer></section>`;
+  if (active === 'focus' && state.settings?.activityTracking !== false) void renderFocusReport();
+  if (workspaceReviewNotice) { const region = document.querySelector('#workspace-review-status'); if (region) region.innerHTML = `${reviewEscape(workspaceReviewNotice.message)} ${workspaceReviewNotice.feedbackId ? `<button class="quiet" data-review-undo-feedback="${reviewEscape(workspaceReviewNotice.feedbackId)}">Undo</button>` : ''}`; }
+  scheduleWorkspaceReviewPolling(state);
+}
+async function renderFocusReport() { const target = document.querySelector('#workspace-focus-content'); if (!target) return; try { const response = await chatApi('/api/workspace-review/focus'); const data = await response.json(); if (!data.enabled) { target.textContent = 'Activity tracking is disabled.'; return; } const total = data.projects.reduce((sum, item) => sum + item.sevenDays, 0) || 1; const allocation = data.allocation ? `<p class="workspace-allocation">Attention allocation: ${reviewEscape(data.allocation.dominantProjectId)} received ${data.allocation.dominantPercent}% of recorded activity while ${reviewEscape(data.allocation.unattendedProjectId)} had an evidenced upcoming date and no recorded activity. This is a local activity signal, not a progress judgment.</p>` : ''; target.innerHTML = allocation + (data.projects.length ? data.projects.map(item => `<div class="workspace-focus-row"><span>${reviewEscape(item.projectId)}</span><div><i style="width:${Math.round(item.sevenDays / total * 100)}%"></i></div><small>${item.sevenDays} events / 7 days · ${item.thirtyDays} / 30 days</small></div>`).join('') : '<p class="workspace-quiet">No local activity has been recorded yet.</p>'); } catch { target.textContent = 'Could not load the local activity report.'; } }
+function reviewDialog(title, content) {
+  let dialog = document.querySelector('#workspace-review-dialog');
+  if (!dialog) { dialog = document.createElement('dialog'); dialog.id = 'workspace-review-dialog'; dialog.className = 'workspace-review-dialog'; document.body.append(dialog); }
+  dialog.innerHTML = `<form method="dialog"><header><h2>${reviewEscape(title)}</h2><button type="button" aria-label="Close">×</button></header>${content}</form>`;
+  const close = event => { event.preventDefault(); dialog.close(); };
+  dialog.querySelector('header button').addEventListener('click', close);
+  dialog.querySelectorAll('button[value="cancel"]').forEach(button => {
+    button.type = 'button';
+    button.addEventListener('click', close);
+  });
+  dialog.showModal();
+  return dialog;
+}
+async function reviewControl(operation) { const state = workspaceReviewState || await loadWorkspaceReview(); const response = await chatApi('/api/workspace-review/controls', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision: state.controlsRevision, requestId: crypto.randomUUID(), operation }) }); const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not save review control'); await refreshWorkspaceOverview(); return data; }
+async function refreshWorkspaceOverview() { const state = await loadWorkspaceReview(); if (routePath() === '/workspace' && !location.hash) renderWorkspaceOverview(state); }
+async function renderProjectReviewContext(projectId, isProjectHome) {
+  try {
+    const state = await loadWorkspaceReview(); const review = state.review; if (!review) return;
+    // The bar is deferrable, not permanently dismissable: hiding it is keyed
+    // to the review it summarises, so the next completed review brings it back.
+    const barKey = `ok-workbench.review-bar.${projectId}`;
+    if (review.completedAt && localStorage.getItem(barKey) === review.completedAt) return;
+    const project = review.projects?.find(item => item.projectId === projectId);
+    const stripResponse = await chatApi(`/api/workspace-review/strip?projectId=${encodeURIComponent(projectId)}`); const stripData = stripResponse.ok ? await stripResponse.json() : { item: null }; const elsewhere = stripData.item ? [stripData.item] : [];
+    const briefResponse = isProjectHome ? await chatApi(`/api/workspace-review/brief?projectId=${encodeURIComponent(projectId)}`) : null; const briefData = briefResponse?.ok ? await briefResponse.json() : null;
+    const showBrief = Boolean(isProjectHome && project);
+    if (!showBrief && !elsewhere.length) return;
+    const live = briefData?.live; const topItem = review.attention?.find(item => item.projectId === projectId);
+    const detail = showBrief ? `<details class="review-bar-more"><summary>Details</summary><div class="review-bar-panel"><p>${reviewEscape(project.assessment)}</p>${live?.status ? `<p><a href="/workspace/${encodeURIComponent(projectId)}/${live.status.path}">${reviewEscape(live.status.text)}</a></p>` : ''}${live?.log ? `<p><a href="/workspace/${encodeURIComponent(projectId)}/${live.log.path}">${reviewEscape(live.log.text)}</a></p>` : ''}${project.nextAction ? `<p><strong>Next useful step:</strong> ${reviewEscape(project.nextAction)}</p>` : ''}${topItem ? `<p><strong>Start here:</strong> ${reviewEscape(topItem.firstStep)} ${reviewRunway(topItem)}</p>` : ''}<div class="review-bar-panel-actions"><button data-review-session-focus="${reviewEscape(projectId)}">I have 30 minutes</button><button data-review-priority="${reviewEscape(projectId)}">Adjust priority</button>${state.settings?.reportableProjects?.includes(projectId) ? `<button data-review-report="${reviewEscape(projectId)}">Draft progress report</button>` : ''}<a href="/workspace/">Workspace overview</a></div></div></details>` : '';
+    const briefPart = showBrief ? `<span class="review-bar-status"><strong>${reviewEscape(reviewPriority(project.effectivePriority?.priority || project.priority))}</strong><span class="workspace-trajectory ${reviewEscape(project.trajectory)}">${reviewEscape(reviewLifecycleLabel(project))}</span>${project.evidenceState === 'stale' ? '<em>Changed since review</em>' : ''}</span>${project.nextAction || project.assessment ? `<span class="review-bar-next" title="${reviewEscape(project.nextAction || project.assessment)}">${reviewEscape(project.nextAction || project.assessment)}</span>` : ''}` : '';
+    const stripPart = elsewhere.map(item => `<span class="review-bar-also" title="${reviewEscape(item.title)}"><strong>${reviewEscape(item.projectId)}</strong> ${reviewEscape(item.title)}</span><button data-review-discuss="${reviewEscape(item.id)}">Discuss</button>`).join('');
+    const context = document.createElement('aside'); context.className = 'project-review-bar'; context.setAttribute('aria-label', 'Workspace review');
+    context.innerHTML = `<span class="review-bar-kicker">Review</span>${briefPart}${stripPart}${detail}<button class="review-bar-defer" title="Hide until the next review" aria-label="Hide until the next review">\u00d7</button>`;
+    context.querySelector('.review-bar-defer').addEventListener('click', () => { if (review.completedAt) localStorage.setItem(barKey, review.completedAt); context.remove(); });
+    documentPane.prepend(context);
+  } catch { /* Context must never block a project document. */ }
+}
+function reviewIssue(id) { return workspaceReviewState?.review?.attention?.find(item => item.id === id); }
+function reviewProject(id) { return workspaceReviewState?.review?.projects?.find(item => item.projectId === id); }
+function closeReviewDialog() { document.querySelector('#workspace-review-dialog')?.close(); }
+async function openReviewSettings() {
+  const state = workspaceReviewState || await loadWorkspaceReview();
+  const statusResponse = await chatApi('/api/chat/status'); const status = await statusResponse.json().catch(() => ({}));
+  const controlsResponse = await chatApi('/api/workspace-review/controls'); const controlsData = controlsResponse.ok ? await controlsResponse.json().catch(() => ({})) : {};
+  const providers = status.providers || []; const selectedProvider = state.settings?.provider || status.defaultProvider || '';
+  const modelOptions = providerId => (providers.find(provider => provider.id === providerId)?.models || []).map(model => `<option value="${reviewEscape(model.id)}" data-review-tier="${reviewEscape(model.reviewTier || 'unverified')}">${reviewEscape(model.label || model.id)} \u00b7 ${reviewTierLabel(model.reviewTier)}</option>`).join('');
+  const effortOptions = (providerId, modelId) => { const model = (providers.find(provider => provider.id === providerId)?.models || []).find(item => item.id === modelId); const levels = model?.thinkingLevels || []; return `<option value="">Model default</option>${levels.map(level => `<option value="${reviewEscape(level)}">${reviewEscape(level)}</option>`).join('')}`; };
+  const projects = state.review?.projects?.map(project => project.projectId) || [];
+  const checked = (items, id) => items?.includes(id) ? 'checked' : '';
+  const guidanceItemMarkup = entry => `<li><div><strong>${reviewEscape(entry.projectId || 'Workspace')}</strong><span>${reviewEscape(new Date(entry.createdAt).toLocaleString())}</span></div><p>${reviewEscape(entry.text)}</p><button class="quiet" type="button" data-review-remove-guidance="${reviewEscape(entry.id)}">Remove</button></li>`;
+  const guidanceListMarkup = list => list.length ? `<ul class="workspace-guidance-list">${list.map(guidanceItemMarkup).join('')}</ul>` : '<p class="workspace-quiet">No saved guidance yet. Corrections and answered questions appear here.</p>';
+  const guidanceEntries = (controlsData.controls?.guidance || []).slice().reverse();
+  const guidanceToText = list => list.slice().reverse().map(entry => `- [${entry.projectId || 'workspace'}] ${entry.text} (${entry.createdAt})`).join('\n');
+  const dialog = reviewDialog('Workspace review settings', `<div class="workspace-dialog-body"><p>Reviews are read-only. They use the selected chat provider and a bounded local evidence bundle.</p><label>Provider<select name="provider" id="review-settings-provider"><option value="">Choose a provider</option>${providers.map(provider => `<option value="${reviewEscape(provider.id)}" ${provider.id === selectedProvider ? 'selected' : ''}>${reviewEscape(provider.label)}</option>`).join('')}</select></label><label>Model<select name="model" id="review-settings-model">${modelOptions(selectedProvider)}</select></label><p id="review-settings-model-tier" class="workspace-model-tier"></p><label>Reasoning effort<select name="effort" id="review-settings-effort">${effortOptions(selectedProvider, state.settings?.model)}</select></label><label class="workspace-check"><input type="checkbox" name="automatic" ${state.settings?.automatic ? 'checked' : ''}> Run automatic reviews while Workbench is open</label><label class="workspace-check"><input type="checkbox" name="meteredAutomatic" ${state.settings?.confirmations?.meteredAutomatic ? 'checked' : ''}> I understand automatic reviews may use metered provider credits</label><label class="workspace-check"><input type="checkbox" name="belowRecommendedModel" ${state.settings?.confirmations?.belowRecommendedModel ? 'checked' : ''}> I understand a lower-capability model may misjudge priorities without visible error</label><label class="workspace-check"><input type="checkbox" name="activityTracking" ${state.settings?.activityTracking !== false ? 'checked' : ''}> Keep local activity counts for the focus report</label><fieldset><legend>Projects to exclude from review</legend>${projects.map(id => `<label class="workspace-check"><input type="checkbox" name="excludedProjects" value="${reviewEscape(id)}" ${checked(state.settings?.excludedProjects, id)}> ${reviewEscape(id)}</label>`).join('') || '<p>No reviewed projects yet.</p>'}</fieldset><fieldset><legend>Projects that may draft copy-only reports</legend>${projects.map(id => `<label class="workspace-check"><input type="checkbox" name="reportableProjects" value="${reviewEscape(id)}" ${checked(state.settings?.reportableProjects, id)}> ${reviewEscape(id)}</label>`).join('') || '<p>No reviewed projects yet.</p>'}</fieldset><fieldset class="workspace-guidance-fieldset"><legend>Guidance</legend><p>Corrections and answers you record persist here as reviewer guidance. This is stored in Workbench on this device; it is not written into your workspace files.</p><div id="review-settings-guidance-list">${guidanceListMarkup(guidanceEntries)}</div><button class="quiet" type="button" data-review-copy-guidance ${guidanceEntries.length ? '' : 'disabled'}>Copy guidance</button></fieldset><p class="workspace-dialog-error" hidden></p><footer><button value="cancel">Cancel</button><button class="workspace-primary" value="default" data-review-save-settings>Save settings</button></footer></div>`);
+  const model = dialog.querySelector('#review-settings-model'); const provider = dialog.querySelector('#review-settings-provider'); const effort = dialog.querySelector('#review-settings-effort');
+  const refreshEffort = () => { effort.innerHTML = effortOptions(provider.value, model.value); const levels = [...effort.options].map(option => option.value).filter(Boolean); effort.value = state.settings?.provider === provider.value && state.settings?.model === model.value && levels.includes(state.settings?.effort) ? state.settings.effort : (levels.at(-1) || ''); };
+  const tierHint = dialog.querySelector('#review-settings-model-tier');
+  const refreshTierHint = () => { const tier = model.options[model.selectedIndex]?.dataset.reviewTier || 'unverified'; tierHint.textContent = reviewTierHint(tier); tierHint.dataset.reviewTier = tier; };
+  const refreshModels = () => { const current = providers.find(item => item.id === provider.value); model.innerHTML = modelOptions(provider.value); const desired = state.settings?.provider === provider.value ? state.settings?.model : current?.models?.[0]?.id; if (desired) model.value = desired; refreshEffort(); refreshTierHint(); };
+  model.addEventListener('change', refreshTierHint);
+  const resetConfirmations = () => { dialog.querySelector('[name=meteredAutomatic]').checked = false; dialog.querySelector('[name=belowRecommendedModel]').checked = false; };
+  provider.addEventListener('change', () => { resetConfirmations(); refreshModels(); }); model.addEventListener('change', () => { resetConfirmations(); refreshEffort(); }); refreshModels();
+  let currentGuidance = guidanceEntries; const copyGuidanceButton = dialog.querySelector('[data-review-copy-guidance]');
+  dialog.querySelector('#review-settings-guidance-list').addEventListener('click', async event => {
+    const button = event.target.closest('[data-review-remove-guidance]'); if (!button) return;
+    try { await reviewControl({ operation: 'remove_guidance', guidanceId: button.dataset.reviewRemoveGuidance }); currentGuidance = currentGuidance.filter(entry => entry.id !== button.dataset.reviewRemoveGuidance); dialog.querySelector('#review-settings-guidance-list').innerHTML = guidanceListMarkup(currentGuidance); copyGuidanceButton.disabled = !currentGuidance.length; } catch (caught) { alert(caught.message); }
+  });
+  copyGuidanceButton?.addEventListener('click', async () => { await navigator.clipboard.writeText(guidanceToText(currentGuidance)); copyGuidanceButton.textContent = 'Copied'; setTimeout(() => { copyGuidanceButton.textContent = 'Copy guidance'; }, 2000); });
+  dialog.querySelector('[data-review-save-settings]').addEventListener('click', async event => { event.preventDefault(); const form = new FormData(dialog.querySelector('form')); const body = { expectedRevision: state.settings.revision, provider: form.get('provider') || null, model: form.get('model') || null, effort: form.get('effort') || null, automatic: form.get('automatic') === 'on', confirmations: { meteredAutomatic: form.get('meteredAutomatic') === 'on', belowRecommendedModel: form.get('belowRecommendedModel') === 'on' }, activityTracking: form.get('activityTracking') === 'on', excludedProjects: form.getAll('excludedProjects'), reportableProjects: form.getAll('reportableProjects'), timezone: state.settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', dailyAutomaticLimit: state.settings.dailyAutomaticLimit || 6 };
+    const error = dialog.querySelector('.workspace-dialog-error'); try { const response = await chatApi('/api/workspace-review/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not save review settings'); closeReviewDialog(); await refreshWorkspaceOverview(); } catch (caught) { error.textContent = caught.message; error.hidden = false; }
+  });
+}
+function openPriorityDialog(projectId) {
+  const project = reviewProject(projectId); if (!project) return;
+  const dialog = reviewDialog(`Priority for ${projectId}`, `<div class="workspace-dialog-body"><p>Overrides are visible as your judgment; the review’s inferred priority remains available for comparison.</p><label>Priority<select name="tier"><option value="focus">Focus</option><option value="next">Next</option><option value="maintain">Maintain</option><option value="parked">Parked</option></select></label><label>Reason<textarea name="reason" required maxlength="400" placeholder="Why this belongs here"></textarea></label><footer><button value="cancel">Cancel</button><button class="workspace-primary" data-review-save-priority>Save priority</button></footer></div>`);
+  dialog.querySelector('select').value = project.effectivePriority?.priority || project.priority;
+  dialog.querySelector('[data-review-save-priority]').addEventListener('click', async event => { event.preventDefault(); const tier = dialog.querySelector('[name=tier]').value; const reason = dialog.querySelector('[name=reason]').value.trim(); if (!reason) return dialog.querySelector('[name=reason]').focus(); try { await reviewControl({ operation: 'priority', projectId, tier, reason, expiresAt: null }); closeReviewDialog(); } catch (caught) { alert(caught.message); } });
+}
+function openGuidanceDialog({ projectId = null, issueId = null, prefix = '' } = {}) {
+  const dialog = reviewDialog('Add review context', `<div class="workspace-dialog-body"><p>This is saved as guidance for later reviews; it does not change files or silently change the current assessment.</p><label>Context<textarea name="guidance" required maxlength="2000" placeholder="${reviewEscape(prefix || 'What should the reviewer take into account?')}"></textarea></label><footer><button value="cancel">Cancel</button><button class="workspace-primary" data-review-save-guidance>Save context</button></footer></div>`);
+  dialog.querySelector('[data-review-save-guidance]').addEventListener('click', async event => { event.preventDefault(); const text = dialog.querySelector('textarea').value.trim(); if (!text) return dialog.querySelector('textarea').focus(); try { await reviewControl({ operation: 'guidance', projectId, issueId, text }); closeReviewDialog(); } catch (caught) { alert(caught.message); } });
+}
+function openRevisitDialog(item) {
+  const suggested = new Date(Date.now() + 3 * 86400000); const local = new Date(suggested.getTime() - suggested.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const dialog = reviewDialog('Revisit this later', `<div class="workspace-dialog-body"><p>This hides this exact evidenced item until the selected time. It does not change project priority or status.</p><label>Revisit at<input name="until" type="datetime-local" required value="${local}"></label><footer><button value="cancel">Cancel</button><button class="workspace-primary" data-review-save-revisit>Save revisit</button></footer></div>`);
+  dialog.querySelector('[data-review-save-revisit]').addEventListener('click', async event => { event.preventDefault(); const value = dialog.querySelector('[name=until]').value; const date = new Date(value); if (!value || Number.isNaN(date.getTime()) || date.getTime() <= Date.now()) return dialog.querySelector('[name=until]').focus(); const until = date.toISOString(); try { await reviewControl({ operation: 'feedback', issueId: item.id, evidenceSignature: item.evidenceSignature, action: 'snooze', until }); closeReviewDialog(); } catch (caught) { alert(caught.message); } });
+}
+async function reviewChatHandoff(projectId, message) {
+  const existingDraft = chatUi.input.value.trim();
+  if (existingDraft && chatProjectId !== projectId) {
+    const dialog = reviewDialog('Keep your unsent draft?', `<div class="workspace-dialog-body"><p>You have an unsent draft in ${reviewEscape(chatProjectId === 'workspace' ? 'workspace chat' : chatProjectId)}.</p><footer><button type="button" data-review-handoff-cancel>Cancel</button><button type="button" data-review-handoff-append>Append to handoff</button><button class="workspace-primary" type="button" data-review-handoff-replace>Replace draft</button></footer></div>`);
+    const choice = await new Promise(resolve => { let settled = false; const finish = value => { if (settled) return; settled = true; dialog.close(); resolve(value); }; dialog.addEventListener('cancel', () => finish('cancel'), { once: true }); dialog.querySelector('header button').addEventListener('click', event => { event.preventDefault(); finish('cancel'); }); dialog.querySelector('[data-review-handoff-cancel]').addEventListener('click', () => finish('cancel')); dialog.querySelector('[data-review-handoff-append]').addEventListener('click', () => finish('append')); dialog.querySelector('[data-review-handoff-replace]').addEventListener('click', () => finish('replace')); });
+    if (choice === 'cancel') return; if (choice === 'append') message = `${existingDraft}\n\n${message}`;
+  }
+  history.pushState({}, '', `/workspace/${encodeURIComponent(projectId)}/`); await loadPage();
+  chatUi.input.value = message; chatUi.input.focus();
+}
+function reportMarkdown(report) {
+  const section = (title, items) => items?.length ? `\n## ${title}\n${items.map(item => `- ${item.text}`).join('\n')}\n` : '';
+  return `# ${report.draft.headline}\n\n_Draft · verify before sending_\n\nPeriod: ${report.period.start} to ${report.period.end}\n${section('Completed', report.draft.completed)}${section('In progress', report.draft.inProgress)}${section('Blockers', report.draft.blockers)}${section('Next steps', report.draft.nextSteps)}\n## Caveats\n${report.draft.caveats}`;
+}
+async function draftProgressReport(projectId) {
+  const dialog = reviewDialog('Drafting progress report', `<div class="workspace-dialog-body"><p>Preparing a copy-only draft from bounded local evidence. Nothing will be sent or written to the project.</p></div>`);
+  try { const response = await chatApi('/api/workspace-review/reports', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId }) }); const job = await response.json().catch(() => ({})); if (!response.ok) throw new Error(job.error || 'Could not draft progress report'); let report = null; for (let attempt = 0; attempt < 80; attempt++) { await new Promise(resolve => setTimeout(resolve, 1500)); const statusResponse = await chatApi(`/api/workspace-review/reports?projectId=${encodeURIComponent(projectId)}`); const status = await statusResponse.json().catch(() => ({})); if (!statusResponse.ok) throw new Error(status.error || 'Could not check progress report'); if (status.job?.id === job.jobId && status.job.state === 'failed') throw new Error(reviewErrorMessage(status.job.error) || 'Could not draft progress report'); if (status.job?.id === job.jobId && status.job.state === 'completed') { report = status.reports?.find(item => item.id === status.job.reportId) || null; break; } } if (!report) throw new Error('The report is taking longer than expected; check again shortly.'); dialog.innerHTML = `<form method="dialog"><header><h2>Draft progress report</h2><button aria-label="Close">×</button></header><div class="workspace-dialog-body"><p><strong>Draft · verify before sending</strong></p><p>${reviewEscape(report.period.start)} to ${reviewEscape(report.period.end)}</p><h3>${reviewEscape(report.draft.headline)}</h3>${['completed', 'inProgress', 'blockers', 'nextSteps'].map(key => report.draft[key]?.length ? `<section><strong>${reviewEscape(key.replace(/([A-Z])/g, ' $1'))}</strong><ul>${report.draft[key].map(item => `<li>${reviewEscape(item.text)}</li>`).join('')}</ul></section>` : '').join('')}<p><strong>Caveats:</strong> ${reviewEscape(report.draft.caveats)}</p><footer><button value="cancel">Close</button><button class="workspace-primary" type="button" data-review-copy-report>Copy report</button></footer></div></form>`; dialog.querySelector('[data-review-copy-report]').addEventListener('click', async () => { await navigator.clipboard.writeText(reportMarkdown(report)); dialog.querySelector('[data-review-copy-report]').textContent = 'Copied'; }); } catch (caught) { dialog.innerHTML = `<form method="dialog"><header><h2>Progress report unavailable</h2><button aria-label="Close">×</button></header><div class="workspace-dialog-body"><p>${reviewEscape(caught.message)}</p><footer><button>Close</button></footer></div></form>`; }
+}
+async function handleWorkspaceReviewAction(event) {
+  const button = event.target.closest('[data-review-tab], [data-review-run], [data-review-settings], [data-review-pause], [data-review-priority], [data-review-revisit], [data-review-dismiss], [data-review-resolved], [data-review-correct], [data-review-guidance], [data-review-answer], [data-review-discuss], [data-review-session], [data-review-session-focus], [data-review-report], [data-review-park], [data-review-show-all], [data-review-strip-dismiss], [data-review-undo-feedback]');
+  if (!button) return; event.preventDefault();
+  try {
+    if (button.dataset.reviewTab) { sessionStorage.setItem('ok-workbench-workspace-tab', button.dataset.reviewTab); renderWorkspaceOverview(workspaceReviewState); return; }
+    if (button.hasAttribute('data-review-show-all')) { workspaceReviewShowAll = !workspaceReviewShowAll; renderWorkspaceOverview(workspaceReviewState); return; }
+    if (button.hasAttribute('data-review-settings')) return openReviewSettings();
+    if (button.hasAttribute('data-review-pause')) { const response = await chatApi('/api/workspace-review/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: button.dataset.reviewPause === 'true' }) }); if (!response.ok) throw new Error('Could not update review monitoring'); return refreshWorkspaceOverview(); }
+    if (button.hasAttribute('data-review-run')) {
+      const originalLabel = button.textContent; button.disabled = true; button.textContent = 'Starting\u2026';
+      try { const response = await chatApi('/api/workspace-review/runs', { method: 'POST' }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not start review'); }
+      catch (caught) { button.disabled = false; button.textContent = originalLabel; throw caught; }
+      await refreshWorkspaceOverview(); setTimeout(() => refreshWorkspaceOverview().catch(() => {}), 2500); return;
+    }
+    if (button.dataset.reviewPriority) return openPriorityDialog(button.dataset.reviewPriority);
+    if (button.dataset.reviewReport) return draftProgressReport(button.dataset.reviewReport);
+    if (button.dataset.reviewPark) return reviewControl({ operation: 'priority', projectId: button.dataset.reviewPark, tier: 'parked', reason: 'Parked from a recurring workspace review item', expiresAt: null });
+    if (button.hasAttribute('data-review-guidance')) return openGuidanceDialog();
+    if (button.dataset.reviewAnswer) return openGuidanceDialog({ prefix: `Answer: ${button.dataset.reviewAnswer}` });
+    if (button.dataset.reviewUndoFeedback) { await reviewControl({ operation: 'undo_feedback', feedbackId: button.dataset.reviewUndoFeedback }); setWorkspaceReviewNotice('Undone.'); return renderWorkspaceOverview(workspaceReviewState); }
+    const item = reviewIssue(button.dataset.reviewRevisit || button.dataset.reviewDismiss || button.dataset.reviewResolved || button.dataset.reviewCorrect || button.dataset.reviewDiscuss || button.dataset.reviewSession || button.dataset.reviewStripDismiss);
+    if (!item && !button.dataset.reviewSessionFocus) return;
+    if (button.dataset.reviewRevisit) return openRevisitDialog(item);
+    if (button.dataset.reviewStripDismiss) return reviewControl({ operation: 'feedback', issueId: item.id, evidenceSignature: item.evidenceSignature, action: 'strip_dismiss', until: null, reason: null });
+    if (button.dataset.reviewDismiss) { const result = await reviewControl({ operation: 'feedback', issueId: item.id, evidenceSignature: item.evidenceSignature, action: 'dismiss', reason: null }); setWorkspaceReviewNotice('Item dismissed.', result.applied?.id); return renderWorkspaceOverview(workspaceReviewState); }
+    if (button.dataset.reviewResolved) { const result = await reviewControl({ operation: 'feedback', issueId: item.id, evidenceSignature: item.evidenceSignature, action: 'resolved', reason: null }); setWorkspaceReviewNotice('Reported resolved by you.', result.applied?.id); return renderWorkspaceOverview(workspaceReviewState); }
+    if (button.dataset.reviewCorrect) return openGuidanceDialog({ projectId: item.projectId, issueId: item.id, prefix: 'Correction: ' });
+    const projectId = button.dataset.reviewSessionFocus || item.projectId; const prompt = item ? `${button.hasAttribute('data-review-session') ? 'I have 30 minutes. ' : ''}Help me take this first step for the workspace review item “${item.title}”: ${item.firstStep}` : 'I have 30 minutes. Help me choose and start the most useful next step for this project.';
+    return reviewChatHandoff(projectId, prompt);
+  } catch (caught) { alert(caught.message || 'Could not update the workspace review'); }
+}
+
 async function loadPage() {
   const request = ++pageLoadSequence; const route = routePath();
+  const isWorkspaceOverview = route === '/workspace' && !location.hash;
+  if (!isWorkspaceOverview) stopWorkspaceReviewPolling();
   documentPane.setAttribute('aria-busy', 'true'); nav.setAttribute('aria-busy', 'true'); picker.disabled = true;
   documentPane.innerHTML = '<p class="loading">Loading workspace…</p>';
   try {
-    const [projectResponse, documentResponse] = await Promise.all([fetch(`/api/project?path=${encodeURIComponent(route)}`), fetch(`/api/document?path=${encodeURIComponent(route)}`)]);
-    if (!projectResponse.ok || !documentResponse.ok) throw new Error('That document could not be found.');
-    const data = await projectResponse.json(); const documentData = await documentResponse.json();
+    const [projectResponse, documentResponse] = await Promise.all([fetch(`/api/project?path=${encodeURIComponent(route)}`), isWorkspaceOverview ? Promise.resolve(null) : fetch(`/api/document?path=${encodeURIComponent(route)}`)]);
+    if (!projectResponse.ok || (documentResponse && !documentResponse.ok)) throw new Error('That document could not be found.');
+    const data = await projectResponse.json(); const documentData = documentResponse ? await documentResponse.json() : null;
     if (request !== pageLoadSequence) return;
-  displayedDocument = { path: documentData.path, project: data.project.name, text: documentData.text || '' };
-  document.title = `${documentData.title || documentData.name} / workspace`;
+  displayedDocument = { path: documentData?.path || '/workspace', project: data.project.name, text: documentData?.text || '' };
+  document.title = isWorkspaceOverview ? 'Workspace overview / workspace' : `${documentData.title || documentData.name} / workspace`;
   document.querySelector('#project-name').textContent = data.project.title;
-  document.querySelector('#stats').textContent = `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
+  document.querySelector('#stats').textContent = isWorkspaceOverview ? `${data.projects.length - 1} projects` : `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
   picker.innerHTML = data.projects.map(item => `<option value="${item.path}" ${item.path === data.project.path ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
   const navigation = data.catalog.length
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
     : `<div class="nav-section-heading"><p class="nav-label">Project pages</p>${data.project.name === 'workspace' ? '' : entryCreationActions(data.project.path)}</div><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
-  const external = data.project.name === 'workspace' ? '' : `<hr class="nav-rule"><p class="nav-label">External links</p><div class="external-links">${(data.externalLinks || []).map(item => item.status === 'approved' ? `<a class="nav-link tree-link tree-page" href="${data.project.path}/${item.path}"><span>External · read only</span><span>${escapeHtml(item.path)}</span></a>` : `<button class="external-link-request" type="button" data-external-link="${escapeHtml(item.path)}" data-external-status="${escapeHtml(item.status)}">External link · ${escapeHtml(item.status)}: ${escapeHtml(item.path)}</button>`).join('')}<button class="external-link-request" type="button" data-manage-external-link>Manage external links</button></div>`;
-  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}${external}`;
+  nav.innerHTML = isWorkspaceOverview ? workspaceOverviewNav(data) : `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
   if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
-  const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
-  const kicker = `${contextLabel} / ${documentData.name}`;
-  documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
-  void renderMermaidDiagrams(documentPane);
+  if (isWorkspaceOverview) { renderWorkspaceOverview(await loadWorkspaceReview()); }
+  else {
+    const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
+    const kicker = `${contextLabel} / ${documentData.name}`;
+    documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
+    void renderMermaidDiagrams(documentPane);
+    void renderProjectReviewContext(data.project.name, route === `/workspace/${encodeURIComponent(data.project.name)}`);
+  }
+  if (typeof applyChatLayout === 'function') applyChatLayout();
   if (typeof chatProjectChanged === 'function') chatProjectChanged(data.project).catch(error => setChatStatus(error.message));
   if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block: 'start' }); else { documentPane.scrollTop = 0; scrollTo(0, 0); }
   } finally {
@@ -442,7 +680,10 @@ function handleTableInteraction(event) {
 }
 
 document.addEventListener('click', navigate);
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopWorkspaceReviewPolling(); else if (routePath() === '/workspace' && !location.hash) refreshWorkspaceOverview().catch(() => {}); });
 documentPane.addEventListener('click', handleTableInteraction);
+documentPane.addEventListener('click', event => { void handleWorkspaceReviewAction(event); });
+documentPane.addEventListener('keydown', event => { const tab = event.target.closest('[data-review-tab]'); if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; const tabs = [...documentPane.querySelectorAll('[data-review-tab]')]; const current = tabs.indexOf(tab); const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; event.preventDefault(); sessionStorage.setItem('ok-workbench-workspace-tab', tabs[next].dataset.reviewTab); renderWorkspaceOverview(workspaceReviewState); requestAnimationFrame(() => documentPane.querySelector(`[data-review-tab="${tabs[next].dataset.reviewTab}"]`)?.focus()); });
 documentPane.addEventListener('keydown', handleTableInteraction);
 picker.addEventListener('change', () => { history.pushState({}, '', `${picker.value}/`); loadPage().catch(showError); });
 async function createProjectEntry(button) {
@@ -468,22 +709,33 @@ async function commitEntryRename(form) {
 }
 nav.addEventListener('click', event => {
   const external = event.target.closest('[data-external-link]');
-  if (external) { event.preventDefault(); void approveExternalLink(external.dataset.externalLink).catch(showError); return; }
-  if (event.target.closest('[data-manage-external-link]')) { event.preventDefault(); const linkPath = prompt('Project-relative symlink path to inspect:'); if (linkPath) void approveExternalLink(linkPath).catch(showError); return; }
+  if (external) { event.preventDefault(); void inspectExternalLink(external.dataset.externalLink).catch(showError); return; }
   const button = event.target.closest('[data-create-entry]');
   if (button) { event.preventDefault(); event.stopPropagation(); void createProjectEntry(button); return; }
   const entry = event.target.closest('[data-entry-type].active');
   if (entry) { event.preventDefault(); event.stopPropagation(); void beginEntryRename(entry); }
 });
 
-async function approveExternalLink(linkPath) {
+function closeExternalLinkDialog() { externalLinkUi.dialog.close(); }
+async function inspectExternalLink(linkPath) {
   if (!displayedDocument?.project || displayedDocument.project === 'workspace') throw new Error('Select a project before approving an external link.');
   const inspect = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/external-links/inspect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: linkPath }) });
   const details = await inspect.json(); if (!inspect.ok) throw new Error(details.error?.message || details.error || 'Could not inspect the external link.');
-  if (!confirm(`Allow read-only browser and model access to ${linkPath}?\n\nResolved destination: ${details.canonicalTarget}\n\nChat turns receive a fresh private snapshot.`)) return;
-  const approval = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/external-links`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inspectionToken: details.inspectionToken }) });
-  if (!approval.ok) { const failure = await approval.json(); throw new Error(failure.error?.message || failure.error || 'Could not approve the external link.'); }
-  await loadPage();
+  externalLinkUi.form.dataset.inspectionToken = details.inspectionToken;
+  externalLinkUi.alias.textContent = linkPath; externalLinkUi.target.textContent = details.canonicalTarget; externalLinkUi.error.hidden = true;
+  externalLinkUi.dialog.showModal();
+}
+externalLinkUi.close.addEventListener('click', closeExternalLinkDialog);
+externalLinkUi.cancel.addEventListener('click', closeExternalLinkDialog);
+externalLinkUi.form.addEventListener('submit', event => { void approveExternalLink(event); });
+async function approveExternalLink(event) {
+  event.preventDefault(); externalLinkUi.approve.disabled = true; externalLinkUi.error.hidden = true;
+  try {
+    const approval = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/external-links`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inspectionToken: externalLinkUi.form.dataset.inspectionToken }) });
+    if (!approval.ok) { const failure = await approval.json(); throw new Error(failure.error?.message || failure.error || 'Could not approve the external link.'); }
+    closeExternalLinkDialog(); await loadPage();
+  } catch (error) { externalLinkUi.error.textContent = error.message || 'Could not enable the external link.'; externalLinkUi.error.hidden = false; }
+  finally { externalLinkUi.approve.disabled = false; }
 }
 nav.addEventListener('submit', event => { const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); void commitEntryRename(form); });
 nav.addEventListener('keydown', event => { if (event.key !== 'Escape') return; const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });
@@ -579,7 +831,7 @@ document.addEventListener('pointerdown', event => { if (!todoUi.popover.hidden &
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && !todoUi.popover.hidden) closeTodo(); });
 const chatStorageKey = 'ok-workbench.chat-pane.v1';
 const chatProjectPreferencesKey = 'ok-workbench.chat-project-preferences.v1';
-const defaultChatSettings = { collapsed: false, rightSize: 420, diffLayout: 'side-by-side', diffPalette: 'green', titleProvider: '', titleModel: '', titleEffort: '', showThinking: true };
+const defaultChatSettings = { collapsed: false, workspaceCollapsed: true, rightSize: 420, diffLayout: 'side-by-side', diffPalette: 'green', titleProvider: '', titleModel: '', titleEffort: '', showThinking: true };
 let chatSettings = { ...defaultChatSettings };
 try { chatSettings = { ...defaultChatSettings, ...JSON.parse(localStorage.getItem(chatStorageKey) || '{}') }; } catch { /* ignore corrupt local preference */ }
 let chatProjectPreferences = {};
@@ -633,7 +885,7 @@ async function chatApi(path, options = {}) {
   return response;
 }
 function setChatStatus(message) { chatUi.status.textContent = message; }
-function renderChatProjectLabel() { chatUi.project.textContent = workspaceMode && chatProjectId === 'workspace' ? 'Workspace-wide mode' : (chatProjectTitle || chatProjectId || 'Loading'); }
+function renderChatProjectLabel() { chatUi.project.textContent = chatProjectId === 'workspace' ? 'Workspace chat' : (chatProjectTitle || chatProjectId || 'Loading'); }
 function workspaceModeRequired() { return chatProjectId === 'workspace' && !workspaceMode; }
 function dirtyItemsFor(project = chatProjectId) { return Array.isArray(dirtyProjectItems[project]) ? dirtyProjectItems[project] : []; }
 function renderDirtyProcessPrompt() {
@@ -679,7 +931,7 @@ function syncChatTurnControls() {
   chatUi.stop.hidden = !turn; chatUi.send.textContent = turn && steering ? 'Steer' : 'Send'; chatUi.send.disabled = Boolean(turn) && !ready;
   chatUi.processDirty.disabled = processingDirtyChanges || Boolean(turn);
   chatUi.input.disabled = Boolean(turn) && !steering;
-  chatUi.input.placeholder = !turn ? (workspaceModeRequired() ? 'Send to enable workspace-wide agent access…' : 'Ask about this project…') : steering ? (turn.steeringReady ? 'Add a steering comment…' : 'Preparing steering…') : 'Cancel the current response to send another comment';
+  chatUi.input.placeholder = !turn ? (chatProjectId === 'workspace' ? 'Ask across projects…' : 'Ask about this project…') : steering ? (turn.steeringReady ? 'Add a steering comment…' : 'Preparing steering…') : 'Cancel the current response to send another comment';
   chatUi.send.title = turn && !steering ? 'Cancel the current response before sending another comment.' : '';
 }
 function renderTurnNotifications() {
@@ -724,11 +976,14 @@ function clampChatSize(value) {
   return Math.min(max, Math.max(min, Math.round(value)));
 }
 function chatSize() { return clampChatSize(chatSettings.rightSize); }
+function workspaceOverviewRoute() { return routePath() === '/workspace' && !location.hash; }
+function currentChatCollapsed() { return workspaceOverviewRoute() ? Boolean(chatSettings.workspaceCollapsed) : Boolean(chatSettings.collapsed); }
 function applyChatLayout() {
-  chatUi.layout.classList.toggle('chat-collapsed', Boolean(chatSettings.collapsed));
+  const collapsed = currentChatCollapsed();
+  chatUi.layout.classList.toggle('chat-collapsed', collapsed);
   chatUi.layout.style.setProperty('--chat-size', `${chatSize()}px`);
-  chatUi.toggle.setAttribute('aria-expanded', String(!chatSettings.collapsed));
-  chatUi.restore.hidden = !chatSettings.collapsed;
+  chatUi.toggle.setAttribute('aria-expanded', String(!collapsed));
+  chatUi.restore.hidden = !collapsed;
   chatUi.restoreBadge.textContent = chatUnread ? String(chatUnread) : '';
   chatUi.splitter.setAttribute('aria-orientation', 'vertical');
   const bounds = chatSizeBounds();
@@ -738,7 +993,7 @@ function applyChatLayout() {
   chatUi.splitter.setAttribute('aria-label', 'Resize right-docked chat pane');
   persistChatSettings();
 }
-function setChatCollapsed(collapsed) { chatSettings.collapsed = Boolean(collapsed); if (!collapsed) chatUnread = 0; applyChatLayout(); }
+function setChatCollapsed(collapsed) { if (workspaceOverviewRoute()) chatSettings.workspaceCollapsed = Boolean(collapsed); else chatSettings.collapsed = Boolean(collapsed); if (!collapsed) chatUnread = 0; applyChatLayout(); }
 
 function setOptions(select, values, selected) {
   select.replaceChildren(...values.map(value => {
@@ -1108,7 +1363,7 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
     for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') { turn.id = event.turn_id || null; turn.supportsSteering = event.supports_steering === true; syncChatTurnControls(); }
       else if (event.type === 'turn.steering') { turn.steeringReady = event.available === true; syncChatTurnControls(); }
-      else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.thinkingText = ''; turn.lastActivityLabel = 'Writing response'; if (chatSettings.collapsed && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
+      else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.thinkingText = ''; turn.lastActivityLabel = 'Writing response'; if (currentChatCollapsed() && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
       else if (event.type === 'turn.thinking') { turn.thinkingText += event.delta || ''; turn.lastActivityLabel = 'Model is thinking'; }
       else if (event.type === 'tool.started') { turn.activities.push({ kind: 'tool', tool: event.tool || 'workspace_tool', targets: Array.isArray(event.targets) ? event.targets : [], at: Date.now(), done: false }); turn.lastActivityLabel = event.tool || 'Running tool'; }
       else if (event.type === 'tool.completed' || event.type === 'tool.failed') { if (event.tool === 'create_project' && event.result?.location) projectCreated = true; const activity = [...turn.activities].reverse().find(item => !item.done && item.kind === 'tool'); if (activity) { activity.done = true; activity.tool = event.tool || activity.tool; activity.targets = Array.isArray(event.targets) ? event.targets : activity.targets; activity.failed = event.type === 'tool.failed'; } else turn.activities.push({ kind: 'tool', tool: event.tool || 'workspace_tool', targets: Array.isArray(event.targets) ? event.targets : [], at: Date.now(), done: true, failed: event.type === 'tool.failed' }); turn.lastActivityLabel = event.tool || 'Workspace tool'; }
@@ -1184,7 +1439,7 @@ function renderDiffPatch(patch) {
   }
 }
 
-chatUi.toggle.addEventListener('click', () => setChatCollapsed(!chatSettings.collapsed));
+chatUi.toggle.addEventListener('click', () => setChatCollapsed(!currentChatCollapsed()));
 chatUi.collapse.addEventListener('click', () => setChatCollapsed(true));
 chatUi.restore.addEventListener('click', () => setChatCollapsed(false));
 chatUi.messages.addEventListener('scroll', () => {

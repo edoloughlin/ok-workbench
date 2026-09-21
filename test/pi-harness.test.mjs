@@ -183,6 +183,11 @@ test('turn capabilities are project-scoped and accept only server-issued grants'
   const source = await readFile(path.join(root, 'src', 'pi-harness.mjs'), 'utf8');
   assert.doesNotMatch(source, /Type\.Literal\('workspace'\)/);
   await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: workspace }), /explicit workspace mode/);
+  // A no-tools turn (the workspace review's zero-tool provider call) needs
+  // root-level evidence context but grants no filesystem capability from
+  // this value, so it must not need the explicit-workspace-mode opt-in.
+  const reviewCapabilities = await createTurnCapabilities({ workspaceRoot: workspace, projectRoot: workspace, workspaceMode: false, noWorkspaceTools: true });
+  assert.equal(reviewCapabilities.workspaceMode, false);
   const workspaceCapabilities = await createTurnCapabilities({ workspaceRoot: workspace, projectRoot: workspace, workspaceMode: true });
   assert.equal(workspaceCapabilities.workspaceMode, true);
   await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, workspaceMode: true }), /requires the workspace root/);

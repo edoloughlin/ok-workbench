@@ -9,7 +9,7 @@ const root = path.resolve(import.meta.dirname, '..');
 test('document table headers stay visible while their table is in view', async () => {
   const css = await readFile(path.join(root, 'src', 'public', 'app.css'), 'utf8');
   const script = await readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8');
-  assert.match(css, /\.document \{[^}]*padding: 0 clamp\(40px, 7vw, 72px\) 100px;/);
+  assert.match(css, /\.document \{[^}]*--doc-pad: clamp\(40px, 7vw, 72px\);[^}]*padding: 0 var\(--doc-pad\) 100px;/);
   assert.match(css, /\.document::before \{[^}]*height: 52px;/);
   assert.match(css, /\.document th \{ position: sticky;[^}]*top: var\(--topbar-h\);[^}]*background: var\(--panel\);/);
   assert.match(css, /\.document \.csv-table \{/);

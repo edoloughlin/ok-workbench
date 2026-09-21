@@ -264,14 +264,16 @@ Make deletion idempotent within the selected project.
 
 ### Add the user flow
 
-1. Show external symlinks in project navigation as disabled **External link**
+1. When you open a project or a directory, discover direct symlinks in that
+   directory and show eligible external links at their actual location in the
+   project navigation. Show unapproved links as disabled **External link**
    entries. Inspect the symlink itself without reading its destination content.
 2. On selection, show its workspace alias and resolved target in a dialog. Show
-   **Allow read access** and **Cancel**. Explain that approval includes model
+   **Enable read access** and **Cancel**. Explain that approval includes model
    reads and that chat content refreshes each turn.
 3. After approval, refresh navigation and label the entry **External · Read only**.
-4. Provide **Manage external links** in project settings, including an explicit
-   project-relative path field for links omitted from bounded navigation.
+4. Do not require the user to enter a project-relative path. The user enables
+   an external link by selecting its discovered navigation entry.
 5. Display `approved`, `changed`, `missing`, or `unapproved` status. For changed
    links, require the same inspection and approval flow again.
 6. Provide **Revoke access** and remove the entry's readable content immediately

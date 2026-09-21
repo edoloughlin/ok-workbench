@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Workspace overview · OK Workbench mockup</title>
+  <link rel="stylesheet" href="workspace-overview.css">
+  <script src="workspace-overview.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to overview</a>
+  <div class="prototype-bar">
+    <span><strong>INTERACTIVE CONCEPT</strong><span class="prototype-note"> Fictional projects · no live AI · changes reset on reload</span></span>
+    <a href="../WORKSPACE-OVERVIEW-SPEC.md">Implementation spec ↗</a>
+  </div>
+  <header class="topbar">
+    <a class="brand" href="workspace-overview.html">OK<span>Workbench</span></a>
+    <span class="workspace-name">Personal workspace <span class="muted">/ Overview</span></span>
+    <button class="quiet-button" id="workspace-chat">Workspace chat <span aria-hidden="true">↗</span></button>
+  </header>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <nav aria-label="Workspace navigation">
+        <p class="nav-label">Workspace</p>
+        <a class="nav-item selected" href="#main" aria-current="page"><span aria-hidden="true">◫</span> Overview</a>
+        <button class="nav-item" data-document="Workspace index"><span aria-hidden="true">▤</span> Documents</button>
+        <details class="mobile-projects" open>
+          <summary class="nav-label">Projects <span class="project-count">6</span></summary>
+          <div id="project-nav"></div>
+        </details>
+        <p class="nav-label">Core documents</p>
+        <button class="nav-item" data-document="Workspace instructions"><span aria-hidden="true">☷</span> Agent instructions</button>
+        <button class="nav-item" data-document="Workspace status"><span aria-hidden="true">▤</span> Workspace status</button>
+      </nav>
+      <div class="sidebar-footer"><span class="local-mark" aria-hidden="true"></span> Local workspace<span>Evidence stays in your files.<br>Reviews use your chosen provider.</span></div>
+    </aside>
+    <main id="main" tabindex="-1">
+      <div class="preview-controls">
+        <label for="preview-state">Preview state</label>
+        <select id="preview-state">
+          <option value="fresh">Reviewed</option><option value="reviewing">Reviewing</option>
+          <option value="stale">Stale evidence</option><option value="failed">Review failed</option>
+          <option value="paused">Monitoring paused</option><option value="setup">First-time setup</option>
+          <option value="partial">Partial coverage</option><option value="empty">No projects</option>
+        </select>
+        <button id="reset" class="text-button">Reset demo</button>
+      </div>
+      <div class="page-heading">
+        <div><p class="eyebrow">THE BIG PICTURE</p><h1>Workspace overview</h1><p class="review-meta" id="review-meta">Reviewed 5 minutes ago · 6 of 6 projects assessed</p></div>
+        <div class="header-actions"><button id="monitoring-button">Monitoring</button><button id="review-button" class="primary-button"><span aria-hidden="true">↻</span> Review now</button></div>
+      </div>
+      <div class="state-notice" id="state-notice" hidden></div>
+      <section id="setup-panel" class="empty-panel" hidden>
+        <span class="empty-icon" aria-hidden="true">◫</span><h2>A little perspective across your projects.</h2>
+        <p>Get a considered view of what matters next, what needs a decision, and what might be losing momentum.</p>
+        <p class="muted">Choose a provider for a read-only review of your project files. You can enable automatic reviews while Workbench is running.</p>
+        <button class="primary-button" id="setup-button">Set up reviews</button>
+      </section>
+      <section id="empty-panel" class="empty-panel" hidden>
+        <span class="empty-icon" aria-hidden="true">＋</span><h2>Your workspace is ready for its first project.</h2><p>Start with an outcome you care about. The overview will bring your projects together as they take shape.</p><button class="primary-button" id="create-project">Create a project</button>
+      </section>
+      <div id="review-content">
+        <div class="view-tabs" role="tablist" aria-label="Overview sections">
+          <button role="tab" id="tab-today" aria-controls="panel-today" aria-selected="true">Today</button>
+          <button role="tab" id="tab-projects" aria-controls="panel-projects" aria-selected="false" tabindex="-1">All projects <span class="count" id="tab-project-count">6</span></button>
+          <button role="tab" id="tab-focus" aria-controls="panel-focus" aria-selected="false" tabindex="-1">Focus report <span class="tab-dot" title="Your recent activity does not match your stated priorities" aria-label="attention allocation note"></span></button>
+        </div>
+        <div id="panel-today" role="tabpanel" aria-labelledby="tab-today" tabindex="0">
+        <section class="briefing" aria-labelledby="briefing-title">
+          <div class="briefing-copy"><p class="eyebrow blue">RECOMMENDED FOCUS</p><h2 id="briefing-title">Give Atlas your attention today.</h2><p id="briefing-summary">Friday’s delivery depends on a scope decision that is still open. A short decision now protects the testing window. Then make room for Beacon’s next customer conversation.</p><div class="briefing-actions"><a href="#attention" class="briefing-link">See what needs attention <span aria-hidden="true">↓</span></a><button class="text-button" id="session-button">I have 30 minutes <span aria-hidden="true">↗</span></button></div></div>
+          <aside class="since-review"><p class="eyebrow">SINCE THE LAST REVIEW</p><span class="progress-mark" aria-hidden="true">✓</span><h3>Cedar has cleared its blocker.</h3><p>The data import passed its acceptance check. No intervention needed right now.</p><button class="text-button" data-source="cedar">See recorded outcome ↗</button><p class="since-extra">Also: Beacon's research synthesis is recorded complete (status.md).</p></aside>
+        </section>
+        <section id="attention" class="attention-section" aria-labelledby="attention-title">
+          <div class="section-heading"><div><h2 id="attention-title">Needs attention <span id="attention-count" class="count">4</span></h2><p>A few useful moves, across your projects.</p></div><button id="show-all" class="text-button">Show all 4</button></div>
+          <div id="attention-list" class="attention-list"></div>
+          <details id="deferred-section" class="deferred" hidden><summary id="deferred-label">Deferred and dismissed</summary><div id="deferred-list"></div></details>
+        </section>
+        <section id="question-panel" class="question-panel" aria-labelledby="question-title">
+          <span class="question-mark" aria-hidden="true">?</span>
+          <div><p class="eyebrow">ONE THING TO CLARIFY</p><h2 id="question-title">Is Friday still the target for Atlas?</h2><p id="question-reason">It’s the date in the delivery plan. If it has moved, Beacon may deserve your attention first.</p><div class="question-options"><button data-answer="Yes, Friday still stands">Yes, Friday still stands</button><button data-answer="The date has moved">The date has moved</button><button id="question-other" class="text-button">Add context…</button></div></div>
+        </section>
+        <p class="done-marker">Nothing else here needs a decision right now. <strong>All projects</strong> and the <strong>focus report</strong> are reference — you can stop here.</p>
+        </div>
+        <div id="panel-projects" role="tabpanel" aria-labelledby="tab-projects" tabindex="0" hidden>
+        <section aria-labelledby="projects-title" class="projects-section">
+          <div class="section-heading"><div><h2 id="projects-title">All projects</h2><p>Priority is relative importance. Trajectory is how things are going.</p></div><span class="table-hint">Your corrections guide the next review.</span></div>
+          <div class="project-table-wrap"><table class="project-table"><thead><tr><th scope="col">Project / intended outcome</th><th scope="col">Priority</th><th scope="col">Trajectory</th><th scope="col">Next useful step</th></tr></thead><tbody id="project-rows"></tbody></table></div>
+        </section>
+        </div>
+        <div id="panel-focus" role="tabpanel" aria-labelledby="tab-focus" tabindex="0" hidden>
+        <section class="focus-section" aria-labelledby="focus-title">
+          <div class="section-heading"><div><h2 id="focus-title">Where your attention went</h2><p>Chat turns and file changes by project. <strong>Activity is not progress.</strong></p></div><div class="focus-range" role="group" aria-label="Focus report range"><button id="focus-7" class="range-button selected" aria-pressed="true">7 days</button><button id="focus-30" class="range-button" aria-pressed="false">30 days</button></div></div>
+          <div id="focus-rows" class="focus-rows"></div>
+          <p class="focus-note" id="focus-note"></p>
+        </section>
+        </div>
+        <footer class="monitor-footer"><div><span class="monitor-symbol" aria-hidden="true">◷</span><div><strong id="monitor-label">Automatic reviews are on</strong><p id="monitor-description">Changes and approaching dates · while Workbench is running</p></div></div><button class="text-button" id="footer-monitoring">Review settings ↗</button></footer>
+      </div>
+      <noscript><p class="state-notice">This mockup needs JavaScript to display the fictional project list and demonstrate controls. The briefing above illustrates the visual direction. Read the linked specification for complete behavior.</p></noscript>
+      <p class="demo-footnote">Design preview · Monday, 21 September 2026, 09:45 · Europe/Dublin<br>No project files are read or changed by this page.</p>
+    </main>
+  </div>
+  <div id="announcement" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="action-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header"><div><p class="eyebrow" id="dialog-kicker">WORKSPACE</p><h2 id="dialog-title">Details</h2></div><form method="dialog"><button class="close-button" aria-label="Close dialog">×</button></form></div>
+    <div id="dialog-body"></div>
+  </dialog>
+</body>
+</html>
