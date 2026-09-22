@@ -54,7 +54,21 @@ function responsePreview(response, edge = 80) {
   if (!text) return '<empty>';
   return text.length <= edge * 2 ? JSON.stringify(text) : `${JSON.stringify(text.slice(0, edge))} … ${JSON.stringify(text.slice(-edge))}`;
 }
-function logRejectedReview(reason, response, { preview = false } = {}) { console.error(`[ok-workbench] workspace review rejected (${reason}; response bytes: ${Buffer.byteLength(response || '')}${preview ? `; response head/tail: ${responsePreview(response)}` : ''})`); }
+function logRejectedReview(reason, response, { preview = false } = {}) { console.error(`[ok-workbench] ${new Date().toISOString()} workspace review rejected (${reason}; response bytes: ${Buffer.byteLength(response || '')}${preview ? `; response head/tail: ${responsePreview(response)}` : ''})`); }
+function logReviewExchange({ label, provider, model, effort, prompt, evidence, response = null, error }) {
+  const timestamp = new Date().toISOString();
+  const exchange = {
+    timestamp,
+    label,
+    provider,
+    model,
+    effort: effort || null,
+    request: { prompt, evidence },
+    response,
+    error: error ? { code: error.code || 'PROVIDER_UNAVAILABLE', message: error.message } : null
+  };
+  console.error(`[ok-workbench] ${timestamp} workspace review LLM exchange (error) ${JSON.stringify(exchange)}`);
+}
 function truncate(value, bytes) { const source = Buffer.from(value || '', 'utf8'); return source.length <= bytes ? source.toString('utf8') : source.subarray(0, bytes).toString('utf8').replace(/[^\n]*$/, '') + '\n[truncated]'; }
 function heading(text) { return String(text).match(/^#{1,6}\s+(.+)$/m)?.[1]?.trim() || 'Document'; }
 function linesFor(text) { return { lineStart: 1, lineEnd: String(text).split(/\r?\n/).length }; }
@@ -159,6 +173,7 @@ class WorkspaceReviewCoordinator {
   nextCheck(assessment, now = this.now()) { const hours = assessment.projects.some(project => project.cadence === 'daily') ? 24 : assessment.projects.some(project => project.cadence === 'weekly') ? 7 * 24 : 30 * 24; return new Date(now.getTime() + hours * 3600000).toISOString(); }
   async #perform(id, trigger, settings, signal) {
     const startedAt = this.now(); const startedTick = Date.now(); let evidence = null;
+    let lastRequest = null; let lastResponse = null;
     const elapsed = () => `${Math.round((Date.now() - startedTick) / 1000)}s`;
     const progress = message => console.log(`[ok-workbench] workspace review ${id}: ${message} (${elapsed()})`);
     progress(`started; trigger=${trigger}, model=${settings.provider}/${settings.model}, effort=${settings.effort || 'default'}`);
@@ -175,10 +190,13 @@ class WorkspaceReviewCoordinator {
         progress(`waiting for ${label} response`);
         const heartbeat = setInterval(() => progress(`still waiting for ${label} response`), 30_000);
         heartbeat.unref?.();
+        lastRequest = { label, prompt, evidence: input };
+        lastResponse = null;
         let response;
         try { response = await this.provider({ provider: settings.provider, model: settings.model, effort: settings.effort, prompt, evidence: input, timeout: REVIEW_TIMEOUT_MS, signal }); }
         finally { clearInterval(heartbeat); }
         progress(`${label} response received; responseBytes=${Buffer.byteLength(response || '')}`);
+        lastResponse = response;
         if (signal.aborted) throw fail('Review was cancelled by a settings change', 'SUPERSEDED');
         if (Buffer.byteLength(response || '') > RESPONSE_LIMIT) throw fail('The selected model returned a response over the review size limit', 'INVALID_REVIEW');
         return response;
@@ -224,7 +242,8 @@ class WorkspaceReviewCoordinator {
       return record;
     } catch (caught) {
       const reason = signal?.aborted ? 'SUPERSEDED' : caught.code || 'PROVIDER_UNAVAILABLE';
-      console.error(`[ok-workbench] workspace review ${id}: failed; code=${reason}, model=${settings.provider}/${settings.model}, elapsed=${elapsed()}: ${caught.message}`);
+      if (lastRequest) logReviewExchange({ ...lastRequest, provider: settings.provider, model: settings.model, effort: settings.effort, response: lastResponse, error: caught });
+      console.error(`[ok-workbench] ${new Date().toISOString()} workspace review ${id}: failed; code=${reason}, model=${settings.provider}/${settings.model}, elapsed=${elapsed()}: ${caught.message}`);
       await this.store.updateRuntime(runtime => { runtime.lastJob = { id, state: reason === 'SUPERSEDED' ? 'superseded' : 'failed', error: { code: reason, message: caught.message }, completedAt: this.now().toISOString() }; if (reason === 'INVALID_REVIEW') { const key = `${settings.provider}/${settings.model}`; runtime.invalidReviewStreak[key] = (runtime.invalidReviewStreak[key] || 0) + 1; } if (trigger === 'automatic' && reason !== 'SUPERSEDED' && evidence?.fingerprint) { const key = `automatic:${evidence.fingerprint}`; const retry = runtime.retry[key] || { count: 0 }; runtime.retry[key] = { ...retry, count: retry.count + 1, trigger: 'automatic', fingerprint: evidence.fingerprint, nextAt: new Date(this.now().getTime() + 30 * 60_000).toISOString() }; } return runtime; });
       throw caught;
     }

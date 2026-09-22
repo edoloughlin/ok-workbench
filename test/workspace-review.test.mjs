@@ -76,9 +76,18 @@ test('a non-JSON response is rejected with a bounded head/tail preview in the se
     assert.equal(state.error.code, 'INVALID_REVIEW'); assert.match(state.error.message, /did not return valid review JSON/);
     const line = logged.find(entry => entry.includes('workspace review rejected (unparsable JSON'));
     assert.ok(line, 'the rejection is logged for the operator');
+    assert.match(line, /\[ok-workbench\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z workspace review rejected/);
     assert.match(line, /response head\/tail: "Here is the review: \{/);
     assert.match(line, /need changes\."\)$/);
     assert.ok(!line.includes(secret), 'the preview is bounded and never echoes the full response');
+    const exchange = logged.find(entry => entry.includes('workspace review LLM exchange (error)'));
+    assert.ok(exchange, 'the failed LLM exchange is logged for the operator');
+    const exchangeData = JSON.parse(exchange.slice(exchange.indexOf('{')));
+    assert.match(exchangeData.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(exchangeData.request.prompt.includes('read-only workspace reviewer'), true);
+    assert.equal(exchangeData.request.evidence.projects[0].id, 'alpha');
+    assert.equal(exchangeData.response.includes(secret), true);
+    assert.equal(exchangeData.error.code, 'INVALID_REVIEW');
     assert.ok(!JSON.stringify(state).includes('Here is the review'), 'the raw response never reaches the client state');
   } finally { console.error = original; await rm(root, { recursive: true, force: true }); }
 });
