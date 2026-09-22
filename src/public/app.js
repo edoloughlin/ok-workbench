@@ -436,7 +436,7 @@ function reviewErrorMessage(error) {
     if (error.message?.startsWith('project evidenceIds must contain')) return 'A project assessment did not cite any collected evidence. The review was not saved.';
     if (error.message?.startsWith('claimEvidence claim ')) return 'The model attached a supporting quote with an unsupported claim type. The review was not saved.';
     if (error.message?.startsWith('claimEvidence sourceId ')) return 'A supporting quote cited a document that was not part of the evidence. The review was not saved.';
-    if (error.message?.includes('did not return valid review JSON')) return 'The model replied with text that was not a single JSON review object. The review was not saved; check the server log for the response preview.';
+    if (error.message?.includes('did not return valid review JSON')) return 'The model replied with text that was not a single JSON review object. The review was not saved; the response shape below shows how the reply was malformed, and the server log has a bounded preview.';
     if (error.message?.startsWith('non-active lifecycle needs supporting claimEvidence')) return 'A project was marked waiting, parked, or complete without the required supporting quote. The review was not saved.';
     return 'Could not produce a supported review.';
   }
@@ -450,7 +450,12 @@ function reviewErrorBanner(error) {
   // fresh check, and point at the one action that can clear it.
   const at = error.at ? new Date(error.at) : null;
   const meta = at ? `<span class="workspace-error-meta">Last attempted <time title="${reviewEscape(at.toISOString())}">${reviewEscape(at.toLocaleString())}</time>; this stays until you try again.</span>` : '';
-  return `<p class="workspace-error">Review unavailable: ${reviewEscape(reviewErrorMessage(error))}</p>${meta ? `<p class="workspace-error-meta-line">${meta}</p>` : ''}`;
+  // A persisted, content-free response shape (computed on the server) turns
+  // an opaque "not valid JSON" failure into a diagnosable one: an empty
+  // reply, a truncated reply, and a prose-wrapped reply all look different
+  // here, and no rejected model text ever reaches the client.
+  const detail = error.detail ? `<p class="workspace-error-meta-line"><span class="workspace-error-meta">Model response shape — ${reviewEscape(error.detail)}</span></p>` : '';
+  return `<p class="workspace-error">Review unavailable: ${reviewEscape(reviewErrorMessage(error))}</p>${detail}${meta ? `<p class="workspace-error-meta-line">${meta}</p>` : ''}`;
 }
 function reviewSource(item, sources) { const source = sources?.find(value => value.id === item.evidenceIds?.[0]); if (!source?.path) return ''; const prefix = source.projectId ? `/workspace/${encodeURIComponent(source.projectId)}/` : '/workspace/'; const href = `${prefix}${source.path.split('/').map(encodeURIComponent).join('/')}`; return `<a class="workspace-source" href="${href}">Evidence: ${reviewEscape(source.path)}${source.heading ? ` · ${reviewEscape(source.heading)}` : ''}</a>`; }
 async function loadWorkspaceReview() {

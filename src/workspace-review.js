@@ -54,7 +54,21 @@ function responsePreview(response, edge = 80) {
   if (!text) return '<empty>';
   return text.length <= edge * 2 ? JSON.stringify(text) : `${JSON.stringify(text.slice(0, edge))} … ${JSON.stringify(text.slice(-edge))}`;
 }
-function logRejectedReview(reason, response, { preview = false } = {}) { console.error(`[ok-workbench] ${new Date().toISOString()} workspace review rejected (${reason}; response bytes: ${Buffer.byteLength(response || '')}${preview ? `; response head/tail: ${responsePreview(response)}` : ''})`); }
+// A content-free shape summary of a rejected response that is safe to
+// persist and show in the client, unlike responsePreview: it describes only
+// the envelope (size, how it starts and ends, fence-marker count) and never
+// echoes model text, so the "rejected output is never persisted" rule holds.
+// It still tells an empty reply, a truncated reply, and a prose-wrapped reply
+// apart, which is what an operator needs to diagnose a misbehaving model.
+function responseShape(response) {
+  const text = String(response || '').trim();
+  if (!text) return 'empty response';
+  const start = text.startsWith('{') ? 'starts with {' : text.startsWith('```') ? 'starts with a code fence' : 'starts with other text';
+  const end = text.endsWith('}') ? 'ends with }' : text.endsWith('```') ? 'ends with a code fence' : 'ends with other text (possibly truncated)';
+  const fences = (text.match(/```/g) || []).length;
+  return `${Buffer.byteLength(text)} bytes; ${start}; ${end}${fences ? `; ${fences} fence marker${fences === 1 ? '' : 's'}` : ''}`;
+}
+function logRejectedReview(reason, response, { preview = false } = {}) { console.error(`[${new Date().toISOString()}] [ok-workbench] workspace review rejected (${reason}; response bytes: ${Buffer.byteLength(response || '')}${preview ? `; response head/tail: ${responsePreview(response)}` : ''})`); }
 function logReviewExchange({ label, provider, model, effort, prompt, evidence, response = null, error }) {
   const timestamp = new Date().toISOString();
   const exchange = {
@@ -67,7 +81,7 @@ function logReviewExchange({ label, provider, model, effort, prompt, evidence, r
     response,
     error: error ? { code: error.code || 'PROVIDER_UNAVAILABLE', message: error.message } : null
   };
-  console.error(`[ok-workbench] ${timestamp} workspace review LLM exchange (error) ${JSON.stringify(exchange)}`);
+  console.error(`[${timestamp}] [ok-workbench] workspace review LLM exchange (error) ${JSON.stringify(exchange)}`);
 }
 function truncate(value, bytes) { const source = Buffer.from(value || '', 'utf8'); return source.length <= bytes ? source.toString('utf8') : source.subarray(0, bytes).toString('utf8').replace(/[^\n]*$/, '') + '\n[truncated]'; }
 function heading(text) { return String(text).match(/^#{1,6}\s+(.+)$/m)?.[1]?.trim() || 'Document'; }
@@ -154,7 +168,7 @@ class WorkspaceReviewCoordinator {
     }
     const modelKey = `${settings.provider}/${settings.model}`; const modelWarning = (runtime.invalidReviewStreak[modelKey] || 0) >= 2 ? 'The last two review attempts could not be parsed or validated. This model may not be capable of reviews; automatic retries are paused until review settings change.' : null;
     const lastJobError = runtime.lastJob?.error;
-    return { settings, controlsRevision: controls.revision, review, monitor: settings.automatic ? (runtime.paused ? 'paused' : 'enabled') : 'manual', job: this.running ? { state: 'running', id: this.running.id } : { state: 'idle' }, freshness, coverage: current?.coverage || latest?.coverage || [], nextCheckAt: runtime.nextCheckAt, modelWarning, error: lastJobError || collectionError ? { code: collectionError?.code || lastJobError?.code, message: collectionError?.message || lastJobError?.message, at: collectionError ? null : runtime.lastJob?.completedAt || null } : null };
+    return { settings, controlsRevision: controls.revision, review, monitor: settings.automatic ? (runtime.paused ? 'paused' : 'enabled') : 'manual', job: this.running ? { state: 'running', id: this.running.id } : { state: 'idle' }, freshness, coverage: current?.coverage || latest?.coverage || [], nextCheckAt: runtime.nextCheckAt, modelWarning, error: lastJobError || collectionError ? { code: collectionError?.code || lastJobError?.code, message: collectionError?.message || lastJobError?.message, detail: collectionError ? null : lastJobError?.detail || null, at: collectionError ? null : runtime.lastJob?.completedAt || null } : null };
   }
   async run(trigger = 'manual') {
     if (this.running) return { jobId: this.running.id, state: 'running', reused: true };
@@ -175,7 +189,7 @@ class WorkspaceReviewCoordinator {
     const startedAt = this.now(); const startedTick = Date.now(); let evidence = null;
     let lastRequest = null; let lastResponse = null;
     const elapsed = () => `${Math.round((Date.now() - startedTick) / 1000)}s`;
-    const progress = message => console.log(`[ok-workbench] workspace review ${id}: ${message} (${elapsed()})`);
+    const progress = message => console.log(`[${new Date().toISOString()}] [ok-workbench] workspace review ${id}: ${message} (${elapsed()})`);
     progress(`started; trigger=${trigger}, model=${settings.provider}/${settings.model}, effort=${settings.effort || 'default'}`);
     await this.store.updateRuntime(runtime => { runtime.lastJob = { id, state: 'running', startedAt: startedAt.toISOString() }; return runtime; });
     try {
@@ -187,6 +201,9 @@ class WorkspaceReviewCoordinator {
       evidence.payload.recurrence = (previous?.assessment?.attention || []).map(item => ({ issueId: item.id, evidenceSignature: item.evidenceSignature, unactedReviewCount: item.unactedReviewCount || 0, escalation: item.escalation?.mode || null })).slice(-20);
       evidence.payload.allocation = (await this.focus()).allocation;
       const requestCandidate = async (prompt, input, label) => {
+        const promptBytes = Buffer.byteLength(prompt || '');
+        const evidenceBytes = Buffer.byteLength(JSON.stringify(input));
+        progress(`requesting ${label}; promptBytes=${promptBytes}, evidenceBytes=${evidenceBytes}, inputBytes=${promptBytes + evidenceBytes}`);
         progress(`waiting for ${label} response`);
         const heartbeat = setInterval(() => progress(`still waiting for ${label} response`), 30_000);
         heartbeat.unref?.();
@@ -203,7 +220,15 @@ class WorkspaceReviewCoordinator {
       };
       const parseCandidate = response => {
         try { return JSON.parse(unwrapJsonFence(response)); }
-        catch { logRejectedReview('unparsable JSON', response, { preview: true }); throw fail('The selected model did not return valid review JSON', 'INVALID_REVIEW'); }
+        catch {
+          logRejectedReview('unparsable JSON', response, { preview: true });
+          const parseError = fail('The selected model did not return valid review JSON', 'INVALID_REVIEW');
+          // Persist a content-free shape summary so the failure is diagnosable
+          // from saved state alone; the full head/tail preview stays in the
+          // console log only, and rejected output is still never persisted.
+          parseError.detail = responseShape(response);
+          throw parseError;
+        }
       };
       const validateCandidate = (raw, response) => {
         try {
@@ -243,8 +268,8 @@ class WorkspaceReviewCoordinator {
     } catch (caught) {
       const reason = signal?.aborted ? 'SUPERSEDED' : caught.code || 'PROVIDER_UNAVAILABLE';
       if (lastRequest) logReviewExchange({ ...lastRequest, provider: settings.provider, model: settings.model, effort: settings.effort, response: lastResponse, error: caught });
-      console.error(`[ok-workbench] ${new Date().toISOString()} workspace review ${id}: failed; code=${reason}, model=${settings.provider}/${settings.model}, elapsed=${elapsed()}: ${caught.message}`);
-      await this.store.updateRuntime(runtime => { runtime.lastJob = { id, state: reason === 'SUPERSEDED' ? 'superseded' : 'failed', error: { code: reason, message: caught.message }, completedAt: this.now().toISOString() }; if (reason === 'INVALID_REVIEW') { const key = `${settings.provider}/${settings.model}`; runtime.invalidReviewStreak[key] = (runtime.invalidReviewStreak[key] || 0) + 1; } if (trigger === 'automatic' && reason !== 'SUPERSEDED' && evidence?.fingerprint) { const key = `automatic:${evidence.fingerprint}`; const retry = runtime.retry[key] || { count: 0 }; runtime.retry[key] = { ...retry, count: retry.count + 1, trigger: 'automatic', fingerprint: evidence.fingerprint, nextAt: new Date(this.now().getTime() + 30 * 60_000).toISOString() }; } return runtime; });
+      console.error(`[${new Date().toISOString()}] [ok-workbench] workspace review ${id}: failed; code=${reason}, model=${settings.provider}/${settings.model}, elapsed=${elapsed()}: ${caught.message}`);
+      await this.store.updateRuntime(runtime => { runtime.lastJob = { id, state: reason === 'SUPERSEDED' ? 'superseded' : 'failed', error: { code: reason, message: caught.message, ...(caught.detail ? { detail: caught.detail } : {}) }, completedAt: this.now().toISOString() }; if (reason === 'INVALID_REVIEW') { const key = `${settings.provider}/${settings.model}`; runtime.invalidReviewStreak[key] = (runtime.invalidReviewStreak[key] || 0) + 1; } if (trigger === 'automatic' && reason !== 'SUPERSEDED' && evidence?.fingerprint) { const key = `automatic:${evidence.fingerprint}`; const retry = runtime.retry[key] || { count: 0 }; runtime.retry[key] = { ...retry, count: retry.count + 1, trigger: 'automatic', fingerprint: evidence.fingerprint, nextAt: new Date(this.now().getTime() + 30 * 60_000).toISOString() }; } return runtime; });
       throw caught;
     }
   }
@@ -302,4 +327,4 @@ class WorkspaceReviewCoordinator {
   }
   stop() { if (this.timer) clearInterval(this.timer); if (this.grace) clearTimeout(this.grace); this.timer = null; this.grace = null; }
 }
-module.exports = { WorkspaceReviewCoordinator, collectEvidence, projectRoots, reviewPrompt, reviewCoveragePrompt, reportPrompt, reportLogHistory, annotateAttentionRecurrence, truncate, fail, reviewModelTier, reviewContextTokensRequired, REVIEW_MODEL_TIERS, RESPONSE_LIMIT, REVIEW_TIMEOUT_MS, unwrapJsonFence };
+module.exports = { WorkspaceReviewCoordinator, collectEvidence, projectRoots, reviewPrompt, reviewCoveragePrompt, reportPrompt, reportLogHistory, annotateAttentionRecurrence, truncate, fail, reviewModelTier, reviewContextTokensRequired, REVIEW_MODEL_TIERS, RESPONSE_LIMIT, REVIEW_TIMEOUT_MS, unwrapJsonFence, responseShape };

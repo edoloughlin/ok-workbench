@@ -33,6 +33,23 @@ test('run is single-flight and returns a job before a provider result', async ()
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('normal review logs include an ISO timestamp and request and response byte sizes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-'));
+  const logged = []; const original = console.log; console.log = (...args) => logged.push(args.join(' '));
+  try {
+    await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n');
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => '{}' });
+    await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
+    await coordinator.run(); await coordinator.running.task.catch(() => {});
+    const request = logged.find(entry => entry.includes('requesting model;'));
+    const response = logged.find(entry => entry.includes('model response received;'));
+    assert.match(request, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review /);
+    assert.match(request, /promptBytes=\d+, evidenceBytes=\d+, inputBytes=\d+/);
+    assert.match(response, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review /);
+    assert.match(response, /responseBytes=2/);
+  } finally { console.log = original; await rm(root, { recursive: true, force: true }); }
+});
+
 test('a single Markdown-fenced JSON object is unwrapped, but prose and partial fences are left untouched', () => {
   assert.equal(unwrapJsonFence('```json\n{"a":1}\n```'), '{"a":1}');
   assert.equal(unwrapJsonFence('```\n{"a":1}\n```'), '{"a":1}');
@@ -74,9 +91,13 @@ test('a non-JSON response is rejected with a bounded head/tail preview in the se
     await coordinator.run(); await coordinator.running.task;
     const state = await coordinator.state();
     assert.equal(state.error.code, 'INVALID_REVIEW'); assert.match(state.error.message, /did not return valid review JSON/);
+    // The persisted detail is a content-free shape summary: it distinguishes
+    // an empty, truncated, and prose-wrapped reply without echoing model text.
+    assert.match(state.error.detail, /^\d+ bytes; starts with other text; ends with other text \(possibly truncated\)$/);
+    assert.ok(!state.error.detail.includes('Here is the review'), 'the persisted shape never echoes response text');
     const line = logged.find(entry => entry.includes('workspace review rejected (unparsable JSON'));
     assert.ok(line, 'the rejection is logged for the operator');
-    assert.match(line, /\[ok-workbench\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z workspace review rejected/);
+    assert.match(line, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review rejected/);
     assert.match(line, /response head\/tail: "Here is the review: \{/);
     assert.match(line, /need changes\."\)$/);
     assert.ok(!line.includes(secret), 'the preview is bounded and never echoes the full response');
