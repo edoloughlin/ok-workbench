@@ -434,6 +434,9 @@ function reviewErrorMessage(error) {
     if (error.message?.startsWith('claimEvidence excerpt is not in its cited source')) return 'A supporting quote did not exactly match its cited document. The review was not saved.';
     if (error.message?.startsWith('projects must contain')) return 'The model omitted one or more projects from the review. The review was not saved.';
     if (error.message?.startsWith('project evidenceIds must contain')) return 'A project assessment did not cite any collected evidence. The review was not saved.';
+    if (error.message?.startsWith('claimEvidence claim ')) return 'The model attached a supporting quote with an unsupported claim type. The review was not saved.';
+    if (error.message?.startsWith('claimEvidence sourceId ')) return 'A supporting quote cited a document that was not part of the evidence. The review was not saved.';
+    if (error.message?.includes('did not return valid review JSON')) return 'The model replied with text that was not a single JSON review object. The review was not saved; check the server log for the response preview.';
     if (error.message?.startsWith('non-active lifecycle needs supporting claimEvidence')) return 'A project was marked waiting, parked, or complete without the required supporting quote. The review was not saved.';
     return 'Could not produce a supported review.';
   }

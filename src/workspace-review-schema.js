@@ -20,7 +20,10 @@ function plain(value, name, max, { nullable = false, optional = false } = {}) {
   if (!text || text.length > max || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw error(`${name} must be 1 to ${max} plain-text characters`);
   return text;
 }
-function firstStep(value) { const text = plain(value, 'firstStep', 140); if (/^(?:work on|make progress(?: on)?|advance|continue|address|handle|review)(?:\s+(?:the|this|it|project|work))*[.!]?$/i.test(text) || /(?:;|\bthen\b|\band\b|\bafter that\b)/i.test(text)) throw error(`firstStep must be one concrete, startable action: ${JSON.stringify(text)} is either a vague directive or chains steps; rewrite it as one short imperative clause naming a single physical action, without "and", "then", ";", or "after that"`); return text; }
+// Verbs that, directly after "and", mark a second chained action. A bare
+// "and" inside a heading or title ("Gaps and inconsistencies") is not a chain.
+const CHAIN_VERBS = /\band\s+(?:open|read|write|send|email|mail|call|phone|message|ping|text|draft|update|edit|create|add|remove|delete|check|review|run|schedule|book|ask|reply|answer|post|move|rename|list|file|mark|close|confirm|verify|record|note|copy|paste|log|start|stop|finish|complete|set|pick|choose|decide|compare|merge|commit|push|deploy|test|fix|install|search|find|look|summari[sz]e|outline|rewrite|reword|reorder|archive|tag|assign|approve|reject|submit|request|order|pay|sign|upload|download|export|import|attach|link|share|publish|announce|notify|contact|meet|talk|discuss|visit|take|bring|put|place|clear|clean|sort|split|combine|scan|measure|count|estimate|plan|prepare|gather|collect|fill|enter|type|save|restore|reset|restart|turn|switch|enable|disable|toggle|apply|revert|print|walk|go|get|make|do|tell|show|explain|describe|report|follow|prioriti[sz]e|then)\b/i;
+function firstStep(value) { const text = plain(value, 'firstStep', 140); const unquoted = text.replace(/"[^"]*"|\u201c[^\u201d]*\u201d|'[^']*'|`[^`]*`/g, '""'); if (/^(?:work on|make progress(?: on)?|advance|continue|address|handle|review)(?:\s+(?:the|this|it|project|work))*[.!]?$/i.test(text) || /(?:;|\bthen\b|\bafter that\b)/i.test(unquoted) || CHAIN_VERBS.test(unquoted)) throw error(`firstStep must be one concrete, startable action: ${JSON.stringify(text)} is either a vague directive or chains steps; rewrite it as one short imperative clause naming a single physical action, without "and", "then", ";", or "after that"`); return text; }
 function enumValue(value, values, name) { if (!values.has(value)) throw error(`${name} is invalid`); return value; }
 function object(value, name) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw error(`${name} must be an object`); return value; }
 function array(value, name, max, min = 0) { if (!Array.isArray(value) || value.length < min || value.length > max) throw error(`${name} must contain ${min} to ${max} items`); return value; }
@@ -38,11 +41,13 @@ function evidenceIds(value, known, name, projectId, sourceMap) {
   }
   return ids;
 }
-function claimEvidence(value, sourceMap, allowed = new Set(['waiting', 'parked', 'complete', 'improvement', 'consequence'])) {
+const CLAIM_KINDS = new Set(['waiting', 'parked', 'complete', 'improvement', 'consequence']);
+function claimEvidence(value, sourceMap, allowed = CLAIM_KINDS) {
   if (value === undefined) return undefined;
   return array(value, 'claimEvidence', 3).map(item => {
     exactKeys(object(item, 'claimEvidence item'), new Set(['claim', 'sourceId', 'excerpt']), 'claimEvidence item');
-    if (!allowed.has(item.claim) || !sourceMap.has(item.sourceId)) throw error('claimEvidence is invalid');
+    if (!allowed.has(item.claim)) throw error(`claimEvidence claim ${JSON.stringify(item.claim)} is invalid; claim must be one of ${[...allowed].join(', ')}, and claimEvidence must be an empty array when no such claim is made`);
+    if (typeof item.sourceId !== 'string' || !sourceMap.has(item.sourceId)) throw error(`claimEvidence sourceId ${JSON.stringify(item.sourceId)} is not a supplied source id`);
     const excerpt = plain(item.excerpt, 'claimEvidence excerpt', 300);
     const source = sourceMap.get(item.sourceId); if (source.generated || !source.excerpt || !source.excerpt.includes(excerpt)) throw error(`claimEvidence excerpt is not in its cited source (${JSON.stringify({ projectId: source.projectId, path: source.path })})`);
     return { claim: item.claim, sourceId: item.sourceId, excerpt };
@@ -109,4 +114,4 @@ function publicReview(record, controls, { now = new Date(), timeZone = 'UTC' } =
   return { ...record, projects, attention, deferred };
 }
 
-module.exports = { PRIORITIES, TRAJECTORIES, LIFECYCLES, URGENCIES, CADENCES, ISSUE_KINDS, priorityOrder, urgencyOrder, hash, stableIssueId, validateReview, effectivePriority, runway, publicReview, error };
+module.exports = { PRIORITIES, TRAJECTORIES, LIFECYCLES, CLAIM_KINDS, URGENCIES, CADENCES, ISSUE_KINDS, priorityOrder, urgencyOrder, hash, stableIssueId, validateReview, effectivePriority, runway, publicReview, error };

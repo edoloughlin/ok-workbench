@@ -29,7 +29,7 @@ test('run is single-flight and returns a job before a provider result', async ()
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     const first = await coordinator.run(); const second = await coordinator.run();
     assert.equal(first.state, 'running'); assert.equal(second.state, 'running'); assert.equal(second.reused, true); assert.equal(first.jobId, second.jobId);
-    const task = coordinator.running.task; for (let index = 0; index < 20 && !resolveProvider; index++) await new Promise(resolve => setTimeout(resolve, 1)); assert.equal(typeof resolveProvider, 'function'); resolveProvider('{}'); await task;
+    const task = coordinator.running.task; for (let index = 0; index < 500 && !resolveProvider; index++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(typeof resolveProvider, 'function'); resolveProvider('{}'); await task;
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -61,6 +61,26 @@ test('a model response fenced entirely in Markdown still produces a valid, publi
     const state = await coordinator.state();
     assert.equal(state.error, null); assert.ok(state.review, 'a fenced-JSON response should still be validated and published');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a non-JSON response is rejected with a bounded head/tail preview in the server log only', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-'));
+  const logged = []; const original = console.error; console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n');
+    const secret = 'MIDDLE-OF-RESPONSE-NEVER-LOGGED'.repeat(20);
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => `Here is the review:\n{"headline": "${secret}"}\nLet me know if you need changes.` });
+    await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
+    await coordinator.run(); await coordinator.running.task;
+    const state = await coordinator.state();
+    assert.equal(state.error.code, 'INVALID_REVIEW'); assert.match(state.error.message, /did not return valid review JSON/);
+    const line = logged.find(entry => entry.includes('workspace review rejected (unparsable JSON'));
+    assert.ok(line, 'the rejection is logged for the operator');
+    assert.match(line, /response head\/tail: "Here is the review: \{/);
+    assert.match(line, /need changes\."\)$/);
+    assert.ok(!line.includes(secret), 'the preview is bounded and never echoes the full response');
+    assert.ok(!JSON.stringify(state).includes('Here is the review'), 'the raw response never reaches the client state');
+  } finally { console.error = original; await rm(root, { recursive: true, force: true }); }
 });
 
 test('a manual Codex review corrects one invalid candidate within the same job', async () => {
@@ -173,6 +193,12 @@ test('a project without Markdown can receive a cited unknown assessment', async 
     assert.equal(validateReview(raw, evidence).projects[0].lifecycle, 'unknown');
     raw.projects[0].claimEvidence = [{ claim: 'complete', sourceId: missing.id, excerpt: missing.excerpt }];
     assert.throws(() => validateReview(raw, evidence), /claimEvidence excerpt is not in its cited source/);
+    // Models commonly put a lifecycle or trajectory label in claim, or cite an
+    // ID that was never supplied; each rejection must name the actual problem.
+    raw.projects[0].claimEvidence = [{ claim: 'active', sourceId: missing.id, excerpt: 'x' }];
+    assert.throws(() => validateReview(raw, evidence), /claimEvidence claim "active" is invalid; claim must be one of waiting, parked, complete, improvement, consequence/);
+    raw.projects[0].claimEvidence = [{ claim: 'complete', sourceId: 'not-a-source', excerpt: 'x' }];
+    assert.throws(() => validateReview(raw, evidence), /claimEvidence sourceId "not-a-source" is not a supplied source id/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -404,4 +430,14 @@ test('report log evidence is limited to the requested dated history', () => {
 test('review validation rejects vague or multi-action first steps', () => {
   const source = { id: 'source', projectId: 'alpha', path: 'status.md', heading: 'Status', excerpt: '# Status\n', hash: 'hash' }; const raw = { headline: 'Headline', summary: 'Summary', focusProjectId: 'alpha', evidenceIds: ['source'], changes: [], projects: [{ projectId: 'alpha', priority: 'next', rank: 1, priorityReason: 'Reason', confidence: 'medium', trajectory: 'watch', lifecycle: 'active', outcome: 'Outcome', assessment: 'Assessment', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Reason', evidenceIds: ['source'], claimEvidence: [] }], attention: [{ projectId: 'alpha', kind: 'drift', topic: 'Topic', urgency: 'soon', title: 'Title', observation: 'Observed', inference: 'Inferred', action: 'Act', firstStep: 'Review the project', evidenceIds: ['source'], dueDate: null, dueDateEvidence: null, claimEvidence: [] }], question: null };
   assert.throws(() => validateReview(raw, { projects: [{ id: 'alpha' }], sources: [source] }), /firstStep/); raw.attention[0].firstStep = 'Open status.md.'; assert.doesNotThrow(() => validateReview(raw, { projects: [{ id: 'alpha' }], sources: [source] })); raw.attention[0].firstStep = 'Open status.md and write the next test.'; assert.throws(() => validateReview(raw, { projects: [{ id: 'alpha' }], sources: [source] }), /firstStep/);
+  const check = step => { raw.attention[0].firstStep = step; return () => validateReview(raw, { projects: [{ id: 'alpha' }], sources: [source] }); };
+  // A conjunction inside a heading or title is literal text, not a chain.
+  assert.doesNotThrow(check('Open chat-reliability/review.md at Gaps and inconsistencies'));
+  assert.doesNotThrow(check('Open review.md at the "Risks and open questions" heading'));
+  assert.doesNotThrow(check('Open review.md at the \u201cThen and now\u201d heading'));
+  // Genuine chains are still rejected, quoted text or not.
+  assert.throws(check('Open review.md at "Gaps" and email Bob'), /firstStep/);
+  assert.throws(check('Open review.md, then draft the summary'), /firstStep/);
+  assert.throws(check('Open review.md; draft the summary'), /firstStep/);
+  assert.throws(check('Open review.md and after that draft the summary'), /firstStep/);
 });
