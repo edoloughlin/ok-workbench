@@ -101,7 +101,7 @@ async function withOverview(fn) {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${serverPort}/workspace/`, { waitUntil: 'networkidle' });
     await page.waitForSelector('.workspace-overview', { timeout: 5000 });
-    await fn(page, { serverPort });
+    await fn(page, { serverPort, state, workspace });
   } finally {
     await browser?.close().catch(() => {});
     await stopServer(server);
@@ -124,6 +124,50 @@ test('the overview renders every attention item, escalation, and the question in
     await assert.doesNotReject(today.locator('text=Consequence to avoid').waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('.doc-kicker', { hasText: 'SINCE THE LAST REVIEW' }).waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('text=Alpha finished initial setup').first().waitFor({ timeout: 3000 }));
+  });
+});
+
+test('Today keeps included actions after exclusion, then shows a new scoped briefing', async () => {
+  await withOverview(async (page, { state, workspace }) => {
+    const store = new WorkspaceReviewStore({ stateDir: state, workspaceRoot: workspace });
+    await store.saveSettings({ provider: null, model: null, excludedProjects: ['alpha'] }, 1);
+    await page.reload({ waitUntil: 'networkidle' });
+    const today = page.locator('#review-panel-today');
+    assert.equal(await today.locator('.workspace-brief').count(), 0);
+    assert.equal(await today.locator('.workspace-attention').count(), 1);
+    assert.ok(await today.getByText('Beta deadline this week').isVisible());
+    assert.equal(await today.getByText('Workspace review updated').count(), 0);
+
+    const latest = await store.latest();
+    latest.pipeline = { selectedProjectIds: ['beta'] };
+    latest.assessment.headline = 'Beta needs a decision';
+    latest.assessment.summary = 'Beta has a deadline this week.';
+    latest.assessment.changes = [];
+    latest.assessment.attention = latest.assessment.attention.filter(item => item.projectId === 'beta');
+    await store.saveReview(latest);
+    await page.reload({ waitUntil: 'networkidle' });
+    assert.ok(await today.locator('.workspace-brief').isVisible());
+    assert.ok(await today.getByText('Beta needs a decision').isVisible());
+
+    await store.saveSettings({ provider: null, model: null, excludedProjects: ['alpha', 'beta'] }, 2);
+    await page.reload({ waitUntil: 'networkidle' });
+    assert.equal(await today.locator('.workspace-brief').count(), 0);
+    assert.ok(await today.getByText('No projects selected for review.').isVisible());
+    assert.ok(await today.getByRole('button', { name: 'Choose projects' }).isVisible());
+  });
+});
+
+test('Today has a quiet state when the old briefing is unsafe and no actions remain', async () => {
+  await withOverview(async (page, { state, workspace }) => {
+    const store = new WorkspaceReviewStore({ stateDir: state, workspaceRoot: workspace });
+    const latest = await store.latest(); latest.assessment.attention = latest.assessment.attention.filter(item => item.projectId === 'beta');
+    await store.saveReview(latest);
+    await store.saveSettings({ provider: null, model: null, excludedProjects: ['beta'] }, 1);
+    await page.reload({ waitUntil: 'networkidle' });
+    const today = page.locator('#review-panel-today');
+    assert.ok(await today.getByText('No current recommendations for these projects yet.').isVisible());
+    assert.equal(await today.locator('.workspace-brief').count(), 0);
+    assert.equal(await today.getByText('Nothing else here needs a decision right now.').count(), 0);
   });
 });
 
@@ -278,11 +322,11 @@ test('a synthesis failure keeps the prior briefing visible and shows newly saved
       coverage: [{ projectId: 'alpha', included: true, reason: 'included' }], sources: [],
       assessment: { headline: 'Prior briefing stays published', summary: 'This is the last successful synthesis.', focusProjectId: 'alpha', evidenceIds: [], changes: [], question: null },
       projects: [{ projectId: 'alpha', outcome: 'Ship the alpha outcome', priority: 'next', rank: 1, priorityReason: 'Current evidence.', confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', assessment: 'Prior project assessment.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [], assessmentState: 'current', assessedAt, effectivePriority: { priority: 'next', source: 'inferred' } }],
-      attention: [], deferred: [], projectErrors: []
+      attention: [], deferred: [], projectErrors: [], briefingState: 'ready'
     };
     await page.route('**/api/workspace-review', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
       settings: { provider: 'openai', model: 'gpt-5', activityTracking: false, automatic: false }, controlsRevision: 0,
-      review, monitor: 'manual', job: { state: 'idle', id: 'failed-job', phase: null, progress: null }, freshness: synthesisFailed ? 'stale' : 'current',
+      review, eligibleProjectCount: 1, monitor: 'manual', job: { state: 'idle', id: 'failed-job', phase: null, progress: null }, freshness: synthesisFailed ? 'stale' : 'current',
       coverage: review.coverage, nextCheckAt: null, modelWarning: null,
       error: synthesisFailed ? { code: 'INVALID_REVIEW', message: 'Workspace review could not be completed', detail: '2 bytes; starts with other text; ends with other text (possibly truncated)', at: assessedAt } : null,
       pendingProjectStatus: synthesisFailed ? [{ projectId: 'alpha', state: 'current', assessedAt: '2026-09-23T12:05:00.000Z', errorCode: null }] : []

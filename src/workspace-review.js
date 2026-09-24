@@ -180,23 +180,36 @@ class WorkspaceReviewCoordinator {
   async state() {
     const [settings, controls, latest, runtime] = await Promise.all([this.store.settings(), this.store.controls(), this.store.latest(), this.store.runtime()]);
     let current = null; let collectionError = null;
-    if (latest) try { current = await collectEvidence(this.workspaceRoot, controls, this.now(), settings, this.stateDir, this.isIgnored); } catch (error) { collectionError = error; }
+    try { current = await collectEvidence(this.workspaceRoot, controls, this.now(), settings, this.stateDir, this.isIgnored); } catch (error) { collectionError = error; }
     const freshness = !latest ? 'none' : !current || current.fingerprint !== latest.inputFingerprint ? 'stale' : 'current';
     const review = publicReview(latest, controls, { now: this.now(), timeZone: settings.timezone || this.timeZone });
     if (review) {
       const excluded = new Set(settings.excludedProjects || []); const provenance = latest.pipeline?.projectProvenance || {};
       const liveIds = current ? new Set(current.projects.map(project => project.id)) : null;
-      const redacted = new Set([...excluded, ...(!liveIds ? [] : review.projects.map(project => project.projectId).filter(projectId => !liveIds.has(projectId)))]);
+      const redacted = new Set([...excluded, ...(!liveIds ? [] : (latest.sources || []).map(source => source.projectId).filter(projectId => projectId && !liveIds.has(projectId))), ...(!liveIds ? [] : review.projects.map(project => project.projectId).filter(projectId => !liveIds.has(projectId)))]);
+      const savedScope = latest.pipeline && Object.hasOwn(latest.pipeline, 'selectedProjectIds') ? latest.pipeline.selectedProjectIds : latest.assessment?.projects?.map(project => project.projectId);
+      const scopeKnown = Array.isArray(savedScope) && savedScope.every(projectId => typeof projectId === 'string');
+      const dependencies = new Set(scopeKnown ? savedScope : []);
+      if (latest.assessment?.focusProjectId) dependencies.add(latest.assessment.focusProjectId);
+      const sourceProjects = new Map((latest.sources || []).map(source => [source.id, source.projectId]));
+      const references = [latest.assessment?.evidenceIds, ...(latest.assessment?.changes || []).map(item => item.evidenceIds), ...(latest.assessment?.attention || []).map(item => item.evidenceIds), latest.assessment?.question?.evidenceIds].flat().filter(Boolean);
+      const referencesKnown = references.every(id => sourceProjects.has(id));
+      for (const id of references) { const projectId = sourceProjects.get(id); if (projectId) dependencies.add(projectId); }
+      review.briefingState = current?.projects.length === 0 ? 'empty' : !scopeKnown || !referencesKnown || [...dependencies].some(projectId => redacted.has(projectId) || (liveIds && !liveIds.has(projectId))) ? 'scope_changed' : 'ready';
       review.projects = review.projects.filter(project => !redacted.has(project.projectId)).map(project => { const source = provenance[project.projectId] || {}; const notIncluded = source.state === 'not_included'; return { ...project, ...source, rank: notIncluded ? null : project.rank, assessmentState: notIncluded ? 'stale' : source.state || 'stale', reviewInclusion: notIncluded ? 'not_included' : 'included' }; });
       review.projects.sort((a, b) => Number(a.reviewInclusion === 'not_included') - Number(b.reviewInclusion === 'not_included') || (a.rank ?? Number.POSITIVE_INFINITY) - (b.rank ?? Number.POSITIVE_INFINITY) || a.projectId.localeCompare(b.projectId));
-      review.attention = review.attention.filter(item => !redacted.has(item.projectId)); review.deferred = (review.deferred || []).filter(item => !redacted.has(item.projectId)); review.sources = (review.sources || []).filter(source => !redacted.has(source.projectId));
-      review.partial = Boolean(latest.partial); review.projectErrors = Object.entries(provenance).filter(([projectId, value]) => !excluded.has(projectId) && value.errorCode && value.errorCode !== 'NOT_SELECTED').map(([projectId, value]) => ({ projectId, code: value.error?.code || value.errorCode, stage: value.error?.stage || 'project', at: value.error?.at || null, ...(value.error?.validationDiagnostic ? { validationDiagnostic: value.error.validationDiagnostic } : {}), ...(value.error?.responseShape ? { responseShape: value.error.responseShape } : {}) }));
+      const retained = item => !redacted.has(item.projectId) && (item.evidenceIds || []).every(id => !redactedSourceIds.has(id));
+      const redactedSourceIds = new Set((latest.sources || []).filter(source => redacted.has(source.projectId)).map(source => source.id));
+      review.attention = review.attention.filter(retained); review.deferred = (review.deferred || []).filter(retained); review.sources = (review.sources || []).filter(source => !redacted.has(source.projectId));
+      review.coverage = (current?.coverage || latest.coverage || []).filter(item => !excluded.has(item.projectId));
+      review.assessment.projects = review.assessment.projects.filter(project => !redacted.has(project.projectId));
+      review.assessment.attention = (review.assessment.attention || []).filter(retained);
+      review.partial = Boolean(latest.partial && (!current || current.projects.some(project => !review.projects.some(item => item.projectId === project.id && item.assessmentState === 'current')))); review.projectErrors = Object.entries(provenance).filter(([projectId, value]) => !excluded.has(projectId) && value.errorCode && value.errorCode !== 'NOT_SELECTED').map(([projectId, value]) => ({ projectId, code: value.error?.code || value.errorCode, stage: value.error?.stage || 'project', at: value.error?.at || null, ...(value.error?.validationDiagnostic ? { validationDiagnostic: value.error.validationDiagnostic } : {}), ...(value.error?.responseShape ? { responseShape: value.error.responseShape } : {}) }));
       review.projectErrors = review.projectErrors.filter(item => !redacted.has(item.projectId));
       if (!review.projects.some(project => project.projectId === review.assessment?.focusProjectId)) review.assessment.focusProjectId = null;
-      const redactedSourceIds = new Set((latest.sources || []).filter(source => redacted.has(source.projectId)).map(source => source.id));
       if (review.assessment.question && (redacted.has(review.assessment.question.projectId) || review.assessment.question.evidenceIds?.some(id => redactedSourceIds.has(id)))) review.assessment.question = null;
       review.assessment.changes = (review.assessment.changes || []).filter(item => item.evidenceIds?.every(id => !redactedSourceIds.has(id)));
-      if (redacted.size) { review.assessment.headline = 'Workspace review updated'; review.assessment.summary = 'Some project findings are hidden because projects are excluded or unavailable.'; }
+      if (review.briefingState !== 'ready') { review.assessment.headline = null; review.assessment.summary = null; review.assessment.focusProjectId = null; review.assessment.evidenceIds = []; review.assessment.changes = []; review.assessment.question = null; }
     }
     const currentProjects = new Map(current?.projects.map(project => [project.id, project]) || []);
     if (review) for (const project of review.projects) {
@@ -208,7 +221,7 @@ class WorkspaceReviewCoordinator {
     const lastJobError = runtime.lastJob?.error;
     const job = this.running ? { state: 'running', id: this.running.id, phase: runtime.lastJob?.phase || null, progress: runtime.lastJob?.progress || null } : { state: runtime.lastJob?.state === 'running' ? 'running' : 'idle', id: runtime.lastJob?.id || null, phase: runtime.lastJob?.phase || null, progress: runtime.lastJob?.progress || null };
     const redactedPending = new Set(settings.excludedProjects || []); if (current) { const ids = new Set(current.projects.map(project => project.id)); for (const item of runtime.pendingProjectStatus || []) if (!ids.has(item.projectId)) redactedPending.add(item.projectId); }
-    return { settings, controlsRevision: controls.revision, review, monitor: settings.automatic ? (runtime.paused ? 'paused' : 'enabled') : 'manual', job, pendingProjectStatus: (runtime.pendingProjectStatus || []).filter(item => !redactedPending.has(item.projectId)), freshness, coverage: current?.coverage || latest?.coverage || [], nextCheckAt: runtime.nextCheckAt, modelWarning, error: lastJobError || collectionError ? { code: collectionError?.code || lastJobError?.code, message: collectionError?.message || lastJobError?.message, responseShape: collectionError ? null : lastJobError?.responseShape || null, validationDiagnostic: collectionError ? null : lastJobError?.validationDiagnostic || null, stage: collectionError ? 'collection' : lastJobError?.stage || 'coordinator', projectId: collectionError ? null : lastJobError?.projectId || null, at: collectionError ? null : lastJobError?.at || runtime.lastJob?.completedAt || null } : null };
+    return { settings, controlsRevision: controls.revision, review, eligibleProjectCount: current ? current.projects.length : null, monitor: settings.automatic ? (runtime.paused ? 'paused' : 'enabled') : 'manual', job, pendingProjectStatus: (runtime.pendingProjectStatus || []).filter(item => !redactedPending.has(item.projectId)), freshness, coverage: current?.coverage || latest?.coverage || [], nextCheckAt: runtime.nextCheckAt, modelWarning, error: lastJobError || collectionError ? { code: collectionError?.code || lastJobError?.code, message: collectionError?.message || lastJobError?.message, responseShape: collectionError ? null : lastJobError?.responseShape || null, validationDiagnostic: collectionError ? null : lastJobError?.validationDiagnostic || null, stage: collectionError ? 'collection' : lastJobError?.stage || 'coordinator', projectId: collectionError ? null : lastJobError?.projectId || null, at: collectionError ? null : lastJobError?.at || runtime.lastJob?.completedAt || null } : null };
   }
   async run(trigger = 'manual', { force = false } = {}) {
     if (this.running) return { jobId: this.running.id, state: 'running', reused: true };

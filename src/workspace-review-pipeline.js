@@ -371,8 +371,10 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     const projection = { projects: projectPacks, workspace: rootSources.map(source => ({ id: source.id, path: source.path, text: source.excerpt })), workspaceGaps: evidence.workspaceGaps || [], ...activeControls, recurrence, allocation: focus.allocation, deadlineToken, timezone: settings.timezone || timeZone };
     const synthesisProjectionKey = hash(canonical({ projection, provider: settings.provider, model: settings.model, effort: settings.effort || null, version: versions }));
     const newComparisonEvent = force || !previous?.pipeline || previous.pipeline.synthesisProjectionKey !== synthesisProjectionKey;
-    const publishedBaseline = previous ? { id: previous.id, headline: previous.assessment?.headline, summary: previous.assessment?.summary, changes: previous.assessment?.changes || [] } : null;
-    let comparisonBaseline = newComparisonEvent || !Object.hasOwn(previous.pipeline, 'comparisonBaseline') ? publishedBaseline : previous.pipeline.comparisonBaseline;
+    const previousScope = previous?.pipeline?.selectedProjectIds || previous?.assessment?.projects?.map(project => project.projectId) || [];
+    const removedFromScope = previousScope.some(projectId => !selectedIds.has(projectId));
+    const publishedBaseline = previous && !removedFromScope ? { id: previous.id, headline: previous.assessment?.headline, summary: previous.assessment?.summary, changes: previous.assessment?.changes || [] } : null;
+    let comparisonBaseline = removedFromScope ? null : (newComparisonEvent || !Object.hasOwn(previous.pipeline, 'comparisonBaseline') ? publishedBaseline : previous.pipeline.comparisonBaseline);
     if (comparisonBaseline && Buffer.byteLength(JSON.stringify(comparisonBaseline)) > 16 * 1024) comparisonBaseline = { ...comparisonBaseline, changes: [] };
     if (comparisonBaseline && Buffer.byteLength(JSON.stringify(comparisonBaseline)) > 16 * 1024) { const error = new Error('Comparison context exceeds 16 KiB'); error.code = 'INPUT_TOO_LARGE'; await saveFailureTrace({ stage: 'synthesis', projectId: null, attemptNumber: null, prompt: coordinator.workspaceSynthesisPrompt(), input: { ...projection, comparison: comparisonBaseline }, error }); throw error; }
     const synthesisInput = { ...projection, comparison: comparisonBaseline };

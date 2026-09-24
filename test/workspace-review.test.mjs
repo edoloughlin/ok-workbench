@@ -132,7 +132,7 @@ test('a model response fenced entirely in Markdown still produces a valid, publi
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
     const state = await coordinator.state();
-    assert.equal(state.error, null); assert.ok(state.review, 'a fenced-JSON response should still be validated and published');
+    assert.equal(state.error, null); assert.ok(state.review, 'a fenced-JSON response should still be validated and published'); assert.equal(state.review.briefingState, 'ready');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -442,8 +442,38 @@ test('excluding a project immediately redacts its cached review findings', async
     const evidence = await collectEvidence(root, {}); await coordinator.store.saveReview({ schemaVersion: 1, inputFingerprint: evidence.fingerprint, completedAt: '2026-09-21T10:00:00Z', sources: evidence.sources, coverage: evidence.coverage, assessment: { headline: 'alpha-secret headline', summary: 'alpha-secret summary', focusProjectId: 'alpha', question: { projectId: 'alpha', text: 'alpha-secret question', reason: 'reason', options: ['one', 'two'], evidenceIds: [evidence.projects[0].sources[0].id] }, projects: ['alpha', 'beta'].map((projectId, index) => ({ projectId, priority: 'next', rank: index + 1, trajectory: 'unknown', lifecycle: 'active' })), attention: [{ id: 'alpha-item', projectId: 'alpha', urgency: 'soon', evidenceSignature: 'same' }, { id: 'beta-item', projectId: 'beta', urgency: 'soon', evidenceSignature: 'same' }] } });
     await coordinator.settings({ provider: 'openai', model: 'reviewer', excludedProjects: ['alpha'] }, 1); const state = await coordinator.state();
     assert.deepEqual(state.review.projects.map(item => item.projectId), ['beta']); assert.deepEqual(state.review.attention.map(item => item.projectId), ['beta']);
+    assert.equal(state.review.briefingState, 'scope_changed'); assert.equal(state.eligibleProjectCount, 1);
+    assert.equal(state.review.assessment.headline, null); assert.equal(state.review.assessment.summary, null);
     assert.equal(state.review.assessment.focusProjectId, null); assert.equal(state.review.assessment.question, null);
     assert.ok(!JSON.stringify(state.review.assessment).includes('alpha-secret'), 'top-level synthesis cannot leak excluded-project details');
+    await coordinator.settings({ provider: 'openai', model: 'reviewer', excludedProjects: ['alpha', 'beta'] }, 2);
+    const empty = await coordinator.state(); assert.equal(empty.eligibleProjectCount, 0); assert.equal(empty.review.briefingState, 'empty');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a saved briefing remains usable when exclusions did not affect its synthesis scope', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-scope-'));
+  try {
+    for (const id of ['alpha', 'beta', 'gamma']) { await mkdir(path.join(root, id)); await writeFile(path.join(root, id, 'index.md'), `# ${id}\n`); }
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { throw new Error('state reads must not call the provider'); } });
+    await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer', excludedProjects: ['alpha', 'gamma'] }, 0);
+    const evidence = await collectEvidence(root, {}, new Date(), { excludedProjects: ['gamma'] }, root);
+    await coordinator.store.saveReview({ schemaVersion: 1, completedAt: new Date().toISOString(), sources: evidence.sources, coverage: evidence.coverage, pipeline: { selectedProjectIds: ['beta'] }, assessment: { headline: 'Beta is ready', summary: 'Keep beta moving.', focusProjectId: 'beta', evidenceIds: [evidence.projects.find(project => project.id === 'beta').sources[0].id], changes: [], projects: [{ projectId: 'beta', rank: 1, priority: 'focus', trajectory: 'on_course', lifecycle: 'active' }, { projectId: 'alpha', rank: 2, priority: 'next', trajectory: 'unknown', lifecycle: 'active' }], attention: [], question: null } });
+    const state = await coordinator.state();
+    assert.equal(state.review.briefingState, 'ready'); assert.equal(state.review.assessment.headline, 'Beta is ready');
+    assert.deepEqual(state.review.projects.map(project => project.projectId), ['beta']); assert.equal(state.eligibleProjectCount, 1);
+    const restarted = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { throw new Error('state reads must not call the provider'); } });
+    assert.equal((await restarted.state()).review.briefingState, 'ready');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('zero eligible projects is known before the first review', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-empty-scope-'));
+  try {
+    await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n');
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { throw new Error('no model call expected'); } });
+    await coordinator.store.saveSettings({ excludedProjects: ['alpha'] }, 0);
+    const state = await coordinator.state(); assert.equal(state.review, null); assert.equal(state.eligibleProjectCount, 0);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
