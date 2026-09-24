@@ -18,7 +18,8 @@ function plain(value, name, max, { nullable = false, optional = false } = {}) {
   if (value === null && nullable) return null;
   if (typeof value !== 'string') throw error(`${name} must be a string`);
   const text = value.trim();
-  if (!text || text.length > max || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw error(`${name} must be 1 to ${max} plain-text characters`);
+  const acceptedMax = Math.floor(max * 1.2);
+  if (!text || text.length > acceptedMax || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw error(`${name} must be 1 to ${acceptedMax} plain-text characters (target ${max})`);
   return text;
 }
 // Verbs that, directly after "and", mark a second chained action. A bare

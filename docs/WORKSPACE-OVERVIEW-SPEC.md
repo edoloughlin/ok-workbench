@@ -21,7 +21,7 @@ Implementation amendment, 2026-09-23: [Cached per-project review specification](
 1. Open `docs/mockups/workspace-overview.html` directly in a browser. The mockup uses local sibling assets, no server, no network requests, and no provider credentials. THE STRUCTURE/CONTENT IS IMPORTANT - NOT THE STYLING. There are some placeholder icons etc. - these MUST NOT be carried over to the UI. The same applies to spacing/margins etc.: they must not override the existing layout/margins of the UI.
 2. Inspect **Why this matters**, **Revisit**, **Change priority**, the clarification question, **Monitoring**, and **Discuss next step**.
 3. Open `docs/mockups/project-home.html` for the project-level companion: the cross-project attention strip, the collapsible project brief, and its re-entry context.
-4. Inspect the **Today** / **All projects** / **Focus report** tabs, the closure line at the end of **Today**, the runway chips on dated items, the **Start here** first step on each attention item, the escalation note and **Park this project** offer on the repeatedly deferred item, the **I have 30 minutes** session action, the **Where your attention went** focus report, and **Draft progress report** on the reportable project.
+4. Inspect the **Today** / **All projects** / **Focus report** tabs, the closure line at the end of **Today**, the runway chips on dated items, the **Start here** first step on each attention item, the escalation note and **Park this project** offer on the repeatedly deferred item, the **I have 30 minutes** session action, the **Where your attention went** focus report, and **Draft progress report** on a project.
 5. Use the **Preview state** selector to inspect fresh, reviewing, stale, failed, paused, setup, partial coverage, and empty states.
 6. Resize to 1440, 1024, 768, and 390 pixels. Switch the operating system's light/dark preference or use browser emulation.
 
@@ -38,7 +38,7 @@ The overview must let a user answer these questions within 30 seconds:
 - Which important project is losing momentum or moving away from its outcome?
 - What has improved since the previous review?
 - Where has my activity actually gone recently, compared with my stated priorities?
-- What can I report to a stakeholder about a reportable project's progress?
+- What can I report to a stakeholder about a project's progress?
 - How current and complete is the assessment, and how can the user correct it?
 
 The overview serves users whose attention is a scarce, unevenly available resource (including ADHD users). Design for point-of-performance delivery, visible time, small first steps, earned progress salience, and shame-free escalation. Never trade the honesty rules below for motivational effect.
@@ -52,7 +52,7 @@ The overview serves users whose attention is a scarce, unevenly available resour
 - A required, concrete first step on every attention item, and a time-boxed **I have 30 minutes** chat handoff.
 - A server-computed escalation ladder for unacted (never dismissed) items, including a first-class **Park this project** response.
 - A local activity ledger and focus report showing per-project activity distribution over time, always labeled as activity, not progress.
-- On-demand, copy-only progress-report drafts for user-marked reportable projects.
+- On-demand progress-report drafts for individual projects, with a copy action.
 - Inferred relative priority with explicit, persistent user overrides.
 - Distinct project trajectory, lifecycle, blockers, attention urgency, and evidence freshness.
 - Evidence links, coverage reporting, explanations, snooze, dismissal, and correction.
@@ -99,7 +99,7 @@ Split the overview into tabs ordered by decreasing importance, left to right: **
 | Since the last review | Up to three short, evidenced improvements or material changes | Omit on the first review or when nothing material changed. Do not manufacture encouraging copy. |
 | Needs attention | Up to three items, ordered by attention urgency | Each item names its project, consequence, concrete action, **Start here** first step, runway chip for an evidenced date, evidence, response controls, and any server-computed escalation note. **Show all** expands remaining items. |
 | Clarification | At most one consequential question | Display choices plus a free-text correction option. Omit questions that would not change the recommendation. |
-| All projects | Project/outcome, effective priority, trajectory, next action | Include waiting, parked, and unknown projects. Show evidence gaps explicitly. Show **Draft progress report** on reportable projects. |
+| All projects | Project/outcome, effective priority, trajectory, next action | Include waiting, parked, and unknown projects. Show evidence gaps explicitly. Offer **Draft progress report** for each project. |
 | Focus report | Per-project activity distribution over the last 7 and 30 days | Local counts only; no model call to render. Caption every view **Activity is not progress**. Show the server-computed allocation note when present. |
 | Monitoring summary | Enabled/paused, next check, scope and current limitations | State **While Workbench is running**. Never display a perpetual live/online indicator as proof of review. |
 
@@ -120,7 +120,7 @@ Render a compact **project brief** band above the existing document view on each
 | Priority, trajectory, and lifecycle chips | Saved assessment plus overrides | Show **Your priority** or **Inferred**; label the review timestamp; show **Needs an update** honestly for `unknown`. |
 | Where you left off | Project `status.md` **Last completed** and latest dated `log.md` heading, read live at render time through the bounded secure-read rules | Server-quoted excerpts with source links; no model rephrasing; omit when missing rather than invent. Live reads mean this row is never stale relative to the documents below it. |
 | Next useful step and **Start here** first step | Saved assessment `nextAction` and this project's top attention item | Include the runway chip for an evidenced date and any escalation note. |
-| Actions | Existing controls API | **I have 30 minutes** (project-scoped draft), **Discuss next step**, **Change priority**, **Park this project**, **Correct assessment**, and **Draft progress report** when reportable. |
+| Actions | Existing controls API | **I have 30 minutes** (project-scoped draft), **Discuss next step**, **Change priority**, **Park this project**, **Correct assessment**, and **Draft progress report**. |
 | Cross-project strip | Strip endpoint | Rendered above the brief; other-project items only, so the two surfaces never duplicate an item. |
 
 The brief inherits the overview's server-computed freshness state; a timestamp alone is not sufficient. While the project's evidence fingerprint matches the saved review, label the assessment with its relative review time. When this project's evidence has changed since the review (or an applicable trigger has passed), the brief's assessment rows must carry an explicit **Changed since this review** marker — the same wording family as the overview's stale notice — so the user never has to compare timestamps to judge which surface to trust. A stale brief keeps rendering its saved assessment with the marker; it never hides, and it never presents stale judgment as current.
@@ -192,11 +192,11 @@ Render the **focus report** from this ledger alone: per-project share of activit
 
 The server, not the model, computes an **allocation signal** when both hold over the last 7 days: one project accounts for at least 70% of total activity, and a `focus` or `next` project with an evidenced upcoming date or recorded commitment has zero activity. Supply the signal to the model as a labeled fact (project IDs and percentages only). The model may raise at most one allocation observation or question per review from it, phrased as attention allocation, never as drift, neglect, or a trajectory claim. Activity counts are never citable evidence for `drifting`, `at_risk`, or any progress claim; the existing evidence rules are unchanged.
 
-### Draft progress reports for reportable projects
+### Draft progress reports
 
-Users mark projects as reportable in settings (`reportableProjects`). For a reportable project, expose **Draft progress report** in the project table row and the project view. The action makes one on-demand, no-tools provider call using the same collector, containment, and budget rules, scoped to that project plus root context, including dated `log.md` history since the previous report's period end (or the last 30 days for the first report).
+Offer **Draft progress report** in each project table row and project view. The user requests a draft by choosing that action; there is no reportability list in Monitoring settings. The action makes one on-demand, no-tools provider call using the same collector, containment, and budget rules, scoped to that project plus root context, including dated `log.md` history since the previous report's period end (or the last 30 days for the first report). Explain in the drafting dialog that project evidence is sent to the selected model provider and that Workbench saves the draft locally.
 
-Validate the response against a report schema: `period` (start/end dates derived by the server), `headline` (<= 160), `completed`, `inProgress`, `blockers`, and `nextSteps` arrays of `{ text, evidenceIds }` items (each text <= 300, arrays <= 8), and `caveats` (<= 400) listing what is unverified. Every completed claim requires a validated excerpt, reusing the `claimEvidence` mechanism. Render the draft with a **Copy report** action producing plain Markdown. Drafts are copy-only: never sent anywhere, never written into project files, and clearly labeled **Draft · verify before sending**. Keep the last 10 validated drafts per project under the workspace store; reuse the review failure states for report failures. A report draft is not a review and does not update assessments.
+Validate the response against a report schema: `period` (start/end dates derived by the server), `headline` (<= 160), `completed`, `inProgress`, `blockers`, and `nextSteps` arrays of `{ text, evidenceIds }` items (each text <= 300, arrays <= 8), and `caveats` (<= 400) listing what is unverified. Every completed claim requires a validated excerpt, reusing the `claimEvidence` mechanism. Render the draft with a **Copy report** action producing plain Markdown. Workbench does not deliver the resulting draft or write it into project files; label it **Draft · check before sharing**. Keep the last 10 validated drafts per project under the workspace store; reuse the review failure states for report failures. A report draft is not a review and does not update assessments.
 
 Infer review cadence only as a proposal: use `daily`, `weekly`, or `monthly`, with a reason. Default unknown cadence to weekly and label it inferred. Accept user overrides. Cadence affects when to reassess, not a deadline or an automatic drift threshold. A materially changed project can still trigger an earlier review.
 
@@ -208,7 +208,7 @@ Infer review cadence only as a proposal: use `daily`, `weekly`, or `monthly`, wi
 | **Why this matters** | Expand facts, inference, sources, and the proposed action | None. |
 | **Discuss next step** | Navigate to that project and prefill existing chat with the item's first step, item text, and source links | No message until **Send**. Never overwrite an existing unsent draft; offer append or cancel. |
 | **I have 30 minutes** | Prefill chat (workspace or focus project) with a time-boxed session draft built from the current recommendation and its first step | No message until **Send**. No new permissions; no provider call to build the draft. |
-| **Draft progress report** | Start a report draft job for one reportable project; show the validated draft with **Copy report** | Save the draft to bounded history. Never sends or writes project files. |
+| **Draft progress report** | Start a report draft job for one project; show the validated draft with **Copy report** | Save the draft to bounded history. The draft is not delivered or written into project files. |
 | **Workspace chat** | Open the existing root chat pane | Preserve existing workspace-mode confirmation at send time. |
 | **Revisit** | Open a date/time form with presets, including **N days before the evidenced date** when one exists and **Next week** | Snooze the stable issue ID until a UTC instant. Show it under **Deferred** with **Undo**. |
 | **Park this project** | Open the priority dialog preset to **Parked** with a revisit date | Persist a `parked` override with expiry as the revisit date; suppress the triggering item; reorder the list. Offered prominently on pattern escalation. |
@@ -355,10 +355,11 @@ Serialize writes per workspace. Write a temporary file in the destination direct
 | `effort` | String or null | Yes | Validate against provider/model capabilities; default to the model's highest supported effort. |
 | `confirmations` | Object | Yes | `{ meteredAutomatic, belowRecommendedModel }` booleans, default `false`; the save is rejected unless each applicable confirmation is `true`. Reset both when provider/model changes. |
 | `excludedProjects` | String array | Yes | Default empty; validate current project IDs. |
-| `reportableProjects` | String array | Yes | Default empty; projects offering **Draft progress report**; validate current project IDs. |
 | `activityTracking` | Boolean | Yes | Default `true`; when `false`, stop the activity ledger, delete its data, and hide the focus report. |
 | `timezone` | String | Yes | Valid IANA zone; initialize from the browser, fall back to UTC. |
 | `dailyAutomaticLimit` | Integer | Yes | Default `6`, allowed `1..24`; counts automatic provider attempts in a rolling 24 hours. |
+
+Older settings may contain `reportableProjects`; ignore that field when loading settings and do not show it in Monitoring.
 
 A manual review is a one-off authorization to send eligible project evidence to the selected provider. It does not opt the user into recurring review. The first **Monitoring** save shows provider/model, included project count, review limits, and **Reviews run while Workbench is running**. Do not require repeated confirmation after the user saves this setting.
 
@@ -482,7 +483,7 @@ Mount these routes under `/api/workspace-review`. Apply the existing local-host,
 | `POST /api/workspace-review/controls` | Tagged operation below | `200`: `{ controlsRevision, applied }`; mark stale/queue as specified. |
 | `GET /api/workspace-review/strip?projectId=` | None | `200`: the single most urgent effective item from another project, or `{ item: null }`. Saved state only; no model call. |
 | `GET /api/workspace-review/focus` | None | `200`: per-project daily activity counts for 7/30 days plus the current allocation signal; `404`-style empty payload when tracking is disabled. |
-| `POST /api/workspace-review/reports` | `{ projectId }` | `202`: report job for a reportable project; `409` when not configured or not reportable. |
+| `POST /api/workspace-review/reports` | `{ projectId }` | `202`: report job; the job fails if the project is unavailable or no provider/model is configured. |
 | `GET /api/workspace-review/reports?projectId=` | None | `200`: bounded validated draft history for that project. |
 
 Use a discriminated `operation` for controls:
@@ -595,7 +596,7 @@ Use deterministic fake-provider fixtures and an injected clock. Do not spend pro
 | A30 | Activity tracking is disabled | Ledger data is deleted, the focus report disappears, and no allocation facts reach the model. |
 | A31 | An item reappears across three completed reviews with unchanged evidence and no user response | Exactly one consequence escalation with a validated excerpt and a paired recovery step, then one pattern question offering **Park this project**, then a quiet visible row; a dismissed item never escalates. |
 | A32 | An evidenced due date moves within seven, then two days | Runway chips render server-computed remaining time; effective urgency is floored to `soon`, then `now`; the stored model value is unchanged. |
-| A33 | User requests a progress report for a reportable project | One provider attempt; every completed claim carries a validated excerpt; unverified items are labeled; the draft is copy-only and never written to project files or sent. |
+| A33 | User requests a progress report for a project | One provider attempt; every completed claim carries a validated excerpt; unverified items are labeled; the draft is saved locally and can be copied, but is not delivered or written to project files. |
 | A34 | Review output omits `firstStep` or supplies a vague multi-action step over 140 characters | Validation rejects the response; no partial display. |
 | A35 | User clicks **I have 30 minutes** | A time-boxed draft built from the current recommendation and first step opens in chat; nothing sends automatically; no provider call occurs to build the draft. |
 | A36 | Overview tabs are navigated by mouse, keyboard, and screen reader | `tablist` semantics and arrow keys work; every attention item, escalation, and question renders in **Today**; reference tabs contain nothing actionable that is absent from **Today**; the closure line appears only when nothing else needs a decision. |

@@ -32,6 +32,22 @@ function stagedLegacyProvider(provider) {
   };
 }
 
+test('review text lengths allow 20% beyond the prompt targets, but no more', () => {
+  const source = { id: 'source', projectId: 'alpha', excerpt: 'Evidence.' };
+  const raw = {
+    headline: 'H'.repeat(192), summary: 'S'.repeat(720), focusProjectId: null,
+    evidenceIds: ['source'], changes: [],
+    projects: [{ projectId: 'alpha', priority: 'maintain', rank: 1, priorityReason: 'Reason', confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', outcome: 'Outcome', assessment: 'Assessment', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Reason', evidenceIds: ['source'], claimEvidence: [] }],
+    attention: [], question: null
+  };
+  const context = { projects: [{ id: 'alpha' }], sources: [source] };
+  assert.equal(validateReview(raw, context).headline.length, 192);
+  raw.headline += 'H';
+  assert.throws(() => validateReview(raw, context), /headline must be 1 to 192 plain-text characters/);
+  raw.headline = 'Headline'; raw.summary += 'S';
+  assert.throws(() => validateReview(raw, context), /summary must be 1 to 720 plain-text characters/);
+});
+
 test('workspace review state is isolated by canonical workspace root', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-'));
   try {

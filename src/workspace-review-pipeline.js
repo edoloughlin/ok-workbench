@@ -144,9 +144,10 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
   const throwIfAborted = () => { if (jobSignal.aborted) { const error = new Error('Review was cancelled or exceeded its job deadline'); error.code = signal.aborted ? 'SUPERSEDED' : 'REVIEW_TIMEOUT'; throw error; } };
   const saveFailureTrace = async ({ stage, projectId, attemptNumber, prompt, input, response = null, error, recovery = null }) => {
     try {
-      await store.saveTrace({ projectId, stage, jobId: id, attemptNumber, prompt, evidence: input, response, errorCode: SAFE_ERROR_CODES.has(error?.code) ? error.code : 'PROVIDER_UNAVAILABLE', diagnostic: validationDiagnostic(error), validationMessage: error?.code === 'INVALID_REVIEW' ? String(error.message).slice(0, 2000) : null, recovery, createdAt: now().toISOString() });
+      const file = await store.saveTrace({ projectId, stage, jobId: id, attemptNumber, prompt, evidence: input, response, errorCode: SAFE_ERROR_CODES.has(error?.code) ? error.code : 'PROVIDER_UNAVAILABLE', diagnostic: validationDiagnostic(error), validationMessage: error?.code === 'INVALID_REVIEW' ? String(error.message).slice(0, 2000) : null, recovery, createdAt: now().toISOString() });
+      console.log(`[${now().toISOString()}] [ok-workbench] workspace review ${stage} ${projectId || 'workspace'} trace saved: ${file}`);
     } catch (traceError) {
-      console.error(`[${now().toISOString()}] [ok-workbench] workspace review trace could not be saved (${traceError.code || 'TRACE_WRITE_FAILED'})`);
+      console.error(`[${now().toISOString()}] [ok-workbench] workspace review trace could not be saved in ${store.traceDirectory()} (${traceError.code || 'TRACE_WRITE_FAILED'})`);
     }
   };
 
@@ -173,7 +174,7 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
   async function rawCall(stage, projectId, prompt, input) {
     throwIfAborted();
     const limit = stage === 'synthesis' ? SYNTHESIS_INPUT_LIMIT : PROJECT_INPUT_LIMIT;
-    if (bytes(prompt, input) > limit) { const error = new Error(`${stage} input exceeds ${limit} bytes`); error.code = 'INPUT_TOO_LARGE'; throw error; }
+    if (bytes(prompt, input) > limit) { const error = new Error(`${stage} input exceeds ${limit} bytes`); error.code = 'INPUT_TOO_LARGE'; await saveFailureTrace({ stage, projectId, attemptNumber: null, prompt, input, error }); throw error; }
     if (!(await reserveAttempt(stage, projectId))) return { deferred: true };
     const attemptNumber = progress.callsConsumed + 1; progress.callsConsumed = attemptNumber;
     const timestamp = now().toISOString();
@@ -373,7 +374,7 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     const publishedBaseline = previous ? { id: previous.id, headline: previous.assessment?.headline, summary: previous.assessment?.summary, changes: previous.assessment?.changes || [] } : null;
     let comparisonBaseline = newComparisonEvent || !Object.hasOwn(previous.pipeline, 'comparisonBaseline') ? publishedBaseline : previous.pipeline.comparisonBaseline;
     if (comparisonBaseline && Buffer.byteLength(JSON.stringify(comparisonBaseline)) > 16 * 1024) comparisonBaseline = { ...comparisonBaseline, changes: [] };
-    if (comparisonBaseline && Buffer.byteLength(JSON.stringify(comparisonBaseline)) > 16 * 1024) { const error = new Error('Comparison context exceeds 16 KiB'); error.code = 'INPUT_TOO_LARGE'; throw error; }
+    if (comparisonBaseline && Buffer.byteLength(JSON.stringify(comparisonBaseline)) > 16 * 1024) { const error = new Error('Comparison context exceeds 16 KiB'); error.code = 'INPUT_TOO_LARGE'; await saveFailureTrace({ stage: 'synthesis', projectId: null, attemptNumber: null, prompt: coordinator.workspaceSynthesisPrompt(), input: { ...projection, comparison: comparisonBaseline }, error }); throw error; }
     const synthesisInput = { ...projection, comparison: comparisonBaseline };
     const synthesisKey = hash(canonical({ synthesisInput, provider: settings.provider, model: settings.model, effort: settings.effort || null, version: versions, baselineId: comparisonBaseline?.id || null }));
     const shouldSynthesize = force || previous?.pipeline?.synthesisKey !== synthesisKey;
