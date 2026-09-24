@@ -8,6 +8,6 @@ Core capabilities are document browsing, project-scoped chat, reviewable Git dif
 
 ## Proposed workspace overview
 
-The [workspace overview specification](WORKSPACE-OVERVIEW-SPEC.md) defines a read-only AI review of priorities, urgent actions, and emerging project drift. Explore the [interactive mockup](mockups/workspace-overview.html). These are implementation handoff artifacts, not shipped functionality.
+The [workspace overview specification](WORKSPACE-OVERVIEW-SPEC.md) defines a read-only AI review of priorities, urgent actions, and emerging project drift. Explore the [interactive mockup](mockups/workspace-overview.html). These are implementation handoff artifacts, not shipped functionality. The [review reliability decision record](WORKSPACE-REVIEW-RELIABILITY.md) captures observed failure evidence, the envelope fixes to apply first, and the gated two-stage review direction.
 
 Clone the repository, run `npm ci`, `npm run build`, and `npm install --global .`, then initialize with `ok-workbench init ~/workspace --yes` and serve using `ok-workbench serve --root ~/workspace`. See the [README](README.md) and [starter workflow](workflow/index.md).

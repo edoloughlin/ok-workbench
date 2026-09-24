@@ -269,3 +269,35 @@ test('clicking Review now before any review has ever completed shows persistent,
     await rm(state, { recursive: true, force: true });
   }
 });
+
+test('a synthesis failure keeps the prior briefing visible and shows newly saved project-cache status', async () => {
+  await withOverview(async page => {
+    const assessedAt = '2026-09-23T12:00:00.000Z'; let synthesisFailed = false;
+    const review = {
+      schemaVersion: 1, id: 'prior-briefing', completedAt: assessedAt, partial: false,
+      coverage: [{ projectId: 'alpha', included: true, reason: 'included' }], sources: [],
+      assessment: { headline: 'Prior briefing stays published', summary: 'This is the last successful synthesis.', focusProjectId: 'alpha', evidenceIds: [], changes: [], question: null },
+      projects: [{ projectId: 'alpha', outcome: 'Ship the alpha outcome', priority: 'next', rank: 1, priorityReason: 'Current evidence.', confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', assessment: 'Prior project assessment.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [], assessmentState: 'current', assessedAt, effectivePriority: { priority: 'next', source: 'inferred' } }],
+      attention: [], deferred: [], projectErrors: []
+    };
+    await page.route('**/api/workspace-review', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+      settings: { provider: 'openai', model: 'gpt-5', activityTracking: false, automatic: false }, controlsRevision: 0,
+      review, monitor: 'manual', job: { state: 'idle', id: 'failed-job', phase: null, progress: null }, freshness: synthesisFailed ? 'stale' : 'current',
+      coverage: review.coverage, nextCheckAt: null, modelWarning: null,
+      error: synthesisFailed ? { code: 'INVALID_REVIEW', message: 'Workspace review could not be completed', detail: '2 bytes; starts with other text; ends with other text (possibly truncated)', at: assessedAt } : null,
+      pendingProjectStatus: synthesisFailed ? [{ projectId: 'alpha', state: 'current', assessedAt: '2026-09-23T12:05:00.000Z', errorCode: null }] : []
+    }) }));
+    await page.reload({ waitUntil: 'networkidle' });
+    await assert.doesNotReject(page.getByRole('heading', { name: 'Prior briefing stays published' }).waitFor({ timeout: 3000 }));
+    synthesisFailed = true;
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await assert.doesNotReject(page.getByText('Project assessments saved for alpha; workspace synthesis is still unavailable.').waitFor({ timeout: 3000 }));
+    review.projectErrors = [{ projectId: 'alpha', code: 'INVALID_REVIEW', stage: 'project', validationDiagnostic: 'invalid_json', at: assessedAt }];
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.getByRole('tab', { name: /All projects/ }).click();
+    await assert.doesNotReject(page.getByText('Review failed: The response was not valid JSON.').waitFor({ timeout: 3000 }));
+    await page.getByRole('tab', { name: 'Today' }).click();
+    await assert.doesNotReject(page.getByText(/Review unavailable:/).waitFor({ timeout: 3000 }));
+    await assert.doesNotReject(page.getByRole('heading', { name: 'Prior briefing stays published' }).waitFor({ timeout: 3000 }));
+  });
+});

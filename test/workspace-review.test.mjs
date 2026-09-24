@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,7 +8,29 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { WorkspaceReviewStore } = require('../src/workspace-review-store.js');
 const { runway, publicReview, validateReview } = require('../src/workspace-review-schema.js');
+const { parseReviewJSON } = require('../src/workspace-review-pipeline.js');
 const { WorkspaceReviewCoordinator, collectEvidence, reviewCoveragePrompt, reportLogHistory, annotateAttentionRecurrence, reviewModelTier, reviewContextTokensRequired, RESPONSE_LIMIT, unwrapJsonFence } = require('../src/workspace-review.js');
+
+function stagedLegacyProvider(provider) {
+  return async request => {
+    const rawEvidence = request.evidence;
+    const projects = request.stage === 'project'
+      ? [{ id: request.projectId, sources: rawEvidence.sources }]
+      : (rawEvidence.projects || []).map(item => ({ id: item.projectId, sources: item.sources }));
+    const sources = request.stage === 'project' ? rawEvidence.sources : (rawEvidence.projects || []).flatMap(item => item.sources || []);
+    const evidence = { ...rawEvidence, projects, sources, workspace: rawEvidence.workspace || [] };
+    const response = await provider({ ...request, evidence });
+    if (typeof response !== 'string') return response;
+    let full; try { full = JSON.parse(unwrapJsonFence(response)); } catch { return response; }
+    if (request.stage === 'project') {
+      const project = full.projects?.find(item => item.projectId === request.projectId);
+      if (!project) return response;
+      const { priority, rank, priorityReason, ...assessment } = project;
+      return JSON.stringify({ assessment, attentionCandidates: (full.attention || []).filter(item => item.projectId === request.projectId) });
+    }
+    return JSON.stringify({ headline: full.headline, summary: full.summary, focusProjectId: full.focusProjectId, evidenceIds: full.evidenceIds, changes: full.changes, priorities: (full.projects || []).map(({ projectId, priority, rank, priorityReason }) => ({ projectId, priority, rank, priorityReason })), attention: full.attention, question: full.question });
+  };
+}
 
 test('workspace review state is isolated by canonical workspace root', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-'));
@@ -21,15 +43,33 @@ test('workspace review state is isolated by canonical workspace root', async () 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('project cache pruning requires 30 continuous days of ineligibility', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-cache-retention-')); const store = new WorkspaceReviewStore({ stateDir: root, workspaceRoot: '/retention' });
+  try {
+    await store.saveProjectAssessment({ schemaVersion: 1, projectId: 'alpha', inputKey: 'key', resultDigest: 'digest', assessedAt: '2026-09-01T00:00:00.000Z', nextDueAt: '2026-09-08T00:00:00.000Z', provider: 'openai', model: 'reviewer', effort: null, versions: { collector: 1 }, result: {}, sources: [], coverage: {} });
+    await store.reconcileProjectEligibility([], new Date('2026-09-01T00:00:00Z'));
+    assert.equal((await store.projectAssessment('alpha')).ineligibleSince, '2026-09-01T00:00:00.000Z');
+    await store.reconcileProjectEligibility([], new Date('2026-09-30T23:59:59Z'));
+    assert.ok(await store.projectAssessment('alpha'), 'cache remains during the 30-day retention window');
+    await store.reconcileProjectEligibility(['alpha'], new Date('2026-10-01T00:00:00Z'));
+    assert.equal((await store.projectAssessment('alpha')).ineligibleSince, undefined, 'eligibility resets the continuous-ineligible clock');
+    await store.reconcileProjectEligibility([], new Date('2026-10-01T00:00:01Z'));
+    await store.reconcileProjectEligibility([], new Date('2026-10-31T00:00:00Z'));
+    assert.equal((await store.projectAssessment('alpha')).projectId, 'alpha');
+    await store.reconcileProjectEligibility([], new Date('2026-10-31T00:00:02Z'));
+    assert.equal(await store.projectAssessment('alpha'), null, 'cache is pruned after 30 uninterrupted ineligible days');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('run is single-flight and returns a job before a provider result', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-'));
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n'); await writeFile(path.join(root, 'alpha', 'status.md'), '# Status\n');
-    let resolveProvider; const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => new Promise(resolve => { resolveProvider = resolve; }) });
+    let rejectProvider; let providerCalls = 0; const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { providerCalls++; if (providerCalls > 1) throw new Error('offline'); return new Promise((resolve, reject) => { rejectProvider = reject; }); } });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     const first = await coordinator.run(); const second = await coordinator.run();
     assert.equal(first.state, 'running'); assert.equal(second.state, 'running'); assert.equal(second.reused, true); assert.equal(first.jobId, second.jobId);
-    const task = coordinator.running.task; for (let index = 0; index < 500 && !resolveProvider; index++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(typeof resolveProvider, 'function'); resolveProvider('{}'); await task;
+    const task = coordinator.running.task; for (let index = 0; index < 500 && !rejectProvider; index++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(typeof rejectProvider, 'function'); rejectProvider(new Error('offline')); await task;
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -41,8 +81,8 @@ test('normal review logs include an ISO timestamp and request and response byte 
     const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => '{}' });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task.catch(() => {});
-    const request = logged.find(entry => entry.includes('requesting model;'));
-    const response = logged.find(entry => entry.includes('model response received;'));
+    const request = logged.find(entry => entry.includes('workspace review project alpha requesting model;'));
+    const response = logged.find(entry => entry.includes('workspace review project alpha model response received;'));
     assert.match(request, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review /);
     assert.match(request, /promptBytes=\d+, evidenceBytes=\d+, inputBytes=\d+/);
     assert.match(response, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review /);
@@ -67,11 +107,11 @@ test('a model response fenced entirely in Markdown still produces a valid, publi
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n'); await writeFile(path.join(root, 'alpha', 'status.md'), '# Status\nLast completed: setup.\n');
     const coordinator = new WorkspaceReviewCoordinator({
       stateDir: root, workspaceRoot: root,
-      provider: async ({ evidence }) => {
+      provider: stagedLegacyProvider(async ({ evidence }) => {
         const statusId = evidence.projects[0].sources.find(source => source.path === 'status.md').id;
         const body = { headline: 'Alpha is steady', summary: 'On course.', focusProjectId: 'alpha', evidenceIds: [statusId], changes: [], projects: [{ projectId: 'alpha', priority: 'maintain', rank: 1, priorityReason: 'Stable', confidence: 'high', trajectory: 'on_course', lifecycle: 'active', outcome: 'Ship alpha', assessment: 'On course', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Stable', evidenceIds: [statusId], claimEvidence: [] }], attention: [], question: null };
         return `\`\`\`json\n${JSON.stringify(body)}\n\`\`\``;
-      }
+      })
     });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
@@ -86,31 +126,51 @@ test('a non-JSON response is rejected with a bounded head/tail preview in the se
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n');
     const secret = 'MIDDLE-OF-RESPONSE-NEVER-LOGGED'.repeat(20);
-    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => `Here is the review:\n{"headline": "${secret}"}\nLet me know if you need changes.` });
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+      if (request.stage === 'project') return `Here is the review:\n{"headline": "${secret}"}\nLet me know if you need changes.`;
+      const sourceId = request.evidence.projects[0].sources[0].id;
+      return JSON.stringify({ headline: 'Workspace review', summary: 'One assessment is unavailable.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: request.evidence.projects.map((project, index) => ({ projectId: project.projectId, priority: 'maintain', rank: index + 1, priorityReason: 'Insufficient evidence.' })), attention: [], question: null });
+    } });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
     const state = await coordinator.state();
-    assert.equal(state.error.code, 'INVALID_REVIEW'); assert.match(state.error.message, /did not return valid review JSON/);
+    assert.equal(state.error, null);
     // The persisted detail is a content-free shape summary: it distinguishes
     // an empty, truncated, and prose-wrapped reply without echoing model text.
-    assert.match(state.error.detail, /^\d+ bytes; starts with other text; ends with other text \(possibly truncated\)$/);
-    assert.ok(!state.error.detail.includes('Here is the review'), 'the persisted shape never echoes response text');
-    const line = logged.find(entry => entry.includes('workspace review rejected (unparsable JSON'));
-    assert.ok(line, 'the rejection is logged for the operator');
-    assert.match(line, /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] \[ok-workbench\] workspace review rejected/);
-    assert.match(line, /response head\/tail: "Here is the review: \{/);
-    assert.match(line, /need changes\."\)$/);
-    assert.ok(!line.includes(secret), 'the preview is bounded and never echoes the full response');
-    const exchange = logged.find(entry => entry.includes('workspace review LLM exchange (error)'));
-    assert.ok(exchange, 'the failed LLM exchange is logged for the operator');
-    const exchangeData = JSON.parse(exchange.slice(exchange.indexOf('{')));
-    assert.match(exchangeData.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-    assert.equal(exchangeData.request.prompt.includes('read-only workspace reviewer'), true);
-    assert.equal(exchangeData.request.evidence.projects[0].id, 'alpha');
-    assert.equal(exchangeData.response.includes(secret), true);
-    assert.equal(exchangeData.error.code, 'INVALID_REVIEW');
+    const error = state.review.projectErrors.find(item => item.projectId === 'alpha');
+    assert.equal(error.code, 'INVALID_REVIEW'); assert.equal(error.stage, 'project'); assert.equal(error.projectId, 'alpha'); assert.ok(error.at);
+    assert.equal(error.validationDiagnostic, 'invalid_json_invalid_character');
+    assert.match(error.responseShape, /^\d+ bytes; starts with other text; ends with other text \(possibly truncated\)$/);
+    assert.ok(!error.responseShape.includes('Here is the review'), 'the persisted shape never echoes response text');
+    const rejection = logged.find(entry => entry.includes('workspace review rejected (unparsable project JSON'));
+    assert.ok(rejection, 'the failed stage is logged for the operator');
+    assert.ok(rejection.includes('response head/tail'));
     assert.ok(!JSON.stringify(state).includes('Here is the review'), 'the raw response never reaches the client state');
   } finally { console.error = original; await rm(root, { recursive: true, force: true }); }
+});
+
+test('provider-supplied error codes and messages are normalized before persistence', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-safe-error-'));
+  try {
+    await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nEvidence.\n');
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+      if (request.stage === 'project') { const error = new Error('secret-provider-response'); error.code = 'LEAK_THIS_CODE'; throw error; }
+      const project = request.evidence.projects[0]; const gap = project.sources.find(source => source.generated);
+      assert.ok(gap, 'cold project failure gets a generated evidence-gap source');
+      assert.equal(gap.path, null); assert.equal(gap.reason, undefined, 'the bounded model projection omits internal source reason');
+      return JSON.stringify({ headline: 'Evidence unavailable', summary: 'A current project assessment could not be obtained.', focusProjectId: null, evidenceIds: [gap.id], changes: [], priorities: [{ projectId: 'alpha', priority: 'maintain', rank: 1, priorityReason: 'Evidence is unavailable.' }], attention: [], question: null });
+    } });
+    await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
+    await coordinator.run(); await coordinator.running.task;
+    const runtime = await coordinator.store.runtime(); const state = await coordinator.state();
+    assert.equal(runtime.lastJob.state, 'completed');
+    const projectError = state.review.projectErrors.find(item => item.projectId === 'alpha');
+    assert.deepEqual(Object.keys(projectError).sort(), ['at', 'code', 'projectId', 'stage']);
+    assert.equal(projectError.code, 'PROVIDER_UNAVAILABLE'); assert.equal(projectError.stage, 'project'); assert.ok(projectError.at);
+    assert.ok(!JSON.stringify(runtime).includes('secret-provider-response'));
+    assert.ok(!JSON.stringify(state).includes('LEAK_THIS_CODE'));
+    assert.ok(state.review.sources.some(source => source.generated && source.path === null), 'public review retains the generated gap source');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('a manual Codex review corrects one invalid candidate within the same job', async () => {
@@ -119,20 +179,25 @@ test('a manual Codex review corrects one invalid candidate within the same job',
     await mkdir(path.join(root, 'alpha'));
     await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n');
     await writeFile(path.join(root, 'alpha', 'status.md'), '# Status\nWork is active.\n');
-    let calls = 0;
-    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async ({ evidence }) => {
+    let calls = 0; let rejectedCandidate = null;
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async ({ stage, evidence }) => {
       calls++;
-      const sourceId = evidence.projects[0].sources.find(source => source.path === 'status.md').id;
-      const project = { projectId: 'alpha', priority: 'next', rank: 1, priorityReason: 'Active work', confidence: 'medium', trajectory: 'unknown', lifecycle: calls === 1 ? 'waiting' : 'active', outcome: 'Finish alpha', assessment: 'Status needs review', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Check weekly', evidenceIds: [sourceId], claimEvidence: [] };
-      if (calls === 2) {
-        assert.equal(evidence.priorCandidate.projects[0].lifecycle, 'waiting');
-        assert.match(evidence.validationFeedback, /non-active lifecycle needs supporting claimEvidence/);
+      if (stage === 'project') {
+        if (calls === 2) {
+          assert.equal(evidence.priorCandidate, rejectedCandidate, 'the correction receives the rejected structured response');
+          assert.match(evidence.validationFeedback, /non-active lifecycle needs supporting claimEvidence/);
+        }
+        const sourceId = evidence.sources.find(source => source.path === 'status.md').id;
+        const response = JSON.stringify({ assessment: { projectId: 'alpha', confidence: 'medium', trajectory: 'unknown', lifecycle: calls === 1 ? 'waiting' : 'active', outcome: 'Finish alpha', assessment: 'Status needs review', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Check weekly', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] });
+        if (calls === 1) rejectedCandidate = response;
+        return response;
       }
-      return JSON.stringify({ headline: 'Alpha review', summary: 'Review alpha', focusProjectId: 'alpha', evidenceIds: [sourceId], changes: [], projects: [project], attention: [], question: null });
+      const sourceId = evidence.projects[0].sources.find(source => source.path === 'status.md').id;
+      return JSON.stringify({ headline: 'Alpha review', summary: 'Review alpha', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: [{ projectId: 'alpha', priority: 'next', rank: 1, priorityReason: 'Active work' }], attention: [], question: null });
     } });
     await coordinator.store.saveSettings({ provider: 'openai-codex', model: 'gpt-5.6-terra' }, 0);
     await coordinator.run('manual'); await coordinator.running.task;
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
     assert.equal((await coordinator.state()).review?.projects[0].lifecycle, 'active');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -147,7 +212,7 @@ test('a manual Codex review stops after one unsuccessful correction', async () =
     const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { calls++; return '{}'; } });
     await coordinator.store.saveSettings({ provider: 'openai-codex', model: 'gpt-5.6-terra' }, 0);
     await coordinator.run('manual'); await coordinator.running.task;
-    assert.equal(calls, 2);
+    assert.equal(calls, 4);
     assert.equal((await coordinator.state()).error?.code, 'INVALID_REVIEW');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -162,7 +227,7 @@ test('automatic Codex reviews do not make an uncounted correction call', async (
     const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { calls++; return '{}'; } });
     await coordinator.store.saveSettings({ provider: 'openai-codex', model: 'gpt-5.6-terra', automatic: true }, 0);
     await coordinator.run('automatic'); await coordinator.running.task;
-    assert.equal(calls, 1);
+    assert.equal(calls, 4);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -171,11 +236,90 @@ test('an oversized provider response is rejected without being parsed or publish
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'index.md'), '# Alpha\n'); await writeFile(path.join(root, 'alpha', 'status.md'), '# Status\n');
     const oversized = 'x'.repeat(64 * 1024 + 1);
-    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => oversized });
+    let calls = 0;
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => { calls++; return oversized; } });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
-    const state = await coordinator.state(); assert.equal(state.review, null); assert.equal(state.error.code, 'INVALID_REVIEW');
+    const state = await coordinator.state(); assert.equal(state.review, null); assert.equal(state.error.code, 'RESPONSE_TOO_LARGE'); assert.equal(calls, 2, 'oversized responses are not corrected');
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('JSON recovery preserves content and rejects ambiguous or incomplete responses', () => {
+  const original = { text: 'Escaped "quote", backslash \\, braces } ] and { inside text', nested: [{ value: null }] };
+  const json = JSON.stringify(original);
+  assert.deepEqual(parseReviewJSON(json), { raw: original, recovery: null });
+  for (const suffix of ['}', '}}', ']', '"', ' }\n ] " ']) {
+    assert.deepEqual(parseReviewJSON(` \n${json}${suffix}`).raw, original);
+    assert.ok(parseReviewJSON(json + suffix).recovery);
+  }
+  for (const invalid of [json + ' prose', json + '{}', json + 'null', json + '","injected":true}', json.slice(0, -1), '{"a":1,}}', '{"a":"unterminated}', '[]}', json + '}'.repeat(9)]) {
+    assert.throws(() => parseReviewJSON(invalid), SyntaxError, invalid);
+  }
+});
+
+test('staged refresh recovers trailing punctuation, validates recovered objects, and bounds corrections', async () => {
+  const cases = ['fenced', 'malformed', 'prose', 'oversized', 'extra-brace', 'extra-quote', 'schema-with-suffix', 'chained-first-step'];
+  for (const mode of cases) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `ok-workbench-review-force-${mode}-`)); const calls = []; let projectAttempts = 0;
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+      calls.push({ stage: request.stage, projectId: request.projectId, attemptNumber: request.attemptNumber, feedback: request.evidence.validationFeedback });
+      if (request.stage === 'project') {
+        projectAttempts++;
+        if (mode === 'oversized') return 'x'.repeat(16 * 1024 + 1);
+        if ((mode === 'malformed' || mode === 'prose') && projectAttempts === 1) return mode === 'malformed' ? '{' : 'Here is the assessment: {"assessment":{}}';
+        const sourceId = request.evidence.sources.find(source => source.path === 'status.md').id;
+        const raw = { assessment: { projectId: request.projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: 'Review alpha', assessment: 'Current evidence is available.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Review weekly.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] };
+        if (mode === 'schema-with-suffix' && projectAttempts === 1) raw.assessment.projectId = 'wrong-project';
+        if (mode === 'chained-first-step') raw.attentionCandidates.push({ projectId: request.projectId, kind: 'update', topic: 'Status', urgency: 'watch', title: 'Record status', observation: 'Evidence exists.', inference: 'A note would help.', action: 'Record the status.', firstStep: projectAttempts === 1 ? 'Open status.md and mark the current status.' : 'Mark the current status in status.md.', evidenceIds: [sourceId], dueDate: null, dueDateEvidence: null, claimEvidence: [] });
+        const body = JSON.stringify(raw);
+        return mode === 'fenced' ? `\`\`\`json\n${body}\n\`\`\`` : body + (mode === 'extra-quote' ? '"' : ['extra-brace', 'schema-with-suffix', 'chained-first-step'].includes(mode) ? '}' : '');
+      }
+      const projects = request.evidence.projects; const sourceId = request.evidence.workspace?.[0]?.id || projects.find(project => project.state === 'current')?.sources[0]?.id;
+      return JSON.stringify({ headline: 'Current review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: sourceId ? [sourceId] : [], changes: [], priorities: projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Review current evidence.' })), attention: [], question: null }) + (mode === 'extra-brace' ? '}' : mode === 'extra-quote' ? '"' : '');
+    } });
+    // Exercise trace persistence without leaving a five-day expiry worker
+    // racing the temporary workspace teardown.
+    coordinator.store.startTraceCleaner = () => {};
+    try {
+      await writeFile(path.join(root, 'index.md'), '# Workspace\n');
+      await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nEvidence.\n');
+      await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
+      await coordinator.run('manual', { force: true }); await coordinator.running.task;
+      const projectCalls = calls.filter(call => call.stage === 'project');
+      const expectedProjectAttempts = ['malformed', 'prose', 'schema-with-suffix', 'chained-first-step'].includes(mode) ? 2 : 1;
+      assert.equal(projectCalls.length, expectedProjectAttempts, `${mode}: project correction count`);
+      assert.equal(calls.filter(call => call.stage === 'synthesis').length, 1, `${mode}: synthesis should not need correction`);
+      if (mode !== 'oversized') {
+        assert.ok(await coordinator.store.projectAssessment('alpha'), `${mode}: valid corrected result is cached`);
+        assert.ok((await coordinator.state()).review, `${mode}: valid synthesis is published`);
+      } else {
+        assert.equal(await coordinator.store.projectAssessment('alpha'), null, 'oversized rejected output is never cached');
+        assert.equal((await coordinator.state()).review.partial, true, 'oversized result yields an explicit unavailable project fallback');
+      }
+      const persisted = JSON.stringify({ latest: await coordinator.store.latest(), runtime: await coordinator.store.runtime(), cache: await coordinator.store.projectAssessment('alpha') });
+      assert.ok(!persisted.includes('priorCandidate'));
+      if (mode === 'oversized') assert.ok(!persisted.includes('x'.repeat(100)));
+      if (mode === 'chained-first-step') assert.match(projectCalls[1].feedback, /firstStep.*Open status.md and mark/);
+      if (mode === 'schema-with-suffix') assert.match(projectCalls[1].feedback, /must match requested project/);
+      if (mode === 'extra-brace') {
+        const traceRoot = coordinator.store.traceDirectory();
+        const directories = (await readdir(traceRoot)).filter(name => /^[a-f0-9]{64}$/.test(name));
+        const traces = [];
+        for (const directory of directories) {
+          for (const file of await readdir(path.join(traceRoot, directory))) {
+            if (file.endsWith('.json')) traces.push(JSON.parse(await readFile(path.join(traceRoot, directory, file), 'utf8')));
+          }
+        }
+        assert.equal(traces.length, 2, 'both stage responses are retained');
+        for (const trace of traces) {
+          assert.equal(trace.failure.recovery, 'removed_trailing_punctuation');
+          assert.equal(trace.failure.diagnostic, 'invalid_json_extra_closing_brace');
+          assert.match(trace.failure.message, /schema validation is still required/);
+          assert.ok(trace.response.endsWith('}}'), 'original response is preserved');
+        }
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test('date runway uses the workspace timezone and floors urgency without mutating stored model urgency', () => {
@@ -279,9 +423,11 @@ test('excluding a project immediately redacts its cached review findings', async
   try {
     await mkdir(path.join(root, 'alpha')); await mkdir(path.join(root, 'beta')); for (const project of ['alpha', 'beta']) { await writeFile(path.join(root, project, 'index.md'), `# ${project}\n`); await writeFile(path.join(root, project, 'status.md'), '# Status\n'); }
     const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async () => '{}' }); await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
-    const evidence = await collectEvidence(root, {}); await coordinator.store.saveReview({ schemaVersion: 1, inputFingerprint: evidence.fingerprint, completedAt: '2026-09-21T10:00:00Z', sources: evidence.sources, coverage: evidence.coverage, assessment: { projects: ['alpha', 'beta'].map((projectId, index) => ({ projectId, priority: 'next', rank: index + 1, trajectory: 'unknown', lifecycle: 'active' })), attention: [{ id: 'alpha-item', projectId: 'alpha', urgency: 'soon', evidenceSignature: 'same' }, { id: 'beta-item', projectId: 'beta', urgency: 'soon', evidenceSignature: 'same' }] } });
+    const evidence = await collectEvidence(root, {}); await coordinator.store.saveReview({ schemaVersion: 1, inputFingerprint: evidence.fingerprint, completedAt: '2026-09-21T10:00:00Z', sources: evidence.sources, coverage: evidence.coverage, assessment: { headline: 'alpha-secret headline', summary: 'alpha-secret summary', focusProjectId: 'alpha', question: { projectId: 'alpha', text: 'alpha-secret question', reason: 'reason', options: ['one', 'two'], evidenceIds: [evidence.projects[0].sources[0].id] }, projects: ['alpha', 'beta'].map((projectId, index) => ({ projectId, priority: 'next', rank: index + 1, trajectory: 'unknown', lifecycle: 'active' })), attention: [{ id: 'alpha-item', projectId: 'alpha', urgency: 'soon', evidenceSignature: 'same' }, { id: 'beta-item', projectId: 'beta', urgency: 'soon', evidenceSignature: 'same' }] } });
     await coordinator.settings({ provider: 'openai', model: 'reviewer', excludedProjects: ['alpha'] }, 1); const state = await coordinator.state();
     assert.deepEqual(state.review.projects.map(item => item.projectId), ['beta']); assert.deepEqual(state.review.attention.map(item => item.projectId), ['beta']);
+    assert.equal(state.review.assessment.focusProjectId, null); assert.equal(state.review.assessment.question, null);
+    assert.ok(!JSON.stringify(state.review.assessment).includes('alpha-secret'), 'top-level synthesis cannot leak excluded-project details');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -415,10 +561,9 @@ test('automatic changes debounce, respect attempt spacing, and retain one retry 
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer', automatic: true }, 0);
     await coordinator.store.updateRuntime(runtime => { runtime.nextCheckAt = '2026-09-22T10:00:00Z'; return runtime; });
     await coordinator.noteChange(); await coordinator.checkAutomatic(); assert.equal(calls, 0);
-    now = new Date(now.getTime() + 60_000); await coordinator.checkAutomatic();
-    for (let index = 0; index < 20 && coordinator.running; index++) await new Promise(resolve => setTimeout(resolve, 1));
-    assert.equal(calls, 1); const runtime = await coordinator.store.runtime(); assert.equal(Object.values(runtime.retry).at(0).count, 1);
-    now = new Date(now.getTime() + 15 * 60_000); await coordinator.checkAutomatic(); assert.equal(calls, 1);
+    now = new Date(now.getTime() + 60_000); await coordinator.checkAutomatic(); await coordinator.running?.task;
+    assert.equal(calls, 2); const runtime = await coordinator.store.runtime(); assert.equal(Object.values(runtime.pipelineRetry).length, 2);
+    now = new Date(now.getTime() + 15 * 60_000); await coordinator.checkAutomatic(); assert.equal(calls, 2);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -470,4 +615,6 @@ test('review validation rejects vague or multi-action first steps', () => {
   assert.throws(check('Open review.md, then draft the summary'), /firstStep/);
   assert.throws(check('Open review.md; draft the summary'), /firstStep/);
   assert.throws(check('Open review.md and after that draft the summary'), /firstStep/);
+  source.excerpt = '# Status\nDue 2026-02-31.\n'; raw.attention[0].dueDate = '2026-02-31'; raw.attention[0].dueDateEvidence = { sourceId: 'source', excerpt: 'Due 2026-02-31.' };
+  assert.throws(() => validateReview(raw, { projects: [{ id: 'alpha' }], sources: [source] }), /real ISO calendar date/);
 });

@@ -530,9 +530,10 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .workspace-overview { max-width: 1120px; margin: 0 auto; padding: 0 0 48px; }
 .workspace-overview h1 { margin: 0; font-size: clamp(24px, 2.8vw, 32px); letter-spacing: -.03em; }
 .workspace-overview h2 { margin: 0; letter-spacing: -.025em; }
-.workspace-overview-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 28px; margin-bottom: 30px; }
+.workspace-overview-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 28px; margin-bottom: 24px; }
 .workspace-overview-header > div:first-child { min-width: 0; flex: 1 1 260px; }
-.workspace-overview-header > div > p:last-child { margin: 9px 0 0; color: var(--muted); }
+.workspace-overview-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 12px; margin-top: 9px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.workspace-overview-meta > span { white-space: nowrap; }
 .workspace-header-actions, .workspace-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .workspace-header-actions { flex: 0 0 auto; }
 .workspace-overview button { min-height: 32px; padding: 6px 11px; border: 1px solid var(--rule-strong); border-radius: 5px; color: var(--ink); background: var(--paper); font: 600 12px var(--font-ui); cursor: pointer; }
@@ -588,11 +589,24 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 }
 .workspace-table-wrap { overflow-x: auto; border: 1px solid var(--rule); }
 .workspace-table { width: 100%; border-collapse: collapse; font-size: 13px; }.workspace-table th { padding: 11px 13px; color: var(--muted); background: var(--panel); font: 700 10px var(--font-ui); letter-spacing: .06em; text-align: left; text-transform: uppercase; }.workspace-table td { min-width: 135px; padding: 13px; vertical-align: top; border-top: 1px solid var(--rule); }.workspace-table small { display: block; margin-top: 4px; color: var(--muted); line-height: 1.4; }.workspace-priority { text-transform: capitalize; }.workspace-trajectory.at_risk, .workspace-trajectory.drifting { color: #a52c21; background: color-mix(in srgb, var(--danger) 14%, var(--paper)); }.workspace-trajectory.on_course { color: #226b4a; background: #e3f4e8; }
+.workspace-project-review-error { color: var(--danger) !important; }
 .workspace-focus-loading, .workspace-quiet, .workspace-closure { padding: 16px 18px; border: 1px solid var(--rule); color: var(--muted); background: var(--panel); }.workspace-focus-row { display: grid; grid-template-columns: 120px minmax(120px, 1fr) auto; align-items: center; gap: 12px; margin: 11px 0; }.workspace-focus-row > div { height: 9px; overflow: hidden; border-radius: 99px; background: var(--panel); }.workspace-focus-row i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }.workspace-focus-row small { color: var(--muted); white-space: nowrap; }.workspace-monitor { margin-top: 32px; color: var(--muted); font-size: 12px; }
-.workspace-empty { max-width: 650px; margin-top: 28px; padding: 26px; border: 1px dashed var(--rule-strong); background: var(--panel); }.workspace-empty h2 { font-size: 23px; }.workspace-empty p { color: var(--muted); line-height: 1.55; }.workspace-error { margin: -12px 0 0; padding: 10px 12px; border-radius: 7px 7px 0 0; color: #8b281e; background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }
-.workspace-error-meta-line { margin: 0 0 18px; padding: 6px 12px 10px; border-radius: 0 0 7px 7px; background: color-mix(in srgb, var(--danger) 12%, var(--paper)); }
-.workspace-error-meta { color: #8b281e; opacity: .8; font-size: 12px; }
-.workspace-stale { display: inline-block; margin-left: 6px; padding: 2px 6px; border-radius: 99px; color: #805600; background: #fff4cf; font: 700 10px var(--font-ui); letter-spacing: .04em; text-transform: uppercase; }
+.workspace-empty { max-width: 650px; margin-top: 28px; padding: 26px; border: 1px dashed var(--rule-strong); background: var(--panel); }.workspace-empty h2 { font-size: 23px; }.workspace-empty p { color: var(--muted); line-height: 1.55; }
+.workspace-review-notice { margin: -5px 0 22px; padding: 12px 15px; border: 1px solid var(--rule); border-left: 3px solid var(--danger); border-radius: 5px; background: color-mix(in srgb, var(--danger) 3%, var(--paper)); font: 12px/1.45 var(--font-ui); }
+.workspace-review-notice-content { display: flex; align-items: flex-start; gap: 10px; }
+.workspace-review-notice-mark { display: grid; flex: none; place-items: center; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, var(--paper)); font-size: 12px; font-weight: 800; }
+.workspace-review-notice-title { margin: 0; color: var(--ink); font-size: 13px; font-weight: 650; }
+.workspace-review-notice-meta { margin: 3px 0 0; color: var(--muted); }
+.workspace-review-notice-cache { margin: 9px 0 0 28px; padding-top: 8px; border-top: 1px solid var(--rule); color: var(--muted); }
+.workspace-review-notice-details { margin: 7px 0 0 28px; color: var(--muted); }
+.workspace-review-notice-details summary { width: fit-content; cursor: pointer; text-decoration: underline; text-decoration-color: var(--rule-strong); text-underline-offset: 2px; }
+.workspace-review-notice-details summary:hover { color: var(--ink); }
+.workspace-review-notice-details p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.workspace-review-notice-pending { border-left-color: var(--rule-strong); background: var(--panel); }
+.workspace-review-notice-pending .workspace-review-notice-cache { margin-left: 0; }
+.workspace-model-warning { margin: 0 0 20px; padding: 9px 12px; border-left: 2px solid #a97020; color: var(--ink); background: var(--panel); font-size: 12px; }
+.workspace-stale { display: inline-flex; align-items: center; gap: 5px; margin-left: 9px; color: #946311; font: 600 11px var(--font-ui); }
+.workspace-stale::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .workspace-review-dialog { width: min(570px, calc(100vw - 28px)); max-height: min(780px, calc(100vh - 28px)); padding: 0; overflow: auto; border: 1px solid var(--rule); border-radius: 12px; color: var(--ink); background: var(--paper); box-shadow: var(--shadow-pop); }.workspace-review-dialog::backdrop { background: rgba(0,0,0,.35); }.workspace-review-dialog form > header { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid var(--rule); background: var(--panel); }.workspace-review-dialog h2 { margin: 0; font-size: 18px; }.workspace-review-dialog header button { border: 0; color: var(--muted); background: transparent; font-size: 23px; cursor: pointer; }.workspace-dialog-body { display: grid; gap: 14px; padding: 18px; }.workspace-dialog-body > p { margin: 0; color: var(--muted); line-height: 1.5; }.workspace-dialog-body label:not(.workspace-check) { display: grid; gap: 5px; color: var(--muted); font: 700 10px var(--font-ui); letter-spacing: .06em; text-transform: uppercase; }.workspace-dialog-body select, .workspace-dialog-body textarea { width: 100%; padding: 8px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 13px var(--font-ui); letter-spacing: normal; text-transform: none; }.workspace-dialog-body textarea { min-height: 84px; resize: vertical; }.workspace-dialog-body fieldset { display: grid; gap: 7px; padding: 10px; border: 1px solid var(--rule); border-radius: 7px; }.workspace-dialog-body legend { padding: 0 4px; color: var(--muted); font: 700 10px var(--font-ui); letter-spacing: .06em; text-transform: uppercase; }.workspace-check { color: var(--ink); font-size: 13px; cursor: pointer; }.workspace-dialog-body footer { display: flex; justify-content: flex-end; gap: 8px; }.workspace-dialog-body footer button { padding: 7px 11px; border: 1px solid var(--rule-strong); border-radius: 6px; background: var(--paper); cursor: pointer; }.workspace-dialog-error { color: var(--danger) !important; }
 /* Project review bar: one hairline row pinned to the top of the document.
    Deliberately quiet chrome — the project content below is the focus. */

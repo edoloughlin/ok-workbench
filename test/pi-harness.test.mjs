@@ -72,6 +72,18 @@ test('TurnWorker waits for an explicit sandbox-ready acknowledgement', async () 
   await ready;
   worker.close();
 });
+test('Codex stream wrapper enforces the requested output-token cap, clamps to model limits, and reports unavailable enforcement', async () => {
+  const { clampAgentOutputTokens } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const forwarded = []; const agent = { streamFunction: async (_model, _context, options) => { forwarded.push(options); return 'ok'; } };
+  assert.equal(clampAgentOutputTokens(agent, 16_384, 8_192), 8_192, 'the selected model cap wins when lower than the request');
+  await agent.streamFunction({}, {}, { temperature: 0.2 });
+  await agent.streamFunction({}, {}, { maxTokens: 20_000, temperature: 0.1 });
+  await agent.streamFunction({}, {}, { maxTokens: 1_024 });
+  assert.deepEqual(forwarded.map(options => options.maxTokens), [8_192, 8_192, 1_024]);
+  const statuses = [];
+  assert.throws(() => clampAgentOutputTokens({}, 16_384, null, status => statuses.push(status)), { code: 'OUTPUT_LIMIT_UNAVAILABLE' });
+  assert.deepEqual(statuses, [{ state: 'output-token-limit-unavailable' }], 'a runtime without the stream hook reports the limitation rather than claiming enforcement');
+});
 test('macOS Seatbelt worker can service workspace tools', { skip: process.platform !== 'darwin' }, async () => {
   const { createTurnWorker } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-workbench-seatbelt-'));

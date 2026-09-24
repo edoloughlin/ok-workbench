@@ -4,6 +4,8 @@ Build a workspace home that recommends where the user should put their attention
 
 Status: implementation specification; no production implementation accompanies this document. The [interactive mockup](mockups/workspace-overview.html) uses fictional projects and simulated responses. This specification is authoritative for behavior; the mockup is authoritative for visual hierarchy and interaction intent. The design rationale, including the ADHD-informed attention model, is recorded in [WORKSPACE-OVERVIEW-CRITIQUE.md](WORKSPACE-OVERVIEW-CRITIQUE.md); preserve the properties it marks as deliberate.
 
+Implementation amendment, 2026-09-23: [Cached per-project review specification](WORKSPACE-REVIEW-RELIABILITY.md) supersedes this document's single-call orchestration, caching, call-accounting, correction-attempt, and partial-result requirements. It specifies the next implementation, not a shipped split. Other requirements remain in force.
+
 ## Before you begin
 
 - Read [the workspace agent instructions](../seed/workspace/AGENTS.md), especially **Work as a proactive project manager**, **Exercise project judgment**, and **Project state**. These are the supplied workspace instructions, not a verified copy of a user's separately maintained `ok-workspace/AGENTS.md`.

@@ -927,7 +927,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, maxTokens, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -966,13 +966,13 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   if (outputLimitReached && noWorkspaceTools) throw new Error('The selected model stopped before completing the review response (output limit)');
 }
 
-async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal }) {
+async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal, maxTokens }) {
   let output = ''; const abort = new AbortController();
   const forwardAbort = () => abort.abort(); signal?.addEventListener('abort', forwardAbort, { once: true });
   if (signal?.aborted) abort.abort();
   const timer = setTimeout(() => abort.abort(), timeout || 120_000); timer.unref?.();
   try {
-    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: 16384, messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; } });
+    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: Math.min(maxTokens || 16384, 16384), messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; } });
     return output;
   } catch (error) {
     if (abort.signal.aborted) throw Object.assign(new Error('The review exceeded its 120-second limit'), { code: 'REVIEW_TIMEOUT' });
@@ -1274,7 +1274,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
     if (url.pathname === '/api/workspace-review' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await workspaceReview.state()); }
-    if (url.pathname === '/api/workspace-review/runs' && req.method === 'POST') { assertChatRequest(req); const result = await workspaceReview.run('manual'); return json(res, result.reused ? 200 : 202, result); }
+    if (url.pathname === '/api/workspace-review/runs' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'force') || (body.force !== undefined && typeof body.force !== 'boolean')) throw Object.assign(new Error('Invalid workspace review request'), { code: 'INVALID_REQUEST' }); const result = await workspaceReview.run('manual', { force: body.force === true }); return json(res, result.reused ? 200 : 202, result); }
     if (url.pathname === '/api/workspace-review/pause' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body.paused !== 'boolean') throw Object.assign(new Error('A paused boolean is required'), { code: 'INVALID_REQUEST' }); return json(res, 200, await workspaceReview.setPaused(body.paused)); }
     if (url.pathname === '/api/workspace-review/settings' && req.method === 'PUT') {
       assertChatRequest(req); const body = await readJson(req); const catalog = await projectData('/workspace'); const settings = await validateWorkspaceReviewSettings(body, catalog.projects.filter(item => item.name !== 'workspace').map(item => item.name));

@@ -385,7 +385,7 @@ export function projectToolResult(toolResult, git) {
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, maxTokens, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, externalReadGrants, workspaceMode, noWorkspaceTools });
   const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: !noWorkspaceTools }, retry: { enabled: !noWorkspaceTools, maxRetries: noWorkspaceTools ? 0 : 2 } });
@@ -514,6 +514,7 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
     } })] : [])
   ];
   const { session } = await createAgentSession({ cwd: projectRoot, agentDir, model, modelRuntime, settingsManager, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectRoot), thinkingLevel: effort || undefined, noTools: 'builtin', tools: tools.map(tool => tool.name), customTools: tools });
+  if (noWorkspaceTools && Number.isFinite(maxTokens) && maxTokens > 0) clampAgentOutputTokens(session.agent, maxTokens, model.maxTokens, onStatus);
   let lastStatus;
   const reportStatus = state => { if (state !== lastStatus) { lastStatus = state; onStatus?.({ state }); } };
   const unsubscribe = session.subscribe(event => {
@@ -541,4 +542,20 @@ export async function runPiTurn({ provider, model: modelId, effort, messages, pr
       if (lastAssistant?.stopReason === 'error') throw new Error(lastAssistant.errorMessage || 'The selected model failed during the review');
     }
   } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
+}
+
+// Pi's provider adapter accepts generation options as its third stream argument.
+// Keep this wrapper small and testable: every call path, including retries that
+// provide their own options, must remain at or below the requested/model cap.
+export function clampAgentOutputTokens(agent, requestedTokens, modelMaxTokens, onStatus = () => {}) {
+  const stream = agent?.streamFunction;
+  if (typeof stream !== 'function') {
+    onStatus?.({ state: 'output-token-limit-unavailable' });
+    throw Object.assign(new Error('The installed provider runtime cannot enforce the requested review output-token limit'), { code: 'OUTPUT_LIMIT_UNAVAILABLE' });
+  }
+  const requested = Math.floor(requestedTokens);
+  const modelLimit = Number.isFinite(modelMaxTokens) && modelMaxTokens > 0 ? Math.floor(modelMaxTokens) : requested;
+  const bounded = Math.min(requested, modelLimit);
+  agent.streamFunction = (requestModel, context, options) => stream(requestModel, context, { ...options, maxTokens: Math.min(options?.maxTokens || bounded, bounded) });
+  return bounded;
 }
