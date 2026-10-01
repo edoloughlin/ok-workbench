@@ -204,3 +204,15 @@ test('turn capabilities are project-scoped and accept only server-issued grants'
   assert.equal(workspaceCapabilities.workspaceMode, true);
   await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, workspaceMode: true }), /requires the workspace root/);
 });
+
+test('provider discovery identifies API-token authentication without exposing credentials', async () => {
+  const { configuredPiProviders } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'ok-workbench-provider-auth-'));
+  try {
+    const providers = await configuredPiProviders({ stateDir, env: { OPENAI_API_KEY: 'test-only-api-token' } });
+    const openai = providers.find(provider => provider.id === 'openai');
+    assert.ok(openai?.models.length);
+    assert.equal(openai.authType, 'api_key');
+    assert.ok(!JSON.stringify(providers).includes('test-only-api-token'));
+  } finally { await rm(stateDir, { recursive: true, force: true }); }
+});

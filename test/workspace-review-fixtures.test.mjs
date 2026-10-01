@@ -564,3 +564,93 @@ test('synthesis-only version changes reuse project cache while project-stage ver
     assert.deepEqual(calls, ['project', 'synthesis'], 'project validator changes invalidate project cache compatibility');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const invalid of [false, 'json', 'schema']) {
+  test(`hybrid review routes assessments, retries, synthesis and caches (invalid initial: ${invalid})`, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-hybrid-'));
+    const calls = [];
+    const settings = { provider: 'openai', model: 'synthesis', effort: 'high', assessmentModel: { provider: 'openai-codex', model: 'initial', effort: 'low' } };
+    const provider = async request => {
+      calls.push(request);
+      if (request.stage === 'project') {
+        if (invalid && request.provider === 'openai-codex') return invalid === 'schema' ? '{}' : '{';
+        return validProjectResponse(request.projectId, request.evidence);
+      }
+      return validSynthesisResponse(request.evidence);
+    };
+    const build = () => new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider });
+    try {
+      await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nCurrent evidence.\n');
+      let coordinator = build(); await coordinator.store.saveSettings(settings, 0);
+      await coordinator.run(); await coordinator.running.task;
+      assert.deepEqual(calls.map(({ stage, provider, model, effort }) => ({ stage, provider, model, effort })), [
+        { stage: 'project', provider: 'openai-codex', model: 'initial', effort: 'low' },
+        ...(invalid ? [{ stage: 'project', provider: 'openai', model: 'synthesis', effort: 'high' }] : []),
+        { stage: 'synthesis', provider: 'openai', model: 'synthesis', effort: 'high' }
+      ]);
+      if (invalid) assert.deepEqual(calls[1].evidence, calls[0].evidence, 'retry sends original evidence without the rejected candidate');
+      const cached = await coordinator.store.projectAssessment('alpha');
+      assert.equal(cached.provider, invalid ? 'openai' : 'openai-codex');
+      assert.equal(cached.assessmentFallback, Boolean(invalid));
+      assert.equal((await coordinator.store.runtime()).pipelineAttempts.length, invalid ? 3 : 2);
+      calls.length = 0; coordinator = build(); await coordinator.run(); await coordinator.running.task;
+      assert.equal(calls.length, 0, 'both successful initial and fallback assessments survive restart');
+      await coordinator.settings({ ...settings, model: 'new-synthesis' }, 1);
+      await coordinator.run(); await coordinator.running.task;
+      assert.equal(calls.filter(call => call.stage === 'project').length, invalid ? 2 : 0, 'changing synthesis only invalidates assessments produced by fallback');
+      assert.equal(calls.at(-1).model, 'new-synthesis');
+      calls.length = 0;
+      await coordinator.settings({ ...settings, assessmentModel: { ...settings.assessmentModel, effort: 'medium' } }, 2);
+      await coordinator.run(); await coordinator.running.task;
+      assert.equal(calls[0].effort, 'medium', 'assessment effort changes invalidate project caches');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+for (const failure of ['budget', 'invalid-retry', 'provider-unavailable']) {
+  test(`hybrid assessments bound paid retries (${failure})`, async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-hybrid-limit-'));
+    const calls = [];
+    try {
+      await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nCurrent evidence.\n');
+      const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+        calls.push(request);
+        if (request.stage === 'synthesis') return validSynthesisResponse(request.evidence);
+        if (failure === 'provider-unavailable') throw Object.assign(new Error('Unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
+        return '{}';
+      } });
+      await coordinator.store.saveSettings({ provider: 'openai', model: 'synthesis', assessmentModel: { provider: 'github-copilot', model: 'initial' }, dailyAutomaticLimit: 2 }, 0);
+      await coordinator.run(failure === 'budget' ? 'automatic' : 'manual'); await coordinator.running.task;
+      assert.deepEqual(calls.map(call => [call.stage, call.provider]), [
+        ['project', 'github-copilot'],
+        ...(failure === 'invalid-retry' ? [['project', 'openai']] : []),
+        ['synthesis', 'openai']
+      ]);
+      assert.equal(await coordinator.store.projectAssessment('alpha'), null, 'invalid output is never cached');
+      assert.ok(await coordinator.store.latest(), 'synthesis can publish the cited assessment gap');
+      assert.equal((await coordinator.store.runtime()).pipelineAttempts.length, calls.length);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+}
+
+test('changing the initial assessment model cancels an in-flight hybrid review', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-hybrid-cancel-'));
+  let release; let called;
+  const started = new Promise(resolve => { called = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const settings = { provider: 'openai', model: 'synthesis', automatic: true, assessmentModel: { provider: 'openai-codex', model: 'initial' } };
+  try {
+    await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nCurrent evidence.\n');
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+      called(request); await held; return validProjectResponse(request.projectId, request.evidence);
+    } });
+    await coordinator.store.saveSettings(settings, 0);
+    await coordinator.run(); const running = coordinator.running;
+    const request = await started;
+    await coordinator.settings({ ...settings, assessmentModel: { ...settings.assessmentModel, model: 'replacement' } }, 1);
+    assert.equal(request.signal.aborted, true);
+    release(); await running.task;
+    assert.equal(await coordinator.store.projectAssessment('alpha'), null);
+    assert.equal(await coordinator.store.latest(), null);
+  } finally { release?.(); await rm(root, { recursive: true, force: true }); }
+});

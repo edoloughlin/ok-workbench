@@ -9,7 +9,7 @@ const SCHEMA_VERSION = 1;
 const TRACE_TTL_MS = 5 * 86400000;
 function workspaceKey(root) { return crypto.createHash('sha256').update(path.resolve(root)).digest('hex'); }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
-function defaults() { return { schemaVersion: SCHEMA_VERSION, revision: 0, automatic: false, provider: null, model: null, effort: null, confirmations: { meteredAutomatic: false, belowRecommendedModel: false }, excludedProjects: [], activityTracking: true, timezone: 'UTC', dailyAutomaticLimit: 6 }; }
+function defaults() { return { schemaVersion: SCHEMA_VERSION, revision: 0, automatic: false, provider: null, model: null, effort: null, assessmentModel: null, confirmations: { meteredAutomatic: false, belowRecommendedModel: false }, excludedProjects: [], activityTracking: true, timezone: 'UTC', dailyAutomaticLimit: 6 }; }
 function defaultControls() { return { schemaVersion: SCHEMA_VERSION, revision: 0, updatedAt: null, priorityOverrides: {}, cadenceOverrides: {}, guidance: [], issueFeedback: {}, feedbackLog: [], feedbackCheckpoint: {}, requests: [] }; }
 function defaultRuntime() { return { schemaVersion: SCHEMA_VERSION, attempts: [], retry: {}, invalidReviewStreak: {}, paused: false, nextCheckAt: null, pendingRerun: false, pendingRerunVersion: 0, changeDueAt: null, changeDeadlineAt: null, lastJob: null, pipelineAttempts: [], pipelineRetry: {}, recurrenceTokens: {} }; }
 async function readJson(file, fallback) { try { const value = JSON.parse(await fs.readFile(file, 'utf8')); return value?.schemaVersion === SCHEMA_VERSION ? value : fallback(); } catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return fallback(); throw error; } }

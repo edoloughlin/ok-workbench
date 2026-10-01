@@ -816,7 +816,7 @@ async function providerCatalog() {
   const configured = await configuredPiProviders({ stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() });
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
-  if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
+  if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', authType: 'api_key', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
   return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id) })) }));
 }
 function providerUsesPi(provider) {
@@ -830,7 +830,7 @@ async function chatStatus(provider) {
   return {
     enabled: providers.some(item => item.models.length > 0),
     message: providers.length ? 'Choose an authenticated provider and model.' : 'Sign in with Pi or set a supported provider API key in this server process.',
-    providers: providers.map(({ id, label, models }) => ({ id, label, models })),
+    providers: providers.map(({ id, label, authType, models }) => ({ id, label, authType, models })),
     defaultProvider: selected?.id || '',
     models: selected?.models || [],
     defaultModel: selected?.models?.[0]?.id || '',
@@ -982,26 +982,36 @@ async function workspaceReviewProvider({ provider, model, effort, prompt, eviden
 
 async function validateWorkspaceReviewSettings(value, projects) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Invalid review settings'), { code: 'INVALID_REQUEST' });
-  const allowed = new Set(['provider', 'model', 'effort', 'automatic', 'excludedProjects', 'reportableProjects', 'activityTracking', 'timezone', 'dailyAutomaticLimit', 'confirmations', 'expectedRevision']);
+  const allowed = new Set(['provider', 'model', 'effort', 'assessmentModel', 'automatic', 'excludedProjects', 'reportableProjects', 'activityTracking', 'timezone', 'dailyAutomaticLimit', 'confirmations', 'expectedRevision']);
   if (Object.keys(value).some(key => !allowed.has(key))) throw Object.assign(new Error('Invalid review settings field'), { code: 'INVALID_REQUEST' });
   const ids = new Set(projects); const list = (field) => { const values = value[field] === undefined ? [] : value[field]; if (!Array.isArray(values) || values.some(item => typeof item !== 'string' || !ids.has(item)) || new Set(values).size !== values.length) throw Object.assign(new Error(`Invalid ${field}`), { code: 'INVALID_REQUEST' }); return values; };
   const zone = typeof value.timezone === 'string' ? value.timezone : 'UTC'; try { new Intl.DateTimeFormat('en-IE', { timeZone: zone }); } catch { throw Object.assign(new Error('Invalid review time zone'), { code: 'INVALID_REQUEST' }); }
   const limit = Number(value.dailyAutomaticLimit ?? 6); if (!Number.isInteger(limit) || limit < 1 || limit > 24) throw Object.assign(new Error('Daily automatic limit must be 1 to 24'), { code: 'INVALID_REQUEST' });
   const confirmations = value.confirmations || {}; if (!confirmations || typeof confirmations !== 'object' || Array.isArray(confirmations) || Object.keys(confirmations).some(key => !['meteredAutomatic', 'belowRecommendedModel'].includes(key)) || Object.values(confirmations).some(flag => typeof flag !== 'boolean')) throw Object.assign(new Error('Invalid review confirmations'), { code: 'INVALID_REQUEST' });
   if (value.provider !== null && typeof value.provider !== 'string') throw Object.assign(new Error('Invalid review provider'), { code: 'INVALID_REQUEST' }); if (value.model !== null && typeof value.model !== 'string') throw Object.assign(new Error('Invalid review model'), { code: 'INVALID_REQUEST' });
-  if (value.provider || value.model) {
-    const catalog = await providerCatalog(); const provider = catalog.find(item => item.id === value.provider); const model = provider?.models.find(item => item.id === value.model);
-    if (!provider || !model) throw Object.assign(new Error('The selected review provider or model is no longer available'), { code: 'MODEL_UNSUITABLE' });
+  const catalog = await providerCatalog();
+  const selectModel = (selection, label) => {
+    const provider = catalog.find(item => item.id === selection.provider); const model = provider?.models.find(item => item.id === selection.model);
+    if (!provider || !model) throw Object.assign(new Error(`The selected ${label} provider or model is no longer available`), { code: 'MODEL_UNSUITABLE' });
     const requiredTokens = reviewContextTokensRequired();
     if (model.contextWindow && model.contextWindow < requiredTokens) throw Object.assign(new Error(`This model exposes a ${model.contextWindow.toLocaleString()}-token context window, below the ${requiredTokens.toLocaleString()}-token review input-plus-response budget`), { code: 'MODEL_UNSUITABLE' });
     const tier = reviewModelTier(provider.id, model.id);
     if (tier !== 'recommended' && confirmations.belowRecommendedModel !== true) throw Object.assign(new Error(`This model's review capability tier is "${tier}", below recommended; validation will reject fabrication, but a weaker model may misjudge priorities without any visible error. Confirm to proceed.`), { code: 'MODEL_UNSUITABLE' });
-    if (value.automatic === true && ['compatible', 'openai', 'anthropic'].includes(provider.id) && confirmations.meteredAutomatic !== true) throw Object.assign(new Error('Enable the metered-provider acknowledgement before automatic reviews'), { code: 'MODEL_UNSUITABLE' });
+    if (value.automatic === true && provider.authType === 'api_key' && confirmations.meteredAutomatic !== true) throw Object.assign(new Error('Enable the metered-provider acknowledgement before automatic reviews'), { code: 'MODEL_UNSUITABLE' });
+    if (selection.effort != null && typeof selection.effort !== 'string') throw Object.assign(new Error('Invalid reasoning effort'), { code: 'INVALID_REQUEST' });
+    const effort = selection.effort || null;
+    if (effort && model.thinkingLevels?.length && !model.thinkingLevels.includes(effort)) throw Object.assign(new Error('This reasoning effort is not supported by the selected model'), { code: 'MODEL_UNSUITABLE' });
+    return { provider: provider.id, model: model.id, effort: effort || model.thinkingLevels?.at(-1) || null };
+  };
+  const synthesis = value.provider || value.model ? selectModel(value, 'review') : null;
+  let assessmentModel = null;
+  if (value.assessmentModel != null) {
+    const selection = value.assessmentModel;
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection) || Object.keys(selection).some(key => !['provider', 'model', 'effort'].includes(key)) || typeof selection.provider !== 'string' || typeof selection.model !== 'string') throw Object.assign(new Error('Invalid assessment model'), { code: 'INVALID_REQUEST' });
+    if (!synthesis || catalog.find(item => item.id === synthesis.provider)?.authType !== 'api_key') throw Object.assign(new Error('Hybrid reviews require an API-token model for synthesis and assessment retries'), { code: 'MODEL_UNSUITABLE' });
+    assessmentModel = selectModel(selection, 'assessment');
   }
-  const selectedEffort = typeof value.effort === 'string' && value.effort ? value.effort : null;
-  if (value.provider && selectedEffort) { const model = (await providerCatalog()).find(item => item.id === value.provider)?.models.find(item => item.id === value.model); if (model?.thinkingLevels?.length && !model.thinkingLevels.includes(selectedEffort)) throw Object.assign(new Error('This reasoning effort is not supported by the selected model'), { code: 'MODEL_UNSUITABLE' }); }
-  const defaultEffort = value.provider ? (await providerCatalog()).find(item => item.id === value.provider)?.models.find(item => item.id === value.model)?.thinkingLevels?.at(-1) || null : null;
-  return { provider: value.provider || null, model: value.model || null, effort: selectedEffort || defaultEffort, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit };
+  return { provider: value.provider || null, model: value.model || null, effort: synthesis?.effort || null, assessmentModel, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit };
 }
 function validateWorkspaceReviewControl(value, projects) {
   if (!value || typeof value !== 'object' || typeof value.requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.requestId) || !Number.isInteger(value.expectedRevision) || !value.operation || typeof value.operation !== 'object') throw Object.assign(new Error('Invalid review control request'), { code: 'INVALID_REQUEST' });

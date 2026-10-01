@@ -255,9 +255,11 @@ export async function configuredPiProviders({ stateDir, env = process.env } = {}
       const apiKey = apiKeyFor(provider.id, env);
       if (apiKey) await runtime.setRuntimeApiKey(provider.id, apiKey);
       const models = await runtime.getAvailable(provider.id);
+      const auth = models.length ? await runtime.checkAuth(provider.id) : null;
       if (models.length) configured.push({
         id: provider.id,
         label: provider.name || provider.id,
+        authType: auth?.type || null,
         models: models.map(model => ({
           id: model.id,
           label: model.name || model.id,

@@ -250,7 +250,7 @@ class WorkspaceReviewCoordinator {
     if (value.activityTracking === false) await this.store.clearActivity(); const saved = await this.store.saveSettings(value, expectedRevision);
     // A settings revision prevents an older in-flight result from publishing.
     // Queue only one immediate, bounded automatic attempt after explicit enable.
-    if (this.running && (!saved.automatic || previous.provider !== saved.provider || previous.model !== saved.model || previous.effort !== saved.effort || previous.timezone !== saved.timezone || JSON.stringify(previous.excludedProjects || []) !== JSON.stringify(saved.excludedProjects || []))) {
+    if (this.running && (!saved.automatic || previous.provider !== saved.provider || previous.model !== saved.model || previous.effort !== saved.effort || JSON.stringify(previous.assessmentModel || null) !== JSON.stringify(saved.assessmentModel || null) || previous.timezone !== saved.timezone || JSON.stringify(previous.excludedProjects || []) !== JSON.stringify(saved.excludedProjects || []))) {
       this.running.controller.abort();
       await this.store.updateRuntime(runtime => { runtime.pendingRerun = true; runtime.pendingRerunVersion = (runtime.pendingRerunVersion || 0) + 1; return runtime; });
     }

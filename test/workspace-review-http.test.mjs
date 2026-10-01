@@ -52,11 +52,33 @@ test('workspace review HTTP GET stays provider-free and both run bodies dispatch
   await new Promise(resolve => provider.listen(providerPort, '127.0.0.1', resolve));
   try {
     await mkdir(path.join(workspace, 'alpha')); await writeFile(path.join(workspace, 'alpha', 'status.md'), '# Alpha\nEvidence.\n');
+    await mkdir(path.join(state, 'pi-agent'));
+    await writeFile(path.join(state, 'pi-agent', 'auth.json'), JSON.stringify({ 'openai-codex': { type: 'oauth', access: 'test-only-access', refresh: 'test-only-refresh', expires: Date.now() + 3600000 } }));
     child = await start(workspace, state, serverPort, assetPort, { LLM_COMPATIBLE_API_KEY: 'test-key', LLM_COMPATIBLE_BASE_URL: `http://127.0.0.1:${providerPort}/v1`, LLM_COMPATIBLE_MODEL: 'fake-review-model' });
     const overview = await request(serverPort, '/workspace/'); const csrf = overview.body.match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
     const options = { method: 'GET' }; await request(serverPort, '/api/workspace-review', options); assert.equal(requests.length, 0, 'GET does not dispatch provider work');
     const auth = { 'x-ok-workbench-csrf': csrf };
-    const settings = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'compatible', model: 'fake-review-model', automatic: false, confirmations: { belowRecommendedModel: true }, expectedRevision: 0 }) }); assert.equal(settings.status, 200, settings.body);
+    const status = JSON.parse((await request(serverPort, '/api/chat/status')).body);
+    assert.equal(status.providers.find(item => item.id === 'compatible').authType, 'api_key');
+    const unacknowledged = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'compatible', model: 'fake-review-model', automatic: true, confirmations: { belowRecommendedModel: true }, expectedRevision: 0 }) });
+    assert.equal(unacknowledged.status, 409);
+    assert.match(JSON.parse(unacknowledged.body).error, /metered-provider acknowledgement/);
+    const account = status.providers.find(item => item.id === 'openai-codex');
+    assert.equal(account?.authType, 'oauth');
+    const accountModel = account.models[0].id;
+    const hybridSettings = { provider: 'compatible', model: 'fake-review-model', assessmentModel: { provider: account.id, model: accountModel }, automatic: false, confirmations: { belowRecommendedModel: true }, expectedRevision: 0 };
+    for (const assessmentModel of [[], { provider: account.id, model: accountModel, unknown: true }, { provider: account.id, model: 'unavailable' }, { provider: account.id, model: accountModel, effort: 42 }]) {
+      const invalid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, assessmentModel }) });
+      assert.ok([400, 409].includes(invalid.status), invalid.body);
+    }
+    const noApi = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, provider: account.id, model: accountModel }) });
+    assert.equal(noApi.status, 409); assert.match(JSON.parse(noApi.body).error, /API-token model/);
+    const hybrid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify(hybridSettings) });
+    assert.equal(hybrid.status, 200, hybrid.body);
+    const persisted = JSON.parse((await request(serverPort, '/api/workspace-review')).body).settings;
+    assert.equal(persisted.assessmentModel.provider, account.id);
+    assert.equal(persisted.assessmentModel.model, accountModel);
+    const settings = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'compatible', model: 'fake-review-model', automatic: false, confirmations: { belowRecommendedModel: true }, expectedRevision: 1 }) }); assert.equal(settings.status, 200, settings.body);
     const run = await request(serverPort, '/api/workspace-review/runs', { method: 'POST', headers: auth, body: '{}' }); assert.equal(run.status, 202);
     await waitFor(() => requests.length >= 2, 'ordinary run did not issue project and synthesis provider calls');
     assert.equal(requests[0].max_tokens, 4096); assert.equal(requests[1].max_tokens, 16384);

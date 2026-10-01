@@ -110,6 +110,121 @@ async function withOverview(fn) {
   }
 }
 
+async function checkStickyTable(page) {
+  await page.evaluate(() => {
+    const table = document.querySelector('#document table');
+    const row = table.tBodies[0].rows[0];
+    for (let i = 0; i < 40; i++) table.tBodies[0].append(row.cloneNode(true));
+    const spacer = document.createElement('div');
+    spacer.style.height = '1000px';
+    document.querySelector('#document').append(spacer);
+  });
+  const scrollTable = async end => {
+    await page.evaluate(end => {
+      const pane = document.querySelector('#document');
+      const table = pane.querySelector('table');
+      const desktop = matchMedia('(min-width: 901px)').matches;
+      const scrollportTop = desktop ? pane.getBoundingClientRect().top : document.querySelector('.topbar').getBoundingClientRect().bottom;
+      const rect = table.getBoundingClientRect();
+      const delta = (end ? rect.bottom - 15 : rect.top + 150) - scrollportTop;
+      if (desktop) pane.scrollTop += delta;
+      else window.scrollBy(0, delta);
+    }, end);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  };
+  await scrollTable(false);
+  const geometry = () => page.evaluate(() => {
+    const pane = document.querySelector('#document');
+    const th = pane.querySelector('th');
+    const rect = th.getBoundingClientRect();
+    const boundary = matchMedia('(min-width: 901px)').matches ? pane.getBoundingClientRect().top : document.querySelector('.topbar').getBoundingClientRect().bottom;
+    return { top: rect.top, bottom: rect.bottom, boundary, tableBottom: pane.querySelector('table').getBoundingClientRect().bottom,
+      visible: document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('th') === th };
+  });
+  let rect = await geometry();
+  assert.ok(Math.abs(rect.top - rect.boundary) <= 1, `header should stick below chrome: ${JSON.stringify(rect)}`);
+  assert.ok(rect.visible, 'sticky header should be visible, not covered');
+  await scrollTable(true);
+  rect = await geometry();
+  assert.ok(Math.abs(rect.bottom - rect.tableBottom) <= 1, 'header stays bounded by the table end');
+}
+
+test('overview table headers stick to the document scrollport until the table ends', async () => {
+  await withOverview(async page => {
+    for (const width of [1440, 800]) {
+      await page.setViewportSize({ width, height: 700 });
+      await page.goto(page.url(), { waitUntil: 'networkidle' });
+      await page.locator('[data-review-tab="projects"]').click();
+      await checkStickyTable(page);
+    }
+  });
+});
+
+test('review bar scrolls away without shifting content and returns at the top while project table headers stick', async () => {
+  await withOverview(async (page, { workspace, serverPort }) => {
+    await writeFile(path.join(workspace, 'alpha', 'index.md'), '# Alpha\n\n| Task | Status |\n| --- | --- |\n| Review | Open |\n');
+    for (const width of [1440, 800, 390]) {
+      await page.setViewportSize({ width, height: 700 });
+      await page.evaluate(() => localStorage.clear());
+      await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/`, { waitUntil: 'networkidle' });
+      await page.waitForSelector('.project-review-bar');
+      await page.evaluate(() => document.querySelector('#app-layout').classList.add('chat-collapsed'));
+      await page.evaluate(() => {
+        const spacer = document.createElement('div');
+        spacer.style.height = '1000px';
+        document.querySelector('#document').append(spacer);
+      });
+      const bar = page.locator('.project-review-bar');
+      assert.equal(await bar.isVisible(), true);
+      const heading = page.locator('#document h1');
+      const headingTop = await heading.evaluate(element => element.getBoundingClientRect().top);
+      const barHeight = await bar.evaluate(element => element.getBoundingClientRect().height);
+      await page.evaluate(() => {
+        if (matchMedia('(min-width: 901px)').matches) document.querySelector('#document').scrollTop = 1;
+        else window.scrollTo(0, 1);
+      });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const scrolledHeadingTop = await heading.evaluate(element => element.getBoundingClientRect().top);
+      assert.ok(Math.abs(scrolledHeadingTop - (headingTop - 1)) <= 1, 'one pixel of scrolling moves content by one pixel without a jump');
+      assert.equal(await bar.evaluate(element => element.getBoundingClientRect().height), barHeight, 'scrolling does not collapse the bar and reflow the page');
+      await page.evaluate(() => { document.querySelector('#document').scrollTop = 0; window.scrollTo(0, 0); });
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      assert.equal(await heading.evaluate(element => element.getBoundingClientRect().top), headingTop, 'returning to the top restores the original position');
+      await checkStickyTable(page);
+      assert.ok(await bar.evaluate(element => {
+        const boundary = matchMedia('(min-width: 901px)').matches
+          ? document.querySelector('#document').getBoundingClientRect().top
+          : document.querySelector('.topbar').getBoundingClientRect().bottom;
+        return element.getBoundingClientRect().bottom <= boundary;
+      }), 'the review bar has scrolled fully out of view');
+    }
+  });
+});
+
+test('the chat restore button leaves the review bar close button accessible', async () => {
+  await withOverview(async (page, { serverPort }) => {
+    for (const width of [1440, 1024, 901, 800, 390]) {
+      await page.setViewportSize({ width, height: 700 });
+      await page.evaluate(() => localStorage.clear());
+      await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/`, { waitUntil: 'networkidle' });
+      await page.waitForSelector('.project-review-bar');
+      if (await page.locator('#chat-toggle').getAttribute('aria-expanded') === 'true') await page.locator('#chat-toggle').click();
+      await page.locator('#chat-restore').waitFor({ state: 'visible' });
+      await page.evaluate(() => Promise.all(document.getAnimations().map(animation => animation.finished.catch(() => {}))));
+      assert.ok(await page.locator('.review-bar-defer').evaluate(button => {
+        const close = button.getBoundingClientRect();
+        const restore = document.querySelector('#chat-restore').getBoundingClientRect();
+        const overlaps = close.left < restore.right && close.right > restore.left && close.top < restore.bottom && close.bottom > restore.top;
+        return !overlaps && document.elementFromPoint(close.left + close.width / 2, close.top + close.height / 2)?.closest('.review-bar-defer') === button;
+      }), `the review bar close button should be unobscured at ${width}px`);
+      await page.locator('.review-bar-defer').click();
+      assert.equal(await page.locator('.project-review-bar').count(), 0, 'the close button dismisses the bar');
+      await page.locator('#chat-restore').click();
+      assert.equal(await page.locator('#chat-toggle').getAttribute('aria-expanded'), 'true', 'chat still restores');
+    }
+  });
+});
+
 test('the overview renders every attention item, escalation, and the question inside Today, with no page overflow at 1440/1024/768/390', async () => {
   await withOverview(async page => {
     for (const width of [1440, 1024, 768, 390]) {
@@ -350,5 +465,52 @@ test('a synthesis failure keeps the prior briefing visible and shows newly saved
     await page.getByRole('tab', { name: 'Today' }).click();
     await assert.doesNotReject(page.getByText(/Review unavailable:/).waitFor({ timeout: 3000 }));
     await assert.doesNotReject(page.getByRole('heading', { name: 'Prior briefing stays published' }).waitFor({ timeout: 3000 }));
+  });
+});
+
+test('review settings prefer API-token models independently of the signed-in chat provider', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    const providers = [
+      { id: 'openai-codex', label: 'Codex', authType: 'oauth', models: [{ id: 'chat-model', label: 'Chat model' }] },
+      { id: 'openai', label: 'OpenAI', authType: 'api_key', models: [{ id: 'review-model', label: 'Review model' }] }
+    ];
+    await page.route('**/api/chat/status*', route => route.fulfill({ json: { enabled: true, defaultProvider: 'openai-codex', defaultModel: 'chat-model', providers, models: providers[0].models } }));
+    await page.evaluate(() => loadChatStatus());
+    assert.equal(await page.locator('#chat-provider').inputValue(), 'openai-codex');
+    await page.locator('[data-review-settings]').first().click();
+    const provider = page.locator('#review-settings-provider');
+    assert.equal(await provider.inputValue(), 'openai');
+    assert.equal(await page.locator('[name=hybrid]').isChecked(), true);
+    assert.equal(await page.locator('[name=assessmentProvider]').inputValue(), 'openai-codex');
+    assert.equal(await page.locator('[name=assessmentModel]').inputValue(), 'chat-model');
+    assert.equal(await page.locator('#review-settings-model').inputValue(), 'review-model');
+    assert.match(await provider.locator('option[value="openai"]').textContent(), /API token/);
+    assert.match(await provider.locator('option[value="openai-codex"]').textContent(), /Account sign-in/);
+    await provider.selectOption('openai-codex');
+    assert.equal(await page.locator('#review-settings-model').inputValue(), 'chat-model');
+    await provider.selectOption('openai');
+    await page.locator('[name=belowRecommendedModel]').check();
+    let saved;
+    await page.route('**/api/workspace-review/settings', async route => {
+      saved = route.request().postDataJSON();
+      await route.fulfill({ json: { settings: saved } });
+    });
+    await page.locator('[data-review-save-settings]').click();
+    await page.waitForFunction(() => !document.querySelector('#workspace-review-dialog')?.open);
+    assert.equal(saved.provider, 'openai');
+    assert.equal(saved.model, 'review-model');
+    assert.deepEqual(saved.assessmentModel, { provider: 'openai-codex', model: 'chat-model', effort: null });
+    assert.equal(await page.locator('#chat-provider').inputValue(), 'openai-codex');
+    await page.route('**/api/workspace-review', async route => {
+      const response = await route.fetch(); const state = await response.json();
+      state.settings.provider = 'openai-codex'; state.settings.model = 'chat-model'; state.settings.assessmentModel = null;
+      await route.fulfill({ json: state });
+    });
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.locator('[data-review-settings]').first().click();
+    assert.equal(await page.locator('#review-settings-provider').inputValue(), 'openai-codex');
+    assert.equal(await page.locator('#review-settings-model').inputValue(), 'chat-model');
+    assert.equal(await page.locator('[name=hybrid]').isChecked(), false);
+    assert.equal(await page.locator('#review-settings-assessment').isVisible(), false);
   });
 });
