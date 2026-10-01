@@ -402,6 +402,7 @@ function renderFile(file, kicker) {
 }
 
 let workspaceReviewState = null;
+let workspaceProjectLabels = new Map();
 let workspaceReviewPoll = null;
 let workspaceReviewShowAll = false;
 let workspaceReviewNotice = null;
@@ -508,12 +509,41 @@ function renderWorkspaceOverview(state) {
   const briefingState = state.eligibleProjectCount === 0 ? 'empty' : review.briefingState;
   const briefingReady = briefingState === 'ready';
   const tabs = `<div class="workspace-tabs" role="tablist" aria-label="Workspace overview"><button role="tab" id="review-tab-today" aria-selected="${active === 'today'}" aria-controls="review-panel-today" data-review-tab="today">Today</button><button role="tab" id="review-tab-projects" aria-selected="${active === 'projects'}" aria-controls="review-panel-projects" data-review-tab="projects">All projects <span>${projects.length}</span></button>${state.settings?.activityTracking !== false ? `<button role="tab" id="review-tab-focus" aria-selected="${active === 'focus'}" aria-controls="review-panel-focus" data-review-tab="focus">Focus report</button>` : ''}</div>`;
-  const itemMarkup = visible.length ? visible.map(item => `<article class="workspace-attention"><div><span class="workspace-project">${reviewEscape(projects.find(project => project.projectId === item.projectId)?.outcome || item.projectId)}</span><span class="workspace-urgency ${item.urgency}">${reviewUrgency(item.urgency, item.kind)}</span>${reviewRunway(item)}</div><h3>${reviewEscape(item.title)}</h3><p>${reviewEscape(item.inference)}</p>${item.escalation?.mode === 'consequence' ? `<p class="workspace-escalation"><strong>Consequence to avoid:</strong> ${reviewEscape(item.action)} Start with the recovery step below.</p>` : item.escalation?.mode === 'pattern' ? '<p class="workspace-escalation">This has remained visible across reviews. You can choose a smaller scope or park the project without losing the record.</p>' : ''}<p class="workspace-first-step"><strong>Start here:</strong> ${reviewEscape(item.firstStep)}</p><div class="workspace-actions"><button data-review-discuss="${reviewEscape(item.id)}">Discuss next step</button><button data-review-session="${reviewEscape(item.id)}">I have 30 minutes</button><button class="quiet" data-review-revisit="${reviewEscape(item.id)}">Revisit…</button>${item.escalation?.mode === 'pattern' ? `<button class="quiet" data-review-park="${reviewEscape(item.projectId)}">Park this project</button>` : ''}</div><details><summary>Why this matters</summary><p><strong>Observed:</strong> ${reviewEscape(item.observation)}</p><p><strong>Proposed:</strong> ${reviewEscape(item.action)}</p>${reviewSource(item, sources)}<div class="workspace-actions"><button class="quiet" data-review-correct="${reviewEscape(item.id)}">Correct assessment</button><button class="quiet" data-review-dismiss="${reviewEscape(item.id)}">Dismiss</button><button class="quiet" data-review-resolved="${reviewEscape(item.id)}">Resolved elsewhere</button></div></details></article>`).join('') : '<p class="workspace-quiet">No immediate action surfaced from the saved evidence.</p>';
+  const itemMarkup = visible.length ? visible.map(item => {
+    const projectName = workspaceProjectLabels.get(item.projectId) || item.projectId;
+    const escalation = item.escalation?.mode === 'consequence'
+      ? `<p>Consequence to avoid: ${reviewEscape(item.action)}</p>`
+      : item.escalation?.mode === 'pattern'
+        ? '<p>This has remained visible across reviews. You can choose a smaller scope or park the project without losing the record.</p>' : '';
+    return `<article class="workspace-attention">
+      <div class="workspace-attention-meta">
+        <div class="workspace-attention-project">Project <a href="/workspace/${encodeURIComponent(item.projectId)}/">${reviewEscape(projectName)}</a></div>
+        <div class="workspace-attention-timing"><span class="workspace-urgency ${reviewEscape(item.urgency)}">${reviewUrgency(item.urgency, item.kind)}</span>${reviewRunway(item)}</div>
+      </div>
+      <h3>${reviewEscape(item.title)}</h3>
+      <p class="workspace-first-step"><span>Next step:</span> ${reviewEscape(item.firstStep)}</p>
+      <div class="workspace-actions workspace-attention-actions">
+        <button data-review-discuss="${reviewEscape(item.id)}">Discuss next step</button>
+        <button class="quiet" data-review-session="${reviewEscape(item.id)}">I have 30 minutes</button>
+        <button class="quiet" data-review-revisit="${reviewEscape(item.id)}">Revisit…</button>
+        ${item.escalation?.mode === 'pattern' ? `<button class="quiet" data-review-park="${reviewEscape(item.projectId)}">Park this project</button>` : ''}
+      </div>
+      <details>
+        <summary>Why this matters</summary>
+        <p>${reviewEscape(item.inference)}</p>
+        ${escalation}
+        <p>Observed: ${reviewEscape(item.observation)}</p>
+        <p>Proposed: ${reviewEscape(item.action)}</p>
+        ${reviewSource(item, sources)}
+        <div class="workspace-actions"><button class="quiet" data-review-correct="${reviewEscape(item.id)}">Correct assessment</button><button class="quiet" data-review-dismiss="${reviewEscape(item.id)}">Dismiss</button><button class="quiet" data-review-resolved="${reviewEscape(item.id)}">Resolved elsewhere</button></div>
+      </details>
+    </article>`;
+  }).join('') : '<p class="workspace-quiet">No immediate action surfaced from the saved evidence.</p>';
   const changes = review.assessment?.changes || []; const sinceLastReview = changes.length ? `<section class="workspace-since-last"><p class="doc-kicker">SINCE THE LAST REVIEW</p><ul>${changes.map(item => `<li>${reviewEscape(item.text)} ${reviewSource(item, sources)}</li>`).join('')}</ul></section>` : '';
   const deferred = review.deferred || []; const deferredSection = deferred.length ? `<section class="workspace-deferred"><p class="doc-kicker">DEFERRED</p><ul>${deferred.map(item => `<li><span>${reviewEscape(item.title)}</span><small>Revisit ${reviewEscape(new Date(item.feedback.until).toLocaleString())}</small><button class="quiet" data-review-undo-feedback="${reviewEscape(item.feedback.id)}">Undo</button></li>`).join('')}</ul></section>` : '';
   const closure = briefingReady && !attention.length && !deferred.length && !review.assessment?.question ? '<p class="workspace-closure">Nothing else here needs a decision right now.</p>' : '';
   const briefing = briefingReady ? `<div class="workspace-brief"><p class="doc-kicker">RECOMMENDED FOCUS</p><h2>${reviewEscape(review.assessment?.headline || 'Workspace review')}</h2><p>${reviewEscape(review.assessment?.summary || '')}</p>${focus ? `<button data-review-session-focus="${reviewEscape(focus.projectId)}">I have 30 minutes</button>` : ''}</div>` : '';
-  const attentionSection = briefingState !== 'empty' && (attention.length || briefingReady) ? `<section class="workspace-attention-list"><div class="workspace-section-heading"><div><h2>Needs attention</h2><p>Small, evidenced next steps across your projects.</p></div>${attention.length > 3 ? `<button class="quiet" data-review-show-all>${workspaceReviewShowAll ? 'Show fewer' : `Show all ${attention.length}`}</button>` : ''}</div>${itemMarkup}</section>` : '';
+  const attentionSection = briefingState !== 'empty' && (attention.length || briefingReady) ? `<section class="workspace-attention-list"><div class="workspace-section-heading"><div><h2>Needs attention</h2></div>${attention.length > 3 ? `<button class="quiet" data-review-show-all>${workspaceReviewShowAll ? 'Show fewer' : `Show all ${attention.length}`}</button>` : ''}</div>${itemMarkup}</section>` : '';
   const quietState = briefingState === 'empty' ? '<p class="workspace-quiet">No projects selected for review.</p><button data-review-settings>Choose projects</button>' : !briefingReady && !attention.length ? '<p class="workspace-quiet">No current recommendations for these projects yet.</p>' : '';
   const todayContent = briefingState === 'empty' ? quietState : `${briefing}${briefingReady ? sinceLastReview : ''}${attention.length ? attentionSection : quietState + attentionSection}${deferredSection}${briefingReady && review.assessment?.question ? `<section class="workspace-question"><p class="doc-kicker">ONE THING TO CLARIFY</p><h2>${reviewEscape(review.assessment.question.text)}</h2><p>${reviewEscape(review.assessment.question.reason)}</p>${review.assessment.question.options.map(option => `<button data-review-answer="${reviewEscape(option)}">${reviewEscape(option)}</button>`).join(' ')} <button class="quiet" data-review-guidance>Add context…</button></section>` : ''}${closure}`;
   const today = `<section id="review-panel-today" role="tabpanel" aria-labelledby="review-tab-today" ${active === 'today' ? '' : 'hidden'}>${todayContent}</section>`;
@@ -690,6 +720,7 @@ async function loadPage() {
   document.title = isWorkspaceOverview ? 'Workspace overview / workspace' : `${documentData.title || documentData.name} / workspace`;
   document.querySelector('#project-name').textContent = data.project.title;
   document.querySelector('#stats').textContent = isWorkspaceOverview ? `${data.projects.length - 1} projects` : `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
+  workspaceProjectLabels = new Map(data.projects.map(project => [project.name, project.label]));
   picker.innerHTML = data.projects.map(item => `<option value="${item.path}" ${item.path === data.project.path ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
   const navigation = data.catalog.length
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`

@@ -121,7 +121,14 @@ test('the overview renders every attention item, escalation, and the question in
     await assert.doesNotReject(today.locator('text=Beta deadline this week').waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('text=Alpha needs a follow-up test').waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('text=Should beta ship this week or next?').waitFor({ timeout: 3000 }));
-    await assert.doesNotReject(today.locator('text=Consequence to avoid').waitFor({ timeout: 3000 }));
+    const firstItem = today.locator('.workspace-attention').first();
+    assert.equal(await firstItem.locator('.workspace-attention-project a').textContent(), 'beta');
+    assert.equal(await firstItem.locator('.workspace-attention-project a').getAttribute('href'), '/workspace/beta/');
+    assert.equal(await firstItem.getByText('Missing it risks the release.').isVisible(), false);
+    assert.ok(await firstItem.locator('.workspace-first-step').isVisible());
+    await firstItem.getByText('Why this matters', { exact: true }).click();
+    assert.ok(await firstItem.getByText('Missing it risks the release.').isVisible());
+    await assert.doesNotReject(firstItem.locator('text=Consequence to avoid').waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('.doc-kicker', { hasText: 'SINCE THE LAST REVIEW' }).waitFor({ timeout: 3000 }));
     await assert.doesNotReject(today.locator('text=Alpha finished initial setup').first().waitFor({ timeout: 3000 }));
   });
