@@ -71,14 +71,18 @@ test('workspace review HTTP GET stays provider-free and both run bodies dispatch
       const invalid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, assessmentModel }) });
       assert.ok([400, 409].includes(invalid.status), invalid.body);
     }
-    const noApi = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, provider: account.id, model: accountModel }) });
-    assert.equal(noApi.status, 409); assert.match(JSON.parse(noApi.body).error, /API-token model/);
     const hybrid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify(hybridSettings) });
     assert.equal(hybrid.status, 200, hybrid.body);
-    const persisted = JSON.parse((await request(serverPort, '/api/workspace-review')).body).settings;
+    let persisted = JSON.parse((await request(serverPort, '/api/workspace-review')).body).settings;
     assert.equal(persisted.assessmentModel.provider, account.id);
     assert.equal(persisted.assessmentModel.model, accountModel);
-    const settings = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'compatible', model: 'fake-review-model', automatic: false, confirmations: { belowRecommendedModel: true }, expectedRevision: 1 }) }); assert.equal(settings.status, 200, settings.body);
+    const accountSynthesis = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, provider: account.id, model: accountModel, expectedRevision: 1 }) });
+    assert.equal(accountSynthesis.status, 200, accountSynthesis.body);
+    persisted = JSON.parse((await request(serverPort, '/api/workspace-review')).body).settings;
+    assert.equal(persisted.provider, account.id);
+    assert.equal(persisted.model, accountModel);
+    assert.equal(persisted.assessmentModel.provider, account.id);
+    const settings = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ provider: 'compatible', model: 'fake-review-model', automatic: false, confirmations: { belowRecommendedModel: true }, expectedRevision: 2 }) }); assert.equal(settings.status, 200, settings.body);
     const run = await request(serverPort, '/api/workspace-review/runs', { method: 'POST', headers: auth, body: '{}' }); assert.equal(run.status, 202);
     await waitFor(() => requests.length >= 2, 'ordinary run did not issue project and synthesis provider calls');
     assert.equal(requests[0].max_tokens, 4096); assert.equal(requests[1].max_tokens, 16384);

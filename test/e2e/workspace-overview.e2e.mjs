@@ -488,7 +488,6 @@ test('review settings prefer API-token models independently of the signed-in cha
     assert.match(await provider.locator('option[value="openai-codex"]').textContent(), /Account sign-in/);
     await provider.selectOption('openai-codex');
     assert.equal(await page.locator('#review-settings-model').inputValue(), 'chat-model');
-    await provider.selectOption('openai');
     await page.locator('[name=belowRecommendedModel]').check();
     let saved;
     await page.route('**/api/workspace-review/settings', async route => {
@@ -497,8 +496,8 @@ test('review settings prefer API-token models independently of the signed-in cha
     });
     await page.locator('[data-review-save-settings]').click();
     await page.waitForFunction(() => !document.querySelector('#workspace-review-dialog')?.open);
-    assert.equal(saved.provider, 'openai');
-    assert.equal(saved.model, 'review-model');
+    assert.equal(saved.provider, 'openai-codex');
+    assert.equal(saved.model, 'chat-model');
     assert.deepEqual(saved.assessmentModel, { provider: 'openai-codex', model: 'chat-model', effort: null });
     assert.equal(await page.locator('#chat-provider').inputValue(), 'openai-codex');
     await page.route('**/api/workspace-review', async route => {

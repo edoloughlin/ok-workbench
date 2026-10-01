@@ -1008,7 +1008,7 @@ async function validateWorkspaceReviewSettings(value, projects) {
   if (value.assessmentModel != null) {
     const selection = value.assessmentModel;
     if (!selection || typeof selection !== 'object' || Array.isArray(selection) || Object.keys(selection).some(key => !['provider', 'model', 'effort'].includes(key)) || typeof selection.provider !== 'string' || typeof selection.model !== 'string') throw Object.assign(new Error('Invalid assessment model'), { code: 'INVALID_REQUEST' });
-    if (!synthesis || catalog.find(item => item.id === synthesis.provider)?.authType !== 'api_key') throw Object.assign(new Error('Hybrid reviews require an API-token model for synthesis and assessment retries'), { code: 'MODEL_UNSUITABLE' });
+    if (!synthesis) throw Object.assign(new Error('Hybrid reviews require a synthesis model for workspace priorities and assessment retries'), { code: 'MODEL_UNSUITABLE' });
     assessmentModel = selectModel(selection, 'assessment');
   }
   return { provider: value.provider || null, model: value.model || null, effort: synthesis?.effort || null, assessmentModel, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit };
