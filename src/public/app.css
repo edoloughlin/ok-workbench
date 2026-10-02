@@ -492,7 +492,7 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-restore-badge:not(:empty) { display: inline-grid; place-items: center; min-width: 1.4em; min-height: 1.4em; margin-left: 3px; border-radius: 50%; color: white; background: var(--danger); font-size: 10px; }
 .layout.chat-collapsed .workspace { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(0,1fr); }
 .layout.chat-collapsed .chat-pane, .layout.chat-collapsed .chat-splitter { display: none; }
-.layout.chat-collapsed .workspace > .document { grid-column: 1; grid-row: 1; width: min(1200px, 100%); }
+.layout.chat-collapsed .workspace > .document { grid-column: 1; grid-row: 1; width: 100%; }
 
 @media (min-width: 901px) {
   .chat-restore { top: 50%; transform: translateY(-50%); }
