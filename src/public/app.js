@@ -92,7 +92,7 @@ function escapeHtml(value) {
 function inline(value, sourcePath, sectionHeadings = new Map()) {
   const protectedParts = [];
   const protect = markup => { protectedParts.push(markup); return `\u0000${protectedParts.length - 1}\u0000`; };
-  let result = escapeHtml(value).replace(/`([^`]+)`/g, (_, code) => protect(`<code>${code}</code>`));
+  let result = escapeHtml(value).replace(/&lt;br\s*\/?\s*&gt;/gi, '<br>').replace(/`([^`]+)`/g, (_, code) => protect(`<code>${code}</code>`));
   result = result.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<img alt="${label}" src="${linkHref(href, sourcePath, true)}">`));
   result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<a href="${linkHref(href, sourcePath)}"${externalLinkAttributes(href)}>${label}</a>`));
   result = result.replace(/§\s*(\d+(?:\.\d+)*)\b/g, (reference, number) => {
