@@ -890,7 +890,7 @@ const chatUi = {
   notificationsButton: document.querySelector('#turn-notifications-button'), notificationsMenu: document.querySelector('#turn-notifications-menu'), notificationsList: document.querySelector('#turn-notifications-list'), notificationsCount: document.querySelector('#turn-notifications-count'),
   splitter: document.querySelector('#chat-splitter'), project: document.querySelector('#chat-project'),
   provider: document.querySelector('#chat-provider'), model: document.querySelector('#chat-model'), effort: document.querySelector('#chat-effort'),
-  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'), tools: document.querySelector('#chat-tools'), toolSecretAdd: document.querySelector('#chat-tool-secret-add'), runtimeSave: document.querySelector('#runtime-settings-save'), runtimeDirectProvider: document.querySelector('#runtime-direct-provider'), runtimeTurnDiagnostics: document.querySelector('#runtime-turn-diagnostics'), runtimePython: document.querySelector('#runtime-python'), runtimeTimeZone: document.querySelector('#runtime-time-zone'), runtimePythonPackages: document.querySelector('#runtime-python-packages'),
+  codexLogin: document.querySelector('#chat-codex-login'), copilotLogin: document.querySelector('#chat-copilot-login'), settings: document.querySelector('#chat-settings'), settingsDialog: document.querySelector('#chat-settings-dialog'), settingsForm: document.querySelector('#chat-settings-form'), settingsClose: document.querySelector('#chat-settings-close'), settingsError: document.querySelector('#chat-settings-error'), piUpdate: document.querySelector('#chat-pi-update'), apiKeys: document.querySelector('#chat-api-keys'), apiKeyAdd: document.querySelector('#chat-api-key-add'), tools: document.querySelector('#chat-tools'), toolSecretAdd: document.querySelector('#chat-tool-secret-add'), runtimeSave: document.querySelector('#runtime-settings-save'), runtimeDirectProvider: document.querySelector('#runtime-direct-provider'), runtimeTurnDiagnostics: document.querySelector('#runtime-turn-diagnostics'), runtimePython: document.querySelector('#runtime-python'), runtimeTimeZone: document.querySelector('#runtime-time-zone'), runtimePythonPackages: document.querySelector('#runtime-python-packages'),
   titleModel: document.querySelector('#chat-title-model'), titleEffort: document.querySelector('#chat-title-effort'),
   thread: document.querySelector('#chat-thread'), newThread: document.querySelector('#chat-new-thread'),
   messages: document.querySelector('#chat-messages'), composer: document.querySelector('#chat-composer'),
@@ -1127,7 +1127,21 @@ const apiKeyProviderOptions = [
   { id: 'openrouter', label: 'OpenRouter' },
 ];
 function closeChatSettings() { if (chatUi.settingsDialog.open) chatUi.settingsDialog.close(); chatUi.settings.setAttribute('aria-expanded', 'false'); }
-function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); void loadWorkspaceTools(); void loadRuntimeSettings(); }
+async function loadPiVersion() {
+  chatUi.piUpdate.hidden = true;
+  try {
+    const response = await chatApi('/api/chat/pi-version');
+    if (!response.ok) return;
+    const { installed, latest, updateAvailable } = await response.json();
+    if (!chatUi.settingsDialog.open || !updateAvailable) return;
+    const heading = document.createElement('strong'); heading.textContent = 'Pi runtime update available';
+    const detail = document.createElement('span'); detail.textContent = ` Installed: ${installed} · Latest: ${latest}.`;
+    const note = document.createElement('small'); note.textContent = 'Update OK Workbench to get the newer Pi runtime and model catalog. This check does not update packages automatically.';
+    chatUi.piUpdate.replaceChildren(heading, detail, note);
+    chatUi.piUpdate.hidden = false;
+  } catch { /* version checks must not interrupt settings */ }
+}
+function openChatSettings() { chatUi.settingsError.hidden = true; if (!chatUi.settingsDialog.open) chatUi.settingsDialog.showModal(); chatUi.settings.setAttribute('aria-expanded', 'true'); renderApiKeyRows(); void loadWorkspaceTools(); void loadRuntimeSettings(); void loadPiVersion(); }
 function toggleChatSettings() { if (chatUi.settingsDialog.open) closeChatSettings(); else openChatSettings(); }
 function apiKeyRow(record = null, selectedProvider = '') {
   const row = document.createElement('div'); row.className = 'chat-api-key-row';

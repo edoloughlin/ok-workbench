@@ -205,6 +205,23 @@ test('turn capabilities are project-scoped and accept only server-issued grants'
   await assert.rejects(createTurnCapabilities({ workspaceRoot: workspace, projectRoot: project, workspaceMode: true }), /requires the workspace root/);
 });
 
+test('Workbench discovers current Codex models from its own OAuth credential store', async () => {
+  const { configuredPiProviders } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
+  const { mkdir } = await import('node:fs/promises');
+  const stateDir = await mkdtemp(path.join(tmpdir(), 'ok-workbench-codex-catalog-'));
+  try {
+    await mkdir(path.join(stateDir, 'pi-agent'));
+    await writeFile(path.join(stateDir, 'pi-agent', 'auth.json'), JSON.stringify({
+      'openai-codex': { type: 'oauth', access: 'test-only-access', refresh: 'test-only-refresh', expires: Date.now() + 3600000 },
+    }));
+    const providers = await configuredPiProviders({ stateDir, env: {} });
+    const codex = providers.find(provider => provider.id === 'openai-codex');
+    assert.equal(codex?.authType, 'oauth');
+    assert.ok(codex.models.some(model => model.id === 'gpt-6.1-sol'));
+    assert.ok(!JSON.stringify(providers).includes('test-only-access'));
+  } finally { await rm(stateDir, { recursive: true, force: true }); }
+});
+
 test('provider discovery identifies API-token authentication without exposing credentials', async () => {
   const { configuredPiProviders } = await import(path.join(root, 'dist', 'pi-harness.mjs'));
   const stateDir = await mkdtemp(path.join(tmpdir(), 'ok-workbench-provider-auth-'));

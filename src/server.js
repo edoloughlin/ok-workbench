@@ -12,6 +12,7 @@ const toolApprovals = require('./tool-approvals.js');
 const externalLinks = require('./external-links.js');
 const { withCurrentDateTime, currentTimeZone } = require('./time-context.js');
 const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired } = require('./workspace-review.js');
+const { createPiVersionChecker } = require('./pi-version-check.js');
 
 function configuredPort(name, fallback) {
   const value = Number(process.env[name] || fallback);
@@ -68,6 +69,7 @@ function chatStateDir() {
   return resolved === agentsRoot || resolved.startsWith(`${agentsRoot}${path.sep}`) ? fallback : resolved;
 }
 const CHAT_STATE_DIR = chatStateDir();
+const piVersionChecker = createPiVersionChecker({ stateDir: CHAT_STATE_DIR, packageFile: path.join(__dirname, '..', 'node_modules', '@earendil-works', 'pi-ai', 'package.json') });
 const CHAT_CSRF = crypto.randomBytes(32).toString('base64url');
 const DIFF_TOKENS = new Map();
 const GIT_RECOVERY = new Map();
@@ -1310,6 +1312,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/chat/runtime-settings' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { settings: await loadRuntimeSettings() }); }
     if (url.pathname === '/api/chat/runtime-settings' && req.method === 'PUT') { assertChatRequest(req); return json(res, 200, { settings: await saveRuntimeSettings(await readJson(req)) }); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
+    if (url.pathname === '/api/chat/pi-version' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await piVersionChecker.check()); }
     if (url.pathname === '/api/chat/tool-secrets' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { secrets: Object.keys(await toolApprovals.loadToolSecrets(CHAT_STATE_DIR)).sort() }); }
     const toolSecretMatch = url.pathname.match(/^\/api\/chat\/tool-secrets\/([a-z][a-z0-9-]{0,63})$/);
     if (toolSecretMatch && req.method === 'PUT') { assertChatRequest(req); const body = await readJson(req); await toolApprovals.setToolSecret(CHAT_STATE_DIR, toolSecretMatch[1], body.value); return json(res, 204, {}); }
@@ -1490,6 +1493,10 @@ void resolveWorkspaceRoot().then(async root => {
   workspaceReview = new WorkspaceReviewCoordinator({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT, provider: workspaceReviewProvider, timeZone: currentTimeZone(), isChatActive: () => ACTIVE_TURNS.size > 0, isIgnored });
   workspaceReview.start();
   await refreshDirtyMonitor();
+  // Poll the local cache hourly; the checker contacts npm at most once per 24h.
+  void piVersionChecker.check().catch(() => {});
+  const piVersionPoll = setInterval(() => { void piVersionChecker.check().catch(() => {}); }, 60 * 60 * 1000);
+  piVersionPoll.unref();
   const dirtyReconciliation = setInterval(() => { void refreshDirtyMonitor(); }, 30_000);
   dirtyReconciliation.unref();
   await listen(server, '127.0.0.1', PORT);

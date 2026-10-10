@@ -393,6 +393,9 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-settings-header button:hover, .chat-settings-header button:focus-visible { color: var(--accent); background: var(--accent-soft); outline: 0; }
 .chat-settings-intro { max-width: 54ch; margin: -12px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .chat-settings-section { padding-top: 18px; border-top: 1px solid var(--rule); }
+.chat-pi-update:not([hidden]) { padding: 11px 13px; border-left: 3px solid var(--accent); border-radius: 5px; color: var(--ink); background: var(--accent-soft); font-size: 13px; line-height: 1.5; }
+.chat-pi-update strong { font-weight: 650; }
+.chat-pi-update small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
 .chat-settings-section h3 { margin: 0; font-size: 14px; letter-spacing: -0.01em; }
 .chat-settings-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .chat-settings-section-heading p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }

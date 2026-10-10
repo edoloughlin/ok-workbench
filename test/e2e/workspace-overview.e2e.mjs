@@ -468,6 +468,20 @@ test('a synthesis failure keeps the prior briefing visible and shows newly saved
   });
 });
 
+test('agent connections warns when the bundled Pi runtime is outdated', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    await page.route('**/api/chat/pi-version', route => route.fulfill({ json: { installed: '1.1.0', latest: '1.2.0', updateAvailable: true } }));
+    await page.evaluate(() => openChatSettings());
+    const notice = page.locator('#chat-pi-update');
+    await notice.getByText('Pi runtime update available').waitFor();
+    assert.match(await notice.textContent(), /Installed: 1\.1\.0 · Latest: 1\.2\.0/);
+    await page.locator('#chat-settings-close').click();
+    await page.route('**/api/chat/pi-version', route => route.fulfill({ json: { installed: '1.2.0', latest: '1.2.0', updateAvailable: false } }));
+    await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/chat/pi-version')), page.evaluate(() => openChatSettings())]);
+    assert.equal(await notice.isHidden(), true);
+  });
+});
+
 test('review settings prefer API-token models independently of the signed-in chat provider', { skip: !chromium }, async () => {
   await withOverview(async page => {
     const providers = [
