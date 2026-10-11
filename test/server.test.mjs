@@ -11,7 +11,7 @@ test('document table headers stay visible while their table is in view', async (
   const script = await readFile(path.join(root, 'src', 'public', 'app.js'), 'utf8');
   assert.match(css, /\.document \{[^}]*--doc-pad: clamp\(40px, 7vw, 72px\);[^}]*padding: 0 var\(--doc-pad\) 100px;/);
   assert.match(css, /\.document::before \{[^}]*height: 52px;/);
-  assert.match(css, /\.document th \{ position: sticky;[^}]*top: var\(--topbar-h\);[^}]*background: var\(--panel\);/);
+  assert.match(css, /\.document th \{ position: sticky;[^}]*top: var\(--table-toolbar-h, var\(--topbar-h\)\);[^}]*background: var\(--panel\);/);
   assert.match(css, /\.document \.csv-table \{/);
   assert.match(css, /\.document \.csv-table :is\(th, td\):nth-child\(8n \+ 1\)/);
   assert.doesNotMatch(css, /\.document \.data-table/);
@@ -35,7 +35,8 @@ test('Mermaid fences render with the locally bundled browser distribution', asyn
   assert.match(script, /marker\}\{\$\{minimumLength\},\}/);
   assert.match(script, /import\('\/vendor\/mermaid\/mermaid\.esm\.min\.mjs'\)/);
   assert.match(script, /securityLevel: 'strict'/);
-  assert.match(script, /const sources = new Map/);
+  assert.match(script, /for \(const diagram of diagrams\)/);
+  assert.match(script, /await mermaid\.run\(\{ nodes: \[diagram\] \}\)/);
   assert.match(build, /mermaid\.esm\.min\.mjs/);
   assert.match(build, /copyPackageLicense\(mermaidSource, path\.join\(mermaidDestination, 'LICENSE'\)\)/);
   assert.match(build, /mermaidNotices\(mermaidSource\)/);

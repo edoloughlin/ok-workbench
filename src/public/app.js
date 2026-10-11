@@ -64,16 +64,25 @@ function loadMermaid() {
 async function renderMermaidDiagrams(container) {
   const diagrams = Array.from(container.querySelectorAll('.mermaid-diagram:not([data-mermaid-rendered])'));
   if (!diagrams.length) return;
-  const sources = new Map(diagrams.map(diagram => [diagram, diagram.textContent]));
-  diagrams.forEach(diagram => { diagram.dataset.mermaidRendered = 'pending'; });
+  let mermaid;
   try {
-    const mermaid = await loadMermaid();
-    await mermaid.run({ nodes: diagrams });
+    mermaid = await loadMermaid();
   } catch (error) {
-    console.warn('Could not render Mermaid diagram.', error);
-    for (const diagram of diagrams) {
-      diagram.replaceChildren(document.createTextNode(sources.get(diagram)));
+    console.warn('Could not load Mermaid.', error);
+  }
+
+  for (const diagram of diagrams) {
+    const source = diagram.textContent;
+    diagram.dataset.mermaidRendered = 'pending';
+    try {
+      if (!mermaid) throw new Error('Mermaid failed to load');
+      await mermaid.run({ nodes: [diagram] });
+      diagram.dataset.mermaidRendered = 'true';
+    } catch (error) {
+      console.warn('Could not render Mermaid diagram.', error);
+      diagram.replaceChildren(document.createTextNode(source));
       diagram.classList.add('mermaid-diagram-error');
+      diagram.dataset.mermaidRendered = 'error';
       const message = document.createElement('p'); message.className = 'mermaid-diagram-message'; message.setAttribute('role', 'alert'); message.textContent = 'Diagram could not be rendered; showing Mermaid source.';
       diagram.before(message);
     }
@@ -765,7 +774,7 @@ async function loadPage() {
   else {
     const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
     const kicker = `${contextLabel} / ${documentData.name}`;
-    documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path)}` : renderFile(documentData, kicker);
+    documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path, documentData.definitions)}` : renderFile(documentData, kicker);
     void renderMermaidDiagrams(documentPane);
     void renderProjectReviewContext(data.project.name, route === `/workspace/${encodeURIComponent(data.project.name)}`);
   }
