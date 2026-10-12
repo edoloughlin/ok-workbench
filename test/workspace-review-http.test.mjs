@@ -25,6 +25,10 @@ test('workspace review routes preserve root documents and isolate review scope',
     assert.deepEqual(JSON.parse(version.body), { installed: '1.1.0', latest: '99.0.0', updateAvailable: true, checkedAt: JSON.parse(version.body).checkedAt });
     const overview = await request(serverPort, '/workspace/'); assert.equal(overview.status, 200); assert.match(overview.body, /ok-workbench-csrf/); assert.equal(overview.headers['cache-control'], 'no-store'); const csrf = overview.body.match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
     const rootDocument = await request(serverPort, '/api/document?path=%2Fworkspace%2Findex.md'); assert.equal(rootDocument.status, 200); assert.equal(JSON.parse(rootDocument.body).text, '# Root document\n');
+    await writeFile(path.join(workspace, 'alpha', 'definitions.md'), '# Requirements\n| ID | Meaning |\n|----|---------|\n| REQ-1 | A requirement. |\n## Glossary\n- **Term**: A glossary definition.\n');
+    const definitions = await request(serverPort, '/api/document?path=%2Fworkspace%2Falpha%2Fdefinitions.md');
+    assert.equal(definitions.status, 200);
+    assert.deepEqual(JSON.parse(definitions.body).definitions.entries, [{ key: 'REQ-1', definition: 'A requirement.' }, { key: 'Term', definition: 'A glossary definition.' }]);
     const review = await request(serverPort, '/api/workspace-review'); assert.equal(review.status, 200); assert.equal(JSON.parse(review.body).review, null);
     const runOptions = { method: 'POST', headers: { 'x-ok-workbench-csrf': csrf } };
     const run = await request(serverPort, '/api/workspace-review/runs', { ...runOptions, body: '{}' }); assert.equal(run.status, 409); assert.equal(JSON.parse(run.body).code, 'NOT_CONFIGURED');

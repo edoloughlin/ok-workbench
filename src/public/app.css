@@ -182,12 +182,31 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .document p, .document li { max-width: 72ch; }
 .document a { color: var(--link); text-decoration: none; }
 .document a:hover { text-decoration: underline; text-underline-offset: 3px; }
-.document .section-reference { border-bottom: 1px dotted currentColor; font-variant-numeric: tabular-nums; text-decoration: none; cursor: pointer; }
-.document .section-reference:hover, .document .section-reference:focus-visible { border-bottom-style: solid; color: var(--accent); outline: 0; }
-.document .section-reference-missing { color: color-mix(in srgb, var(--danger) 68%, var(--muted)); cursor: help; }
-.document .section-reference-missing:hover, .document .section-reference-missing:focus-visible { color: var(--danger); }
-.section-preview { position: fixed; z-index: 50; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 9px; max-width: min(380px, calc(100vw - 20px)); padding: 9px 11px; border: 1px solid var(--rule-strong); border-radius: 7px; color: var(--ink); background: color-mix(in srgb, var(--paper) 96%, transparent); box-shadow: var(--shadow-pop); backdrop-filter: blur(14px); pointer-events: auto; }
+.document .section-reference { color: var(--ink); border-bottom: 1px dotted var(--green); font-variant-numeric: tabular-nums; text-decoration: none; cursor: pointer; }
+.document .section-reference:hover, .document .section-reference:focus-visible { color: var(--ink); border-bottom-style: solid; text-decoration: none; outline: 0; }
+.document .section-reference-missing { cursor: help; }
+.section-preview { position: fixed; z-index: 50; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; max-width: min(380px, calc(100vw - 20px)); padding: 9px 11px; border: 1px solid var(--rule-strong); border-radius: 7px; color: var(--ink); background: color-mix(in srgb, var(--paper) 96%, transparent); box-shadow: var(--shadow-pop); backdrop-filter: blur(14px); pointer-events: auto; }
 .section-preview[hidden] { display: none; }
+.document .definition-reference { color: var(--ink); border-bottom: 1px dashed var(--green); cursor: help; text-decoration: none; }
+.document .definition-reference:hover, .document .definition-reference:focus-visible { color: var(--ink); border-bottom-style: solid; }
+.document .definition-reference:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.definition-preview { position: fixed; z-index: 51; width: max-content; max-width: min(360px, calc(100vw - 20px)); padding: 12px 14px; border: 1px solid var(--rule-strong); border-radius: 9px; color: var(--ink); background: var(--paper); box-shadow: 0 12px 30px rgba(0,0,0,.16), 0 2px 7px rgba(0,0,0,.08); pointer-events: auto; }
+.definition-preview[hidden] { display: none; }
+.definition-preview-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 5px; }
+.definition-preview-key { font: 700 12px/1.4 var(--font-mono); }
+.preview-source-link { display: grid; place-items: center; flex: none; width: 24px; height: 24px; margin: -4px -6px -4px 0; border-radius: 5px; color: var(--muted); }
+.preview-source-link[hidden] { display: none; }
+.preview-source-link svg { width: 16px; height: 16px; }
+.preview-source-link:hover, .preview-source-link:focus-visible { color: var(--accent); background: var(--accent-soft); outline: 2px solid var(--accent-soft); }
+.document [id^="definition-source-"] { scroll-margin-top: calc(var(--topbar-h) + 14px); }
+.document [id^="definition-source-"]:target { background: var(--accent-soft); }
+.definition-preview-text { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.definition-preview-project { border-color: var(--purple); }
+.definition-preview-project .definition-preview-key { color: var(--purple); }
+.definition-preview-origin { display: flex; align-items: center; gap: 7px; margin-top: 9px; padding-top: 6px; border-top: 1px solid var(--rule); font: 11px/1.4 var(--font-ui); }
+.definition-preview-origin[hidden], .definition-preview-multiple[hidden] { display: none; }
+.definition-preview-file { color: var(--purple); overflow-wrap: anywhere; }
+.definition-preview-multiple { color: var(--purple); cursor: help; font-size: 14px; }
 .section-preview-number { color: var(--ink); font: 700 11px/1.45 var(--font-mono); white-space: nowrap; }
 .section-preview-title { font-size: 12px; font-weight: 600; line-height: 1.35; }
 .document code { padding: 2px 5px; color: var(--ink); background: var(--code-bg); border-radius: 4px; font: 13px var(--font-mono); }

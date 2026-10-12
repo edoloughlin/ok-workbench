@@ -13,6 +13,8 @@ const externalLinks = require('./external-links.js');
 const { withCurrentDateTime, currentTimeZone } = require('./time-context.js');
 const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired } = require('./workspace-review.js');
 const { createPiVersionChecker } = require('./pi-version-check.js');
+const { documentDefinitions } = require('./document-definitions.js');
+const { findProjectDefinition } = require('./project-definitions.js');
 
 function configuredPort(name, fallback) {
   const value = Number(process.env[name] || fallback);
@@ -473,10 +475,21 @@ async function documentData(requested) {
     const text = buffer.toString('utf8');
     const truncated = stat.size > limit;
     return classification.kind === 'markdown'
-      ? { ...base, title: titleFromMarkdown(text, path.basename(target)), text, truncated }
+      ? { ...base, title: titleFromMarkdown(text, path.basename(target)), text, definitions: documentDefinitions(text), truncated }
       : { ...base, title: path.basename(target), text, truncated };
   }
   return { ...base, title: path.basename(target) };
+}
+
+async function projectDefinitionData(routePath, key) {
+  if (typeof routePath !== 'string' || !routePath.startsWith('/workspace/')) throw new Error('Invalid document path');
+  const lexical = safePath(routePath);
+  const parts = lexical && path.relative(BUNDLE_ROOT, lexical).split(path.sep);
+  if (!parts || parts.length < 2 || path.extname(lexical).toLowerCase() !== '.md') throw new Error('Invalid document path');
+  const root = path.join(BUNDLE_ROOT, parts[0]);
+  const [rootStat, fileStat, resolved] = await Promise.all([fs.lstat(root).catch(() => null), fs.lstat(lexical).catch(() => null), bundlePath(lexical)]);
+  if (!rootStat?.isDirectory() || !fileStat?.isFile() || resolved !== lexical || !(await fs.realpath(root).then(real => real === root).catch(() => false))) throw new Error('Invalid document path');
+  return findProjectDefinition(root, lexical, key);
 }
 
 async function asset(req, res, pathname) {
@@ -1285,6 +1298,7 @@ async function handleRequest(req, res) {
     }
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
+    if (url.pathname === '/api/project-definition' && req.method === 'GET') return json(res, 200, await projectDefinitionData(url.searchParams.get('path'), url.searchParams.get('key')));
     if (url.pathname === '/api/workspace-review' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await workspaceReview.state()); }
     if (url.pathname === '/api/workspace-review/runs' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'force') || (body.force !== undefined && typeof body.force !== 'boolean')) throw Object.assign(new Error('Invalid workspace review request'), { code: 'INVALID_REQUEST' }); const result = await workspaceReview.run('manual', { force: body.force === true }); return json(res, result.reused ? 200 : 202, result); }
     if (url.pathname === '/api/workspace-review/pause' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body.paused !== 'boolean') throw Object.assign(new Error('A paused boolean is required'), { code: 'INVALID_REQUEST' }); return json(res, 200, await workspaceReview.setPaused(body.paused)); }

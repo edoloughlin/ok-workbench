@@ -20,13 +20,86 @@ let displayedDocument = null;
 let pageLoadSequence = 0;
 let pendingEntryRename = null;
 let mermaidModulePromise = null;
+const sourceIcon = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h9v9M16 4l-9 9"/><path d="M13 11v5H4V7h5"/></svg>';
 const sectionPreview = document.createElement('aside');
-sectionPreview.className = 'section-preview'; sectionPreview.setAttribute('role', 'tooltip'); sectionPreview.hidden = true;
-sectionPreview.innerHTML = '<span class="section-preview-number"></span><span class="section-preview-title"></span>';
+sectionPreview.className = 'section-preview'; sectionPreview.setAttribute('role', 'group'); sectionPreview.hidden = true;
+sectionPreview.innerHTML = `<span class="section-preview-number"></span><span class="section-preview-title"></span><a class="preview-source-link" aria-label="Go to section" title="Go to section">${sourceIcon}</a>`;
 document.body.append(sectionPreview);
 let sectionPreviewTimer = null;
+let currentDefinitions = new Map();
+let currentDefinitionSources = new Map();
+const definitionPreview = document.createElement('aside');
+definitionPreview.className = 'definition-preview'; definitionPreview.id = 'definition-preview'; definitionPreview.setAttribute('role', 'group'); definitionPreview.hidden = true;
+definitionPreview.innerHTML = `<div class="definition-preview-header"><strong class="definition-preview-key"></strong><a class="preview-source-link" aria-label="Go to definition source" title="Go to definition source">${sourceIcon}</a></div><p id="definition-preview-text" class="definition-preview-text"></p><div class="definition-preview-origin" hidden><a class="definition-preview-file"></a><span class="definition-preview-multiple" title="Multiple definitions found in this project" aria-label="Multiple definitions found in this project" hidden>ⓘ</span></div>`;
+document.body.append(definitionPreview);
+let definitionPreviewTimer = null;
+let definitionPreviewSequence = 0;
+let projectDefinitionCache = new Map();
+function dismissDefinitionPreview() { clearTimeout(definitionPreviewTimer); definitionPreviewTimer = setTimeout(() => { definitionPreview.hidden = true; definitionPreviewSequence++; }, 300); }
+function showDefinitionPreview(reference, x, y) {
+  clearTimeout(definitionPreviewTimer);
+  const sequence = ++definitionPreviewSequence;
+  const key = reference.dataset.definitionKey;
+  const local = currentDefinitions.get(key.toLowerCase());
+  const origin = definitionPreview.querySelector('.definition-preview-origin');
+  const link = definitionPreview.querySelector('.preview-source-link');
+  definitionPreview.classList.remove('definition-preview-project');
+  origin.hidden = true;
+  definitionPreview.querySelector('.definition-preview-key').textContent = key;
+  definitionPreview.querySelector('.definition-preview-text').textContent = local || 'Searching this project…';
+  const sourceLine = currentDefinitionSources.get(key.toLowerCase());
+  if (sourceLine) link.setAttribute('href', `#definition-source-${sourceLine}`);
+  else link.removeAttribute('href');
+  link.hidden = !sourceLine;
+  function position() {
+    const rect = definitionPreview.getBoundingClientRect();
+    definitionPreview.style.left = `${Math.max(10, Math.min(x + 14, innerWidth - rect.width - 10))}px`;
+    definitionPreview.style.top = `${Math.max(10, Math.min(y + 14, innerHeight - rect.height - 10))}px`;
+  }
+  definitionPreview.hidden = false;
+  position();
+  if (local || !displayedDocument?.path?.match(/^\/workspace\/[^/]+\/.+\.md$/i)) {
+    if (!local) definitionPreview.querySelector('.definition-preview-text').textContent = 'No definition in this document.';
+    return;
+  }
+  const path = displayedDocument.path;
+  const cacheKey = `${path}\0${key.toLowerCase()}`;
+  if (!projectDefinitionCache.has(cacheKey)) projectDefinitionCache.set(cacheKey, fetch(`/api/project-definition?path=${encodeURIComponent(path)}&key=${encodeURIComponent(key)}`).then(response => {
+    if (!response.ok) throw new Error('Search failed');
+    return response.json();
+  }).catch(() => null));
+  projectDefinitionCache.get(cacheKey).then(result => {
+    if (sequence !== definitionPreviewSequence || definitionPreview.hidden || displayedDocument.path !== path) return;
+    definitionPreview.querySelector('.definition-preview-text').textContent = result?.definition || 'No definition found in this project.';
+    if (result) {
+      definitionPreview.classList.add('definition-preview-project');
+      origin.hidden = false;
+      const source = origin.querySelector('.definition-preview-file');
+      source.textContent = result.file;
+      source.href = `/workspace/${encodeURIComponent(displayedDocument.project)}/${result.file.split('/').map(encodeURIComponent).join('/')}`;
+      origin.querySelector('.definition-preview-multiple').hidden = !result.multiple;
+    }
+    position();
+  });
+}
+documentPane.addEventListener('pointerover', event => {
+  const reference = event.target.closest('.definition-reference'); if (!reference || !documentPane.contains(reference)) return;
+  showDefinitionPreview(reference, event.clientX, event.clientY);
+});
+documentPane.addEventListener('pointerout', event => {
+  const reference = event.target.closest('.definition-reference'); if (reference && !reference.contains(event.relatedTarget) && !definitionPreview.contains(event.relatedTarget)) dismissDefinitionPreview();
+});
+documentPane.addEventListener('focusin', event => {
+  const reference = event.target.closest('.definition-reference'); if (!reference) return;
+  const rect = reference.getBoundingClientRect(); showDefinitionPreview(reference, rect.left, rect.bottom);
+});
+documentPane.addEventListener('focusout', event => { if (event.target.closest('.definition-reference') && !definitionPreview.contains(event.relatedTarget)) dismissDefinitionPreview(); });
+documentPane.addEventListener('keydown', event => { if (event.key === 'Escape' && event.target.closest('.definition-reference')) { clearTimeout(definitionPreviewTimer); definitionPreview.hidden = true; } });
+definitionPreview.addEventListener('pointerenter', () => clearTimeout(definitionPreviewTimer));
+definitionPreview.addEventListener('pointerleave', dismissDefinitionPreview);
+definitionPreview.addEventListener('focusout', event => { if (!definitionPreview.contains(event.relatedTarget) && !documentPane.contains(event.relatedTarget)) dismissDefinitionPreview(); });
 
-function dismissSectionPreview() { clearTimeout(sectionPreviewTimer); sectionPreviewTimer = setTimeout(() => { sectionPreview.hidden = true; }, 90); }
+function dismissSectionPreview() { clearTimeout(sectionPreviewTimer); sectionPreviewTimer = setTimeout(() => { sectionPreview.hidden = true; }, 300); }
 function positionSectionPreview(x, y) {
   const gap = 14; const padding = 10; const rect = sectionPreview.getBoundingClientRect();
   sectionPreview.style.left = `${Math.max(padding, Math.min(x + gap, innerWidth - rect.width - padding))}px`;
@@ -36,6 +109,10 @@ function showSectionPreview(reference, x, y) {
   clearTimeout(sectionPreviewTimer);
   sectionPreview.querySelector('.section-preview-number').textContent = reference.dataset.sectionNumber;
   sectionPreview.querySelector('.section-preview-title').textContent = reference.dataset.sectionMissing === 'true' ? 'Heading not found in this document; it may refer to another document.' : reference.dataset.sectionTitle;
+  const link = sectionPreview.querySelector('.preview-source-link');
+  if (reference.dataset.sectionMissing === 'true') link.removeAttribute('href');
+  else link.setAttribute('href', reference.getAttribute('href'));
+  link.hidden = reference.dataset.sectionMissing === 'true';
   sectionPreview.hidden = false; positionSectionPreview(x, y);
 }
 documentPane.addEventListener('pointerover', event => {
@@ -52,6 +129,7 @@ documentPane.addEventListener('focusin', event => {
 documentPane.addEventListener('focusout', event => { if (event.target.closest('.section-reference') && !sectionPreview.contains(event.relatedTarget)) dismissSectionPreview(); });
 sectionPreview.addEventListener('pointerenter', () => clearTimeout(sectionPreviewTimer));
 sectionPreview.addEventListener('pointerleave', dismissSectionPreview);
+sectionPreview.addEventListener('focusout', event => { if (!sectionPreview.contains(event.relatedTarget) && !documentPane.contains(event.relatedTarget)) dismissSectionPreview(); });
 
 function loadMermaid() {
   mermaidModulePromise ||= import('/vendor/mermaid/mermaid.esm.min.mjs').then(({ default: mermaid }) => {
@@ -98,12 +176,36 @@ function escapeHtml(value) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
-function inline(value, sourcePath, sectionHeadings = new Map()) {
+function prepareDefinitions(definitions) {
+  const entries = definitions?.entries || [];
+  const terms = entries.filter(item => !/^[A-Z]+-[0-9]+$/.test(item.key)).map(item => item.key).sort((a, b) => b.length - a.length);
+  const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return { entries, sources: new Map((definitions?.sources || []).map(item => [item.line, item.key])),
+    lookup: new Map(entries.map(item => [item.key.toLowerCase(), item])),
+    pattern: new RegExp(`(?<![A-Za-z0-9-])(?:[A-Z]+-[0-9]+${terms.length ? `|${terms.map(escapeRegex).join('|')}` : ''})(?![A-Za-z0-9-])`, 'gi') };
+}
+function inline(value, sourcePath, sectionHeadings = new Map(), definitions = null, sourceKey = '') {
   const protectedParts = [];
   const protect = markup => { protectedParts.push(markup); return `\u0000${protectedParts.length - 1}\u0000`; };
   let result = escapeHtml(value).replace(/&lt;br\s*\/?\s*&gt;/gi, '<br>').replace(/`([^`]+)`/g, (_, code) => protect(`<code>${code}</code>`));
   result = result.replace(/!\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<img alt="${label}" src="${linkHref(href, sourcePath, true)}">`));
   result = result.replace(/\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g, (_, label, href) => protect(`<a href="${linkHref(href, sourcePath)}"${externalLinkAttributes(href)}>${label}</a>`));
+  if (definitions) {
+    let sourceSkipped = false;
+    result = result.split(/(<[^>]+>|\u0000\d+\u0000)/g).map(part => {
+      if (!part || part.startsWith('<') || /^\u0000\d+\u0000$/.test(part)) return part;
+      return part.replace(definitions.pattern, (matched, offset) => {
+        if (/^[a-z]+-[0-9]+$/i.test(matched) && !/^[A-Z]+-[0-9]+$/.test(matched)) return matched;
+        if (!sourceSkipped && sourceKey && matched.toLowerCase() === sourceKey.toLowerCase() && offset <= 5) {
+          sourceSkipped = true;
+          return matched;
+        }
+        const entry = definitions.lookup.get(matched.toLowerCase());
+        const key = entry?.key || matched;
+        return protect(`<span class="definition-reference" data-definition-key="${escapeHtml(key)}" role="note" tabindex="0" aria-describedby="definition-preview-text" aria-label="Definition of ${escapeHtml(key)}">${matched}</span>`);
+      });
+    }).join('');
+  }
   result = result.replace(/§\s*(\d+(?:\.\d+)*)\b/g, (reference, number) => {
     const heading = sectionHeadings.get(number);
     if (!heading) return `<span class="section-reference section-reference-missing" data-section-number="${number}" data-section-missing="true" tabindex="0" role="note">§${number}</span>`;
@@ -184,10 +286,11 @@ function highlightCode(source, language = 'plaintext') {
   return output;
 }
 
-function table(lines, sourcePath, sectionHeadings) {
-  const rows = lines.filter(line => !/^\s*\|?\s*:?-{3,}/.test(line)).map(line => line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
+function table(lines, sourcePath, sectionHeadings, definitions, firstLine) {
+  const rows = lines.map((line, index) => ({ line, number: firstLine + index })).filter(item => !/^\s*\|?\s*:?-{3,}/.test(item.line));
   if (!rows.length) return '';
-  return dataTable(rows, (cell) => inline(cell, sourcePath, sectionHeadings), 'markdown-table');
+  const sourceRows = rows.map(item => item.line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
+  return dataTable(sourceRows, (cell, row, column) => inline(cell, sourcePath, sectionHeadings, definitions, column === 0 ? definitions?.sources.get(rows[row].number) : ''), 'markdown-table', (row, column) => column === 0 && definitions?.sources.has(rows[row].number) ? ` id="definition-source-${rows[row].number}"` : '');
 }
 
 function parseCsv(source) {
@@ -207,10 +310,10 @@ function parseCsv(source) {
   return rows.filter(values => values.some(value => value !== ''));
 }
 
-function dataTable(rows, renderCell, className) {
+function dataTable(rows, renderCell, className, cellAttributes = () => '') {
   const width = Math.max(...rows.map(row => row.length));
   const normalized = rows.map(row => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
-  return `<table class="${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}">${renderCell(cell, rowIndex + 1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  return `<table class="${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0, index)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}"${cellAttributes(rowIndex + 1, index)}>${renderCell(cell, rowIndex + 1, index)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
 function csvTable(source) {
@@ -226,9 +329,9 @@ const TASK_STATES = {
   '-': { name: 'Canceled', className: 'canceled', icon: '<rect x="2.5" y="2.5" width="11" height="11" rx="1" /><path d="m5.5 5.5 5 5m0-5-5 5" />' }
 };
 
-function taskListItem(value, sourcePath, location = {}, sectionHeadings) {
+function taskListItem(value, sourcePath, location = {}, sectionHeadings, definitions) {
   const marker = value.match(/^\[([ xX!~\-])\]\s*/);
-  if (!marker) return { isTask: false, html: `<li>${inline(value, sourcePath, sectionHeadings)}</li>` };
+  if (!marker) return { isTask: false, html: `<li${definitions?.sources.has(location.startLine) ? ` id="definition-source-${location.startLine}"` : ''}>${inline(value, sourcePath, sectionHeadings, definitions, definitions?.sources.get(location.startLine))}</li>` };
 
   const state = TASK_STATES[marker[1].toLowerCase()];
   const icon = `<button class="task-marker" type="button" title="Edit task: ${state.name}" aria-label="Edit task: ${state.name}" data-task-start-line="${location.startLine || ''}" data-task-end-line="${location.endLine || ''}" data-task-source-path="${escapeHtml(sourcePath)}"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${state.icon}</svg></button>`;
@@ -281,7 +384,8 @@ function sortMarkdownTable(header) {
   headers.forEach((cell, index) => cell.setAttribute('aria-sort', index === columnIndex ? (nextDirection === 'asc' ? 'ascending' : 'descending') : 'none'));
 }
 
-function renderMarkdown(markdown, sourcePath) {
+function renderMarkdown(markdown, sourcePath, documentDefinitionData = null) {
+  const definitions = documentDefinitionData ? prepareDefinitions(documentDefinitionData) : null;
   const normalizedMarkdown = markdown.replace(/\r/g, '');
   const frontmatter = normalizedMarkdown.match(/^---[\s\S]*?---\s*/);
   const sourceLineOffset = frontmatter ? frontmatter[0].split('\n').length - 1 : 0;
@@ -305,13 +409,13 @@ function renderMarkdown(markdown, sourcePath) {
       if (i < lines.length) i++;
       const source = block.join('\n'); output.push(lang.toLowerCase() === 'mermaid' ? `<pre class="mermaid mermaid-diagram">${escapeHtml(source)}</pre>` : `<pre><code class="language-${escapeHtml(lang)}">${highlightCode(source, lang)}</code></pre>`); continue;
     }
-    const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = headingId(heading[2]); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath, sectionHeadings)}</h${level}>`); i++; continue; }
-    if (/^\s*\|/.test(line) && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const tableLines = [line]; while (++i < lines.length && /^\s*\|/.test(lines[i])) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath, sectionHeadings)); continue; }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = headingId(heading[2]); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath, sectionHeadings, definitions)}</h${level}>`); i++; continue; }
+    if (line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const firstLine = i + 1 + sourceLineOffset; const tableLines = [line]; while (++i < lines.length && lines[i].includes('|') && lines[i].trim()) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath, sectionHeadings, definitions, firstLine)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
-    if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath)}</p></blockquote>`); continue; }
-    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }, sectionHeadings); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
-    if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath, sectionHeadings)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
-    const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s| {0,3}(?:`{3,}|~{3,})|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath, sectionHeadings)}</p>`);
+    if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath, sectionHeadings, definitions)}</p></blockquote>`); continue; }
+    if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }, sectionHeadings, definitions); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
+    if (/^\s*\d+\.\s+/.test(line)) { const items = []; while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { const item = [lines[i++].replace(/^\s*\d+\.\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); items.push(`<li>${inline(item.join(' '), sourcePath, sectionHeadings, definitions)}</li>`); } output.push(`<ol>${items.join('')}</ol>`); continue; }
+    const paragraph = [line]; while (++i < lines.length && lines[i].trim() && !/^(#{1,6}\s| {0,3}(?:`{3,}|~{3,})|>|\s*[-*+]\s+|\s*\d+\.\s+)/.test(lines[i])) paragraph.push(lines[i]); output.push(`<p>${inline(paragraph.join(' '), sourcePath, sectionHeadings, definitions)}</p>`);
   }
   return output.join('\n');
 }
@@ -760,6 +864,10 @@ async function loadPage() {
     const data = await projectResponse.json(); const documentData = documentResponse ? await documentResponse.json() : null;
     if (request !== pageLoadSequence) return;
   displayedDocument = { path: documentData?.path || '/workspace', project: data.project.name, text: documentData?.text || '' };
+  clearTimeout(definitionPreviewTimer); definitionPreview.hidden = true; definitionPreviewSequence++; projectDefinitionCache = new Map();
+  currentDefinitions = new Map((documentData?.definitions?.entries || []).map(item => [item.key.toLowerCase(), item.definition]));
+  currentDefinitionSources = new Map();
+  for (const source of documentData?.definitions?.sources || []) if (!currentDefinitionSources.has(source.key.toLowerCase())) currentDefinitionSources.set(source.key.toLowerCase(), source.line);
   document.title = isWorkspaceOverview ? 'Workspace overview / workspace' : `${documentData.title || documentData.name} / workspace`;
   document.querySelector('#project-name').textContent = data.project.title;
   document.querySelector('#stats').textContent = isWorkspaceOverview ? `${data.projects.length - 1} projects` : `${data.stats.documents} docs · ${data.stats.folders} folders · ${data.stats.indexed} indexed`;
@@ -786,7 +894,7 @@ async function loadPage() {
   }
 }
 
-function navigate(event) { const anchor = event.target.closest('a'); const href = anchor?.getAttribute('href') || ''; if (!anchor || anchor.target || /^(?:mailto:|https?:)/i.test(href)) return; const url = new URL(anchor.href); if (url.origin !== location.origin || !url.pathname.startsWith('/workspace')) return; event.preventDefault(); history.pushState({}, '', `${url.pathname}${url.hash}`); loadPage().catch(showError); }
+function navigate(event) { const anchor = event.target.closest('a'); const href = anchor?.getAttribute('href') || ''; if (!anchor || anchor.target || /^(?:mailto:|https?:)/i.test(href)) return; const url = new URL(anchor.href); if (url.origin !== location.origin || !url.pathname.startsWith('/workspace')) return; event.preventDefault(); const sameDocument = url.pathname === location.pathname; history.pushState({}, '', `${url.pathname}${url.hash}`); if (sameDocument && url.hash) { const target = document.getElementById(decodeURIComponent(url.hash.slice(1))); if (target) { clearTimeout(definitionPreviewTimer); definitionPreview.hidden = true; clearTimeout(sectionPreviewTimer); sectionPreview.hidden = true; target.scrollIntoView({ block: 'start' }); return; } } loadPage().catch(showError); }
 function showError(error) { documentPane.removeAttribute('aria-busy'); nav.removeAttribute('aria-busy'); picker.disabled = false; documentPane.innerHTML = `<h1>Not found</h1><p>${escapeHtml(error.message)}</p>`; }
 
 function reloadChangedDocument(event) {

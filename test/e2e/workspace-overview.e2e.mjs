@@ -468,6 +468,95 @@ test('a synthesis failure keeps the prior briefing visible and shows newly saved
   });
 });
 
+test('document IDs and glossary terms show local definitions without marking their sources', { skip: !chromium }, async () => {
+  await withOverview(async (page, { workspace, serverPort }) => {
+    await writeFile(path.join(workspace, 'alpha', 'definitions.md'), `# Example
+WC-1 is used here. Work contract is also used. Missing ZZ-9 has no definition. wc-1, XWC-1Y and WC-1-extra are not references. See §21 and §99.
+\`WC-1\` and [WC-1](https://example.com) are not rewritten.
+\`\`\`text
+WC-1 is not a reference.
+\`\`\`
+| ID | Requirement |
+|----|-------------|
+| WC-1 | **Work contract** permits <img src=x onerror=alert(1)> work. |
+- SEC-2: Security detail.
+A SEC-2 reference appears later.
+## 21. Glossary
+- **Human proxy**: An agent representing a human.
+Human proxy handles WC-1.
+
+| Term | Meaning |
+|------|---------|
+| Work contract | A unit of work. |
+`);
+    await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/definitions.md`, { waitUntil: 'networkidle' });
+    const refs = page.locator('#document .definition-reference');
+    assert.equal(await refs.count(), 7); // IDs and prose terms, including the definition text in the table
+    assert.equal(await page.locator('#document .markdown-table tbody tr').first().locator('td').first().locator('.definition-reference').count(), 0);
+    assert.equal(await page.locator('#document li').first().locator('.definition-reference').count(), 1); // later mention, not the source ID
+    assert.equal(await page.locator('#document code .definition-reference').count(), 0);
+    assert.equal(await page.locator('#document a .definition-reference').count(), 0);
+    await refs.first().hover();
+    const preview = page.locator('.definition-preview');
+    await preview.waitFor({ state: 'visible' });
+    assert.match(await preview.textContent(), /WC-1.*Work contract permits/);
+    await page.mouse.move(1, 1);
+    await page.waitForTimeout(200);
+    assert.equal(await preview.isVisible(), true);
+    await preview.waitFor({ state: 'hidden', timeout: 1500 });
+    await refs.first().hover();
+    const sourceLink = preview.locator('.preview-source-link');
+    const sourceHash = await sourceLink.getAttribute('href');
+    assert.match(sourceHash, /^#definition-source-\d+$/);
+    await sourceLink.click();
+    assert.equal(new URL(page.url()).hash, sourceHash);
+    assert.equal(await page.locator(sourceHash).textContent(), 'WC-1');
+    assert.equal(await preview.isHidden(), true);
+    assert.equal(await page.locator('img[src="x"]').count(), 0);
+    await refs.nth(1).focus();
+    await preview.waitFor({ state: 'visible' });
+    assert.match(await preview.textContent(), /Work contract.*A unit of work/);
+    await page.locator('#document .definition-reference[data-definition-key="Human proxy"]').hover();
+    assert.match(await preview.textContent(), /Human proxy.*An agent representing a human/);
+    const bulletHash = await sourceLink.getAttribute('href');
+    await sourceLink.click();
+    assert.match(await page.locator(bulletHash).textContent(), /Human proxy: An agent representing a human/);
+    assert.equal(await page.locator('#document li').last().locator('.definition-reference').count(), 2); // later mentions only
+    assert.equal(await page.locator('#document .markdown-table').last().locator('tbody td').first().locator('.definition-reference').count(), 0);
+    await page.locator('#document .definition-reference[data-definition-key="Work contract"]').first().hover();
+    const glossaryHash = await sourceLink.getAttribute('href');
+    assert.equal(await page.locator(glossaryHash).textContent(), 'Work contract');
+    await page.locator('#document .definition-reference[data-definition-key="ZZ-9"]').hover();
+    assert.match(await preview.textContent(), /No definition in this document/);
+    assert.equal(await sourceLink.isHidden(), true);
+    await page.locator('#document .section-reference[data-section-number="21"]').hover();
+    const sectionLink = page.locator('.section-preview .preview-source-link');
+    assert.equal(await sectionLink.getAttribute('href'), '#21-glossary');
+    await sectionLink.click();
+    assert.equal(new URL(page.url()).hash, '#21-glossary');
+    await page.locator('#document .section-reference[data-section-number="99"]').hover();
+    assert.equal(await sectionLink.isHidden(), true);
+  });
+});
+
+test('Luchta document resolves real requirement IDs and its numbered glossary', { skip: !chromium }, async t => {
+  const source = await (await import('node:fs/promises')).readFile(path.join(process.env.HOME || '', 'ok-workbench/luchta/high-level-requirements.md'), 'utf8').catch(() => null);
+  if (!source) return t.skip('local example not available');
+  await withOverview(async (page, { workspace, serverPort }) => {
+    await writeFile(path.join(workspace, 'alpha', 'requirements.md'), source);
+    await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/requirements.md`, { waitUntil: 'networkidle' });
+    const sourceId = page.locator('#document .markdown-table td').filter({ hasText: /^WC-1$/ }).first();
+    assert.equal(await sourceId.locator('.definition-reference').count(), 0);
+    const principle = page.locator('#document .definition-reference[data-definition-key="P-14"]').first();
+    await principle.hover();
+    assert.match(await page.locator('.definition-preview').textContent(), /P-14.*Agents never know they are scored/);
+    const glossary = page.locator('#document .markdown-table td').filter({ hasText: /^Compaction$/ }).last();
+    assert.equal(await glossary.locator('.definition-reference').count(), 0);
+    await page.locator('#document .definition-reference[data-definition-key="Compaction"]').first().hover();
+    assert.match(await page.locator('.definition-preview').textContent(), /Compaction.*context fills up/);
+  });
+});
+
 test('agent connections warns when the bundled Pi runtime is outdated', { skip: !chromium }, async () => {
   await withOverview(async page => {
     await page.route('**/api/chat/pi-version', route => route.fulfill({ json: { installed: '1.1.0', latest: '1.2.0', updateAvailable: true } }));
