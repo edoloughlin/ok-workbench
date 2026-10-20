@@ -5,6 +5,47 @@ const tableToolbarResizeObserver = new ResizeObserver(entries => {
 });
 tableToolbarResizeObserver.observe(document.querySelector('.topbar'));
 const nav = document.querySelector('#file-nav');
+const sidebar = document.querySelector('.sidebar');
+const sidebarToggle = document.querySelector('#sidebar-toggle');
+let sidebarCollapsed = false;
+let sidebarHoverExpanded = false;
+function renderSidebarState() {
+  const collapsed = sidebarCollapsed && !sidebarHoverExpanded;
+  document.querySelector('#app-layout').classList.toggle('sidebar-collapsed', collapsed);
+  sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+  sidebarToggle.setAttribute('aria-label', sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar');
+  sidebarToggle.title = sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
+}
+function setSidebarCollapsed(collapsed) {
+  sidebarCollapsed = collapsed;
+  sidebarHoverExpanded = false;
+  renderSidebarState();
+}
+try { setSidebarCollapsed(localStorage.getItem('ok-workbench-sidebar-collapsed') === 'true'); } catch { setSidebarCollapsed(false); }
+sidebar.addEventListener('pointerenter', event => {
+  if (event.pointerType !== 'mouse' || innerWidth < 768 || !sidebarCollapsed) return;
+  sidebarHoverExpanded = true;
+  renderSidebarState();
+  applyChatLayout();
+});
+sidebar.addEventListener('pointerleave', () => {
+  if (!sidebarHoverExpanded) return;
+  sidebarHoverExpanded = false;
+  renderSidebarState();
+  applyChatLayout();
+});
+addEventListener('resize', () => {
+  if (innerWidth < 768 && sidebarHoverExpanded) {
+    sidebarHoverExpanded = false;
+    renderSidebarState();
+  }
+});
+sidebarToggle.addEventListener('click', () => {
+  setSidebarCollapsed(!sidebarCollapsed);
+  try { localStorage.setItem('ok-workbench-sidebar-collapsed', String(sidebarCollapsed)); } catch { /* Keep the toggle usable when storage is unavailable. */ }
+  applyChatLayout();
+});
+
 const picker = document.querySelector('#project-select');
 const workspaceAssetOrigin = document.querySelector('meta[name="ok-workbench-asset-origin"]')?.content.replace(/\/$/, '');
 const createProjectUi = {
@@ -499,7 +540,7 @@ function treeNode(item) {
   if (item.type === 'internal-link') return `<a class="nav-link tree-link tree-page" href="${item.path}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>Linked inside workspace</small></span></a>`;
   if (pendingEntryRename?.path === item.path) return `<div class="tree-inline-directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}"><input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Directory name"></form></div>`;
   const containsPendingEntry = pendingEntryRename?.path.startsWith(`${item.path}/`);
-  return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-entry-type="directory">${escapeHtml(item.label)}</a>${entryCreationActions(item.path)}</summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
+  return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-entry-type="directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)}</span></a>${entryCreationActions(item.path)}</summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
 }
 
 function formatBytes(bytes) {
@@ -603,7 +644,7 @@ async function loadWorkspaceReview() {
 }
 function workspaceOverviewNav(data) {
   const projects = data.projects.filter(item => item.name !== 'workspace');
-  return `<div class="breadcrumbs" aria-label="Current location"><a href="/workspace/" aria-current="page">Workspace overview</a></div><p class="nav-label">Workspace</p><a class="nav-link active" href="/workspace/">Overview</a><a class="nav-link" href="/workspace/index.md">Documents</a><hr class="nav-rule"><p class="nav-label">Projects</p><div class="project-list">${projects.map(projectLink).join('')}</div>`;
+  return `<div class="breadcrumbs" aria-label="Current location"><a href="/workspace/" aria-current="page">Workspace overview</a></div><p class="nav-label">Workspace</p><a class="nav-link tree-page active" href="/workspace/"><span class="nav-icon page-icon">${NAV_ICONS.status}</span><span>Overview</span></a><a class="nav-link tree-page" href="/workspace/index.md"><span class="nav-icon page-icon">${NAV_ICONS.document}</span><span>Documents</span></a><hr class="nav-rule"><p class="nav-label">Projects</p><div class="project-list">${projects.map(projectLink).join('')}</div>`;
 }
 function workspaceReviewProgress(progress) { return progress ? `${progress.reused || 0} reused · ${progress.refreshed || 0} refreshed · ${progress.failed || 0} failed · ${progress.deferred || 0} deferred · up to ${progress.plannedMaxCalls || 0} calls (${progress.callsConsumed || 0} used)` : ''; }
 function renderWorkspaceOverview(state) {
@@ -877,6 +918,9 @@ async function loadPage() {
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
     : `<div class="nav-section-heading"><p class="nav-label">Project pages</p>${data.project.name === 'workspace' ? '' : entryCreationActions(data.project.path)}</div><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
   nav.innerHTML = isWorkspaceOverview ? workspaceOverviewNav(data) : `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
+  for (const summary of nav.querySelectorAll('.tree-directory > summary')) {
+    summary.setAttribute('aria-label', summary.querySelector('a').textContent.trim());
+  }
   if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
   if (isWorkspaceOverview) { renderWorkspaceOverview(await loadWorkspaceReview()); }
   else {
@@ -1201,9 +1245,8 @@ async function openTurnNotification(id) {
   history.pushState({}, '', projectPath); await loadPage();
 }
 function chatSizeBounds() {
-  // Right dock: reserve the 240px file sidebar, 8px splitter, and a 320px
-  // document column. At narrower widths the drawer media query takes over.
-  return { min: 320, max: Math.min(720, innerWidth - 568) };
+  // Reserve the current sidebar width, splitter, and minimum document column.
+  return { min: 320, max: Math.min(720, innerWidth - sidebar.getBoundingClientRect().width - 328) };
 }
 function clampChatSize(value) {
   const { min, max } = chatSizeBounds();
@@ -1748,7 +1791,7 @@ chatUi.splitter.addEventListener('pointermove', event => {
   if (!resizeState) return;
   // On the right dock, derive the width from the viewport-anchored splitter
   // position. This makes the draggable range explicit: it cannot cross the
-  // 240px file sidebar plus 320px document minimum, or shrink below 320px.
+  // file sidebar plus 320px document minimum, or shrink below 320px.
   const size = innerWidth - event.clientX - 8;
   const value = clampChatSize(size);
   chatSettings.rightSize = value;
