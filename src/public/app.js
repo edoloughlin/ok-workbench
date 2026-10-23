@@ -1455,7 +1455,17 @@ function loadTitleModels(providers = []) {
   loadTitleEfforts(chatSettings.titleEffort);
   persistChatSettings();
 }
+function setProviderLoginPending(failed = false) {
+  chatUi.codexLogin.disabled = true; chatUi.copilotLogin.disabled = true;
+  chatUi.codexLogin.querySelector('span').textContent = failed ? 'Codex status unavailable' : 'Checking Codex…';
+  chatUi.copilotLogin.querySelector('span').textContent = failed ? 'Copilot status unavailable' : 'Checking Copilot…';
+  const status = document.querySelector('#chat-auth-status'); status.hidden = false;
+  status.textContent = failed ? 'Could not check sign-in status. Retry before signing in.' : 'Checking sign-in status…';
+  document.querySelector('#chat-auth-retry').hidden = !failed;
+}
 function setProviderLoginState(providers) {
+  document.querySelector('#chat-auth-status').hidden = true;
+  document.querySelector('#chat-auth-retry').hidden = true;
   for (const { id, label, button } of [
     { id: 'openai-codex', label: 'Codex', button: chatUi.codexLogin },
     { id: 'github-copilot', label: 'Copilot', button: chatUi.copilotLogin },
@@ -1567,6 +1577,7 @@ function renderActiveTurn(turn) {
 }
 
 async function loadChatStatus() {
+  setProviderLoginPending();
   try {
     const response = await chatApi('/api/chat/status'); if (!response.ok) throw new Error('Chat unavailable');
     const data = await response.json(); const providers = data.providers || []; configuredApiKeys = data.apiKeys || []; if (chatUi.settingsDialog.open) renderApiKeyRows();
@@ -1578,7 +1589,7 @@ async function loadChatStatus() {
     const providerAvailable = providers.some(provider => provider.models?.length);
     setChatStatus(providerAvailable ? 'Ready' : (data.message || 'Configure a provider'));
     if (!setupPrompted && !providerAvailable) { setupPrompted = true; openChatSettings(); }
-  } catch { setProviderLoginState([]); setOptions(chatUi.provider, [{ id: 'anthropic', label: 'Anthropic (not configured)' }], 'anthropic'); chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); loadTitleModels([]); setChatStatus('Chat service unavailable'); }
+  } catch { setProviderLoginPending(true); setOptions(chatUi.provider, [{ id: 'anthropic', label: 'Anthropic (not configured)' }], 'anthropic'); chatModels = []; setOptions(chatUi.model, [{ id: '', label: 'No model available' }], ''); loadChatEfforts(''); loadTitleModels([]); setChatStatus('Chat service unavailable'); }
 }
 async function loadChatModels() {
   const provider = chatUi.provider.value; if (!provider) return;
@@ -1846,6 +1857,7 @@ chatUi.toolSecretAdd.addEventListener('click', async () => {
 document.addEventListener('click', event => { if (!event.target.closest('.turn-notifications')) closeTurnNotifications(); });
 chatUi.titleModel.addEventListener('change', () => { const model = titleModels.find(item => titleModelKey(item) === chatUi.titleModel.value); if (!model) return; chatSettings.titleProvider = model.provider; chatSettings.titleModel = model.id; loadTitleEfforts(chatSettings.titleEffort); persistChatSettings(); });
 chatUi.titleEffort.addEventListener('change', () => { chatSettings.titleEffort = chatUi.titleEffort.value; persistChatSettings(); });
+document.querySelector('#chat-auth-retry').addEventListener('click', () => { void loadChatStatus(); });
 chatUi.codexLogin.addEventListener('click', () => signInToProvider('openai-codex'));
 chatUi.copilotLogin.addEventListener('click', () => signInToProvider('github-copilot'));
 chatUi.newThread.addEventListener('click', () => createChatThread().catch(error => setChatStatus(error.message)));

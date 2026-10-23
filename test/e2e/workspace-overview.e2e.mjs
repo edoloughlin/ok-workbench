@@ -612,6 +612,32 @@ test('agent connections warns when the bundled Pi runtime is outdated', { skip: 
   });
 });
 
+test('sign-in buttons stay disabled while status is unknown and offer retry on failure', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    let release;
+    const pending = new Promise(resolve => { release = resolve; });
+    await page.route('**/api/chat/status*', async route => {
+      await pending;
+      await route.fulfill({ status: 503, json: { error: 'Unavailable' } });
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.evaluate(() => openChatSettings());
+    assert.equal(await page.locator('#chat-codex-login').isDisabled(), true);
+    assert.equal(await page.locator('#chat-copilot-login').isDisabled(), true);
+    assert.match(await page.locator('#chat-auth-status').textContent(), /Checking/);
+    release();
+    await page.locator('#chat-auth-retry').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#chat-copilot-login').isDisabled(), true);
+    await page.unroute('**/api/chat/status*');
+    await page.route('**/api/chat/status*', route => route.fulfill({ json: { providers: [{ id: 'github-copilot', models: [] }] } }));
+    await page.locator('#chat-auth-retry').click();
+    await page.waitForFunction(() => document.querySelector('#chat-copilot-login span').textContent === 'Copilot connected');
+    assert.equal(await page.locator('#chat-copilot-login').isDisabled(), true);
+    assert.equal(await page.locator('#chat-codex-login').isEnabled(), true);
+    assert.equal(await page.locator('#chat-auth-status').isVisible(), false);
+  });
+});
+
 test('review settings prefer API-token models independently of the signed-in chat provider', { skip: !chromium }, async () => {
   await withOverview(async page => {
     const providers = [
