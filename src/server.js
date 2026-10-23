@@ -367,9 +367,9 @@ async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, 
   }
 
   return candidates.sort((a, b) => {
-    const order = { file: 0, 'internal-link': 1, 'external-link': 1, directory: 2 };
-    if (a.type !== b.type) return order[a.type] - order[b.type];
-    return a.label.localeCompare(b.label);
+    return Number(a.type === 'directory') - Number(b.type === 'directory')
+      || a.label.localeCompare(b.label)
+      || a.path.localeCompare(b.path);
   });
 }
 
@@ -420,6 +420,9 @@ async function projectData(requested) {
       projects.push({ name: entry.name, path: projectPath, label });
     }
   }
+  // Keep the workspace shortcut first, then alphabetize displayed project labels.
+  projects.splice(1, projects.length - 1, ...projects.slice(1).sort((a, b) =>
+    a.label.localeCompare(b.label) || a.path.localeCompare(b.path)));
   const projectIndexFile = path.join(projectRoot, 'index.md');
   const projectIndex = await readWorkspaceTextPrefix(projectIndexFile);
   const contextIndexFile = path.join(requestedPath, 'index.md');
