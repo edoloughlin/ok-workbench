@@ -52,6 +52,7 @@
               <section id="chat-messages" class="chat-messages" aria-live="polite"></section>
             </div>
             <form id="chat-composer" class="chat-composer">
+              <div id="chat-files" class="chat-files" aria-label="File context"></div>
               <label class="sr-only" for="chat-input">Message the project agent</label>
               <textarea id="chat-input" rows="3" placeholder="Ask about this project…"></textarea>
               <div class="chat-composer-actions"><span id="chat-status" role="status">Ready</span><button id="chat-process-dirty" type="button" hidden>Changes detected, click to process...</button><div><button id="chat-stop" type="button" hidden>Stop</button><button id="chat-send" type="submit">Send</button></div></div>

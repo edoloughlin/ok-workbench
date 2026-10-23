@@ -187,6 +187,8 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
   await writeFile(path.join(workspace, 'index.md'), '# Test workspace\n\n- [Linked project](linked-project/index.md)\n* [ ] Direct task\n');
   await mkdir(path.join(workspace, 'linked-project', 'aaa-directory'));
   await mkdir(path.join(workspace, 'linked-project', 'zzz-directory'));
+  await writeFile(path.join(workspace, 'linked-project', 'aaa-directory', 'index.md'), '# A directory\n');
+  await writeFile(path.join(workspace, 'linked-project', 'zzz-directory', 'index.md'), '# Z directory\n');
   await writeFile(path.join(workspace, 'linked-project', 'aaa.md'), '# A\n');
   await writeFile(path.join(workspace, 'linked-project', 'zzz.md'), '# Z\n');
   await writeFile(path.join(workspace, 'linked-project', 'index.md'), '# Linked project\n');
@@ -210,7 +212,7 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.deepEqual(projectBody.projects.map(item => item.name), ['workspace', 'bare-project', 'linked-project', 'unlisted-project']);
     const linkedProject = await fetch(`http://127.0.0.1:${port}/api/project?path=/workspace/linked-project/`);
     const linkedProjectBody = await linkedProject.json(); assert.ok(linkedProjectBody.tree.every(item => item.path !== '/workspace/linked-project/%23draft.md%23'));
-    assert.deepEqual(linkedProjectBody.tree.map(item => item.label), ['aaa.md', 'index.md', 'zzz.md', 'aaa-directory', 'zzz-directory']);
+    assert.deepEqual(linkedProjectBody.tree.map(item => item.label), ['aaa.md', 'zzz.md', 'aaa-directory', 'zzz-directory']);
     const escaped = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/escape.md`);
     assert.equal(escaped.status, 404);
     const dirtyPage = await fetch(`http://127.0.0.1:${port}/workspace/`); const dirtyCsrf = (await dirtyPage.text()).match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(dirtyCsrf);

@@ -930,6 +930,7 @@ async function loadPage() {
     void renderMermaidDiagrams(documentPane);
     void renderProjectReviewContext(data.project.name, route === `/workspace/${encodeURIComponent(data.project.name)}`);
   }
+  renderChatFiles();
   if (typeof applyChatLayout === 'function') applyChatLayout();
   if (typeof chatProjectChanged === 'function') chatProjectChanged(data.project).catch(error => setChatStatus(error.message));
   if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView({ block: 'start' }); else { documentPane.scrollTop = 0; scrollTo(0, 0); }
@@ -1569,12 +1570,51 @@ function formatThreadTime(value) {
   const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
   return `${date.getDate()} ${month}${date.getFullYear() === new Date().getFullYear() ? '' : ` ${date.getFullYear()}`}, ${time}`;
 }
+const chatFilePins = new Map();
+let chatFilesSaving = false;
+function currentChatFile() {
+  const file = displayedDocument?.path;
+  return file && file !== '/workspace' && (chatProjectId === 'workspace' || displayedDocument.project === chatProjectId) ? file : null;
+}
+function renderChatFiles() {
+  const container = document.querySelector('#chat-files');
+  if (!container) return;
+  const pins = chatFilePins.get(chatThreadId) || [];
+  const current = currentChatFile();
+  container.replaceChildren();
+  for (const file of [...pins, ...(current && !pins.includes(current) ? [current] : [])]) {
+    const pinned = pins.includes(file);
+    const button = document.createElement('button'); button.type = 'button'; button.className = `chat-file-chip${pinned ? ' pinned' : ''}`;
+    const name = decodeURIComponent(file.split('/').pop());
+    button.title = `${file}${file === current ? ' · Currently displayed' : ''}`;
+    button.setAttribute('aria-label', `${pinned ? 'Remove' : 'Add'} ${name} ${pinned ? 'from' : 'to'} conversation`);
+    button.disabled = chatFilesSaving || (!pinned && pins.length >= 20);
+    const label = document.createElement('span'); label.textContent = name;
+    const action = document.createElement('span'); action.className = 'chat-file-action'; action.textContent = pinned ? '×' : '+'; action.setAttribute('aria-hidden', 'true');
+    button.append(label, action); container.append(button);
+    button.addEventListener('click', async () => {
+      chatFilesSaving = true; renderChatFiles();
+      try {
+        if (!(await enableWorkspaceMode('user'))) return;
+        if (!chatThreadId) await createChatThread({ force: true });
+        const threadId = chatThreadId; const existing = chatFilePins.get(threadId) || [];
+        const referencedFiles = pinned ? existing.filter(path => path !== file) : [...new Set([...existing, file])];
+        const response = await chatApi(`/api/chat/threads/${encodeURIComponent(threadId)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ referencedFiles }) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Could not update chat files');
+        chatFilePins.set(threadId, data.referencedFiles);
+      } catch (error) { setChatStatus(error.message); }
+      finally { chatFilesSaving = false; renderChatFiles(); }
+    });
+  }
+  container.hidden = !container.childElementCount;
+}
+
 function updateNewThreadAvailability() { chatUi.newThread.disabled = !chatThreadHasUserChat || Boolean(creatingChatThread); }
 function renderThreadSelect() { setOptions(chatUi.thread, chatThreads.map(thread => { const title = thread.title || 'New conversation'; return { id: thread.id, label: title === 'New conversation' ? title : `${title} · ${formatThreadTime(thread.updatedAt || thread.createdAt)}` }; }), chatThreadId); }
 async function loadChatThread(threadId) {
   if (!threadId) { chatThreadHasUserChat = false; updateNewThreadAvailability(); renderChatMessages([]); return; }
   const response = await chatApi(`/api/chat/threads/${encodeURIComponent(threadId)}`); if (!response.ok) throw new Error('Could not load chat thread');
-  const data = await response.json(); chatThreadId = data.id; chatThreadHasUserChat = (data.messages || []).some(message => message.role === 'user' && message.initiator !== 'system'); updateNewThreadAvailability(); renderChatMessages(data.messages || [], data); syncChatTurnControls();
+  const data = await response.json(); chatThreadId = data.id; chatFilePins.set(data.id, data.referencedFiles || []); renderChatFiles(); chatThreadHasUserChat = (data.messages || []).some(message => message.role === 'user' && message.initiator !== 'system'); updateNewThreadAvailability(); renderChatMessages(data.messages || [], data); syncChatTurnControls();
 }
 async function createChatThread({ force = false } = {}) {
   if (creatingChatThread) return creatingChatThread;
@@ -1583,7 +1623,7 @@ async function createChatThread({ force = false } = {}) {
   creatingChatThread = (async () => {
     const response = await chatApi('/api/chat/threads', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: chatProjectId, workspaceMode, provider: chatUi.provider.value, model: chatUi.model.value, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     if (!response.ok) throw new Error((await response.json()).error || 'Could not create chat thread');
-    const thread = await response.json(); chatThreads.unshift(thread); chatThreadId = thread.id; chatThreadHasUserChat = false; renderThreadSelect(); renderChatMessages([]); updateNewThreadAvailability(); syncChatTurnControls(); return thread;
+    const thread = await response.json(); chatThreads.unshift(thread); chatThreadId = thread.id; chatFilePins.set(thread.id, thread.referencedFiles || []); renderChatFiles(); chatThreadHasUserChat = false; renderThreadSelect(); renderChatMessages([]); updateNewThreadAvailability(); syncChatTurnControls(); return thread;
   })();
   updateNewThreadAvailability();
   try { return await creatingChatThread; } finally { creatingChatThread = null; updateNewThreadAvailability(); }
@@ -1603,6 +1643,7 @@ async function refreshGitStatus() {
 async function chatProjectChanged(project) {
   if (!project?.name || project.name === chatProjectId) return;
   chatProjectId = project.name; chatProjectTitle = project.title || project.name; workspaceMode = false; chatThreadId = null; chatThreadHasUserChat = false; updateNewThreadAvailability(); renderChatProjectLabel(); setChatStatus('Loading project chat…');
+  renderChatFiles();
   renderDirtyProcessPrompt();
   chatUi.messages.replaceChildren(); const loading = document.createElement('p'); loading.className = 'chat-empty loading'; loading.textContent = 'Loading chat history…'; chatUi.messages.append(loading);
   chatUi.input.disabled = true; chatUi.send.disabled = true;
@@ -1622,7 +1663,7 @@ async function steerChatTurn(turn, message) {
   if (!turn?.id || !turn.supportsSteering || !turn.steeringReady || turn.steeringSubmitting) throw new Error('Steering is not available for this response yet');
   turn.steeringSubmitting = true; syncChatTurnControls(); setChatStatus('Sending steering comment…');
   try {
-    const response = await chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}/steer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message }) });
+    const response = await chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}/steer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message, currentFile: currentChatFile() }) });
     const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not steer the active response');
     const assistant = chatUi.messages.querySelector(`[data-client-turn-id="${turn.clientId}"]`); addChatMessage('user', message, false, new Date().toISOString(), { steering: true }); if (assistant) chatUi.messages.append(assistant);
     turn.activities.push({ kind: 'steering', label: 'Steering comment accepted', at: Date.now(), done: true }); renderActiveTurn(turn); setChatStatus('Steering accepted');
@@ -1640,13 +1681,14 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
   if (!(await enableWorkspaceMode(initiator))) return false;
   saveProjectChatPreference();
   if (!chatThreadId) await createChatThread({ force: true });
+  const currentFile = currentChatFile();
   const selectedModel = chatModels.find(item => item.id === model);
   const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, supportsSteering: selectedModel?.supportsSteering === true, steeringReady: false, steeringSubmitting: false, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
   if (isVisible()) renderActiveTurn(turn); let projectCreated = false; let completed = false;
   try {
-    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, currentFile, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
     if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');

@@ -517,6 +517,14 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .chat-turn-highlight { animation: chat-turn-highlight 1.5s ease-out; }
 @keyframes chat-turn-highlight { 0%, 55% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent); } 100% { box-shadow: none; } }
 .chat-composer { flex: none; padding: 11px 14px 13px; border-top: 1px solid var(--rule); background: var(--panel); }
+.chat-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
+.chat-files[hidden] { display: none; }
+.chat-composer .chat-file-chip { display: inline-flex; align-items: center; gap: 9px; max-width: 100%; padding: 4px 9px; border-radius: 999px; color: var(--muted); background: var(--paper); font: 500 11px var(--font-ui); }
+.chat-file-chip > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-composer .chat-file-chip.pinned { border-color: color-mix(in srgb, var(--accent) 35%, var(--rule)); color: var(--accent); background: var(--accent-soft); }
+.chat-file-action { flex: none; font-size: 15px; line-height: 1; }
+.chat-composer .chat-file-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-composer .chat-file-chip:disabled { opacity: .5; cursor: wait; }
 .chat-composer textarea { display: block; resize: vertical; width: 100%; min-height: 58px; max-height: 180px; padding: 8px 10px; border: 1px solid var(--rule-strong); border-radius: 8px; color: var(--ink); background: var(--paper); font: 13px/1.4 var(--font-ui); }
 .chat-composer textarea:focus { border-color: var(--accent); outline: 3px solid var(--accent-soft); }
 .chat-composer textarea:disabled { color: var(--muted); background: color-mix(in srgb, var(--paper) 75%, var(--rule)); cursor: not-allowed; }

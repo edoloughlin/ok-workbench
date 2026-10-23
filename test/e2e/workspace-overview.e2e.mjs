@@ -110,6 +110,29 @@ async function withOverview(fn) {
   }
 }
 
+test('chat file chips pin per conversation, survive navigation and reload, and can be removed', { skip: !chromium }, async () => {
+  await withOverview(async (page, { serverPort }) => {
+    await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/status.md`, { waitUntil: 'networkidle' });
+    // A provider setup dialog can open automatically on a fresh workspace.
+    await page.evaluate(() => document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()));
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    const add = page.getByRole('button', { name: 'Add status.md to conversation', exact: true });
+    await add.waitFor(); await add.click();
+    await page.getByRole('button', { name: 'Remove status.md from conversation', exact: true }).waitFor();
+    await page.locator('a[href="/workspace/alpha/index.md"]').first().click();
+    await page.getByRole('button', { name: 'Add index.md to conversation', exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Remove status.md from conversation', exact: true }).count(), 1);
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.evaluate(() => document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()));
+    const remove = page.getByRole('button', { name: 'Remove status.md from conversation', exact: true });
+    await remove.waitFor(); await remove.click();
+    await page.waitForFunction(() => !document.querySelector('#chat-files .pinned'));
+    await page.reload({ waitUntil: 'networkidle' });
+    assert.equal(await page.getByRole('button', { name: 'Remove status.md from conversation', exact: true }).count(), 0);
+    assert.deepEqual(errors, []);
+  });
+});
+
 async function checkStickyTable(page) {
   await page.evaluate(() => {
     const table = document.querySelector('#document table');
