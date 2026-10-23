@@ -369,13 +369,14 @@ test('the tab list uses tablist semantics and arrow-key navigation, and referenc
   });
 });
 
-test('opening the Monitoring dialog moves focus in, and closing it returns focus to the opening button', async () => {
+test('opening Monitoring in main settings moves focus in, and closing returns focus to the opening button', async () => {
   await withOverview(async page => {
     const monitoringButton = page.locator('button:has-text("Monitoring")').first();
     await monitoringButton.focus();
     await monitoringButton.press('Enter');
-    const dialog = page.locator('dialog#workspace-review-dialog');
+    const dialog = page.locator('dialog#chat-settings-dialog');
     await assert.doesNotReject(dialog.waitFor({ state: 'visible', timeout: 3000 }));
+    assert.equal(await page.locator('[data-settings-panel="monitoring"]').isVisible(), true);
     const focusedInsideDialog = await page.evaluate(() => document.activeElement?.closest('dialog') !== null);
     assert.ok(focusedInsideDialog, 'expected focus to move inside the opened dialog');
     await page.keyboard.press('Escape');
@@ -450,7 +451,7 @@ test('clicking Review now before any review has ever completed shows persistent,
     const settingsButton = page.locator('[data-review-settings]');
     await assert.doesNotReject(settingsButton.waitFor({ timeout: 3000 }));
     await settingsButton.click();
-    await assert.doesNotReject(page.locator('dialog#workspace-review-dialog').waitFor({ state: 'visible', timeout: 3000 }));
+    await assert.doesNotReject(page.locator('dialog#chat-settings-dialog').waitFor({ state: 'visible', timeout: 3000 }));
     await page.keyboard.press('Escape');
     const button = page.locator('[data-review-run]');
     await assert.doesNotReject(button.waitFor({ timeout: 3000 }));
@@ -638,7 +639,8 @@ test('review settings prefer API-token models independently of the signed-in cha
       await route.fulfill({ json: { settings: saved } });
     });
     await page.locator('[data-review-save-settings]').click();
-    await page.waitForFunction(() => !document.querySelector('#workspace-review-dialog')?.open);
+    await page.waitForFunction(() => document.querySelector('.monitoring-save-status')?.textContent === 'Monitoring settings saved');
+    assert.equal(await page.locator('#chat-settings-dialog').isVisible(), true);
     assert.equal(saved.provider, 'openai-codex');
     assert.equal(saved.model, 'chat-model');
     assert.deepEqual(saved.assessmentModel, { provider: 'openai-codex', model: 'chat-model', effort: null });
@@ -654,5 +656,10 @@ test('review settings prefer API-token models independently of the signed-in cha
     assert.equal(await page.locator('#review-settings-model').inputValue(), 'chat-model');
     assert.equal(await page.locator('[name=hybrid]').isChecked(), false);
     assert.equal(await page.locator('#review-settings-assessment').isVisible(), false);
+    assert.match(await page.locator('.monitoring-model-summary').textContent(), /Project assessments.*Chat model.*Workspace overview.*Chat model/);
+    await page.locator('[data-settings-section="connections"]').click();
+    assert.equal(await page.locator('[data-settings-panel="monitoring"]').isVisible(), false);
+    await page.locator('[data-settings-section="monitoring"]').click();
+    assert.equal(await page.locator('#review-settings-model').inputValue(), 'chat-model');
   });
 });
