@@ -133,6 +133,23 @@ test('chat file chips pin per conversation, survive navigation and reload, and c
   });
 });
 
+test('sidebar toggle sits beside the compact brand and still collapses navigation', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const brand = await page.locator('a.brand').boundingBox();
+    const toggle = await page.locator('button.sidebar-toggle').boundingBox();
+    assert.ok(brand.width < 180);
+    assert.ok(toggle.x >= brand.x + brand.width && toggle.x - (brand.x + brand.width) <= 12);
+    await page.locator('#sidebar-toggle').click();
+    assert.equal(await page.locator('#sidebar-toggle').getAttribute('aria-expanded'), 'false');
+    await page.locator('#sidebar-toggle').click();
+    assert.equal(await page.locator('#sidebar-toggle').getAttribute('aria-expanded'), 'true');
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.locator('#sidebar-toggle').isVisible(), false);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  });
+});
+
 async function checkStickyTable(page) {
   await page.evaluate(() => {
     const table = document.querySelector('#document table');

@@ -12,7 +12,7 @@
   <body>
     <a class="skip-link" href="#document">Skip to main content</a>
     <header class="topbar">
-      <a class="brand" href="/workspace/">OK<span>Workbench</span></a>
+      <div class="brand-controls"><a class="brand" href="/workspace/">OK<span>Workbench</span></a><button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar" aria-expanded="true" aria-controls="file-nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M8 3v18"/></svg></button></div>
       <div class="project-summary"><span id="project-name">Loading</span><span class="stats" id="stats"></span></div>
       <div class="topbar-actions">
         <button class="chat-toggle" id="chat-toggle" type="button" aria-expanded="true" aria-controls="chat-pane">Chat</button>
@@ -27,7 +27,7 @@
       </div>
     </header>
     <div class="layout" id="app-layout">
-      <aside class="sidebar"><div class="sidebar-toolbar"><button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar" aria-expanded="true" aria-controls="file-nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="1.5"/><path d="M8 3v18"/></svg></button></div><details class="sidebar-disclosure" open><summary class="sidebar-disclosure-summary">Workspace navigation</summary><nav id="file-nav" aria-label="Project files"></nav></details></aside>
+      <aside class="sidebar"><details class="sidebar-disclosure" open><summary class="sidebar-disclosure-summary">Workspace navigation</summary><nav id="file-nav" aria-label="Project files"></nav></details></aside>
       <div class="workspace">
         <main id="document" class="document" aria-live="polite"><p class="loading">Opening document…</p></main>
         <div id="chat-splitter" class="chat-splitter" role="separator" tabindex="0" aria-label="Resize chat pane"></div>
