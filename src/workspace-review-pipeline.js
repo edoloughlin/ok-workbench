@@ -191,7 +191,7 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     console.log(`[${timestamp}] [ok-workbench] workspace review ${stage} ${projectId || 'workspace'} requesting model; promptBytes=${Buffer.byteLength(prompt)}, evidenceBytes=${Buffer.byteLength(JSON.stringify(input))}, inputBytes=${bytes(prompt, input)}`);
     await updateJob({ phase: stage === 'synthesis' ? 'synthesizing' : 'assessing', currentProjectId: projectId || null, progress: { ...progress } });
     let response; const requestStarted = Date.now();
-    try { response = await coordinator.provider({ ...selection, prompt, evidence: input, timeout: REVIEW_TIMEOUT_MS, signal: jobSignal, trigger, stage, projectId: projectId || null, attemptNumber, forceText, maxTokens: stage === 'synthesis' ? 16384 : 4096 }); }
+    try { response = await coordinator.provider({ ...selection, prompt, evidence: input, timeout: stage === 'synthesis' ? (settings.synthesisTimeoutMinutes ?? 5) * 60_000 : REVIEW_TIMEOUT_MS, signal: jobSignal, trigger, stage, projectId: projectId || null, attemptNumber, forceText, maxTokens: stage === 'synthesis' ? 16384 : 4096 }); }
     catch (error) {
       if (signal.aborted) error.code = 'SUPERSEDED';
       else if (jobSignal.aborted) error.code = 'REVIEW_TIMEOUT';

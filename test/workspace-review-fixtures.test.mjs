@@ -62,6 +62,32 @@ for (const portfolio of PORTFOLIOS) {
   });
 }
 
+test('synthesis uses the saved timeout without changing project timeouts or invalidating caches', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'ok-workbench-review-timeout-'));
+  const calls = [];
+  try {
+    await mkdir(path.join(root, 'alpha'));
+    await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nCurrent evidence.\n');
+    const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
+      calls.push({ stage: request.stage, timeout: request.timeout });
+      return request.stage === 'project' ? validProjectResponse(request.projectId, request.evidence) : validSynthesisResponse(request.evidence);
+    } });
+    assert.equal((await coordinator.store.settings()).synthesisTimeoutMinutes, 5);
+    await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
+    // Older saved settings also receive the new default.
+    assert.equal((await coordinator.store.settings()).synthesisTimeoutMinutes, 5);
+    await coordinator.run(); await coordinator.running.task;
+    assert.deepEqual(calls, [{ stage: 'project', timeout: 120_000 }, { stage: 'synthesis', timeout: 300_000 }]);
+    const settings = await coordinator.store.settings();
+    await coordinator.store.saveSettings({ ...settings, synthesisTimeoutMinutes: 8 }, settings.revision);
+    calls.length = 0;
+    await coordinator.run(); await coordinator.running.task;
+    assert.equal(calls.length, 0, 'timeout changes do not invalidate cached judgments');
+    await coordinator.run('manual', { force: true }); await coordinator.running.task;
+    assert.deepEqual(calls, [{ stage: 'project', timeout: 120_000 }, { stage: 'synthesis', timeout: 480_000 }]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('the fixture set covers all six required portfolio situations', () => {
   const slugs = new Set(PORTFOLIOS.map(item => item.slug));
   for (const required of ['healthy-but-quiet', 'busy-but-drifting', 'blocked-before-deadline', 'parked', 'stale-unknown', 'competing-priority']) {

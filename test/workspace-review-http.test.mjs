@@ -82,9 +82,16 @@ test('workspace review HTTP GET stays provider-free and both run bodies dispatch
       const invalid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, assessmentModel }) });
       assert.ok([400, 409].includes(invalid.status), invalid.body);
     }
+    for (const synthesisTimeoutMinutes of [0, 16, 2.5, '5', false]) {
+      const invalid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, synthesisTimeoutMinutes }) });
+      assert.equal(invalid.status, 400, invalid.body);
+      assert.match(JSON.parse(invalid.body).error, /Synthesis timeout/);
+    }
+    hybridSettings.synthesisTimeoutMinutes = 8;
     const hybrid = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify(hybridSettings) });
     assert.equal(hybrid.status, 200, hybrid.body);
     let persisted = JSON.parse((await request(serverPort, '/api/workspace-review')).body).settings;
+    assert.equal(persisted.synthesisTimeoutMinutes, 8);
     assert.equal(persisted.assessmentModel.provider, account.id);
     assert.equal(persisted.assessmentModel.model, accountModel);
     const accountSynthesis = await request(serverPort, '/api/workspace-review/settings', { method: 'PUT', headers: auth, body: JSON.stringify({ ...hybridSettings, provider: account.id, model: accountModel, expectedRevision: 1 }) });

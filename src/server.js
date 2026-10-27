@@ -1050,7 +1050,7 @@ async function workspaceReviewProvider({ provider, model, effort, prompt, eviden
   } catch (error) {
     if (outputTooLarge) throw Object.assign(new Error('Review response exceeds byte limit'), { code: 'RESPONSE_TOO_LARGE' });
     if (signal?.aborted) throw Object.assign(new Error('The review was superseded'), { code: 'SUPERSEDED' });
-    if (abort.signal.aborted || error.code === 'REVIEW_TIMEOUT') throw Object.assign(new Error('The review exceeded its 120-second limit'), { code: 'REVIEW_TIMEOUT' });
+    if (abort.signal.aborted || error.code === 'REVIEW_TIMEOUT') throw Object.assign(new Error(`The review exceeded its ${(timeout || 120_000) / 1000}-second limit`), { code: 'REVIEW_TIMEOUT' });
     if (['INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_TRUNCATED', 'RESPONSE_TOO_LARGE', 'SUPERSEDED'].includes(error.code)) throw error;
     throw Object.assign(new Error(error?.message || 'The selected provider is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', forwardAbort); }
@@ -1058,9 +1058,11 @@ async function workspaceReviewProvider({ provider, model, effort, prompt, eviden
 
 async function validateWorkspaceReviewSettings(value, projects) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Invalid review settings'), { code: 'INVALID_REQUEST' });
-  const allowed = new Set(['provider', 'model', 'effort', 'assessmentModel', 'automatic', 'excludedProjects', 'reportableProjects', 'activityTracking', 'timezone', 'dailyAutomaticLimit', 'confirmations', 'expectedRevision']);
+  const allowed = new Set(['provider', 'model', 'effort', 'assessmentModel', 'automatic', 'excludedProjects', 'reportableProjects', 'activityTracking', 'timezone', 'dailyAutomaticLimit', 'synthesisTimeoutMinutes', 'confirmations', 'expectedRevision']);
   if (Object.keys(value).some(key => !allowed.has(key))) throw Object.assign(new Error('Invalid review settings field'), { code: 'INVALID_REQUEST' });
   const ids = new Set(projects); const list = (field) => { const values = value[field] === undefined ? [] : value[field]; if (!Array.isArray(values) || values.some(item => typeof item !== 'string' || !ids.has(item)) || new Set(values).size !== values.length) throw Object.assign(new Error(`Invalid ${field}`), { code: 'INVALID_REQUEST' }); return values; };
+  const synthesisTimeoutMinutes = value.synthesisTimeoutMinutes ?? 5;
+  if (!Number.isInteger(synthesisTimeoutMinutes) || synthesisTimeoutMinutes < 1 || synthesisTimeoutMinutes > 15) throw Object.assign(new Error('Synthesis timeout must be 1 to 15 whole minutes'), { code: 'INVALID_REQUEST' });
   const zone = typeof value.timezone === 'string' ? value.timezone : 'UTC'; try { new Intl.DateTimeFormat('en-IE', { timeZone: zone }); } catch { throw Object.assign(new Error('Invalid review time zone'), { code: 'INVALID_REQUEST' }); }
   const limit = Number(value.dailyAutomaticLimit ?? 6); if (!Number.isInteger(limit) || limit < 1 || limit > 24) throw Object.assign(new Error('Daily automatic limit must be 1 to 24'), { code: 'INVALID_REQUEST' });
   const confirmations = value.confirmations || {}; if (!confirmations || typeof confirmations !== 'object' || Array.isArray(confirmations) || Object.keys(confirmations).some(key => !['meteredAutomatic', 'belowRecommendedModel'].includes(key)) || Object.values(confirmations).some(flag => typeof flag !== 'boolean')) throw Object.assign(new Error('Invalid review confirmations'), { code: 'INVALID_REQUEST' });
@@ -1087,7 +1089,7 @@ async function validateWorkspaceReviewSettings(value, projects) {
     if (!synthesis) throw Object.assign(new Error('Hybrid reviews require a synthesis model for workspace priorities and assessment retries'), { code: 'MODEL_UNSUITABLE' });
     assessmentModel = selectModel(selection, 'assessment');
   }
-  return { provider: value.provider || null, model: value.model || null, effort: synthesis?.effort || null, assessmentModel, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit };
+  return { provider: value.provider || null, model: value.model || null, effort: synthesis?.effort || null, assessmentModel, automatic: value.automatic === true, confirmations: { meteredAutomatic: confirmations.meteredAutomatic === true, belowRecommendedModel: confirmations.belowRecommendedModel === true }, excludedProjects: list('excludedProjects'), activityTracking: value.activityTracking !== false, timezone: zone, dailyAutomaticLimit: limit, synthesisTimeoutMinutes };
 }
 function validateWorkspaceReviewControl(value, projects) {
   if (!value || typeof value !== 'object' || typeof value.requestId !== 'string' || !/^[0-9a-f-]{36}$/i.test(value.requestId) || !Number.isInteger(value.expectedRevision) || !value.operation || typeof value.operation !== 'object') throw Object.assign(new Error('Invalid review control request'), { code: 'INVALID_REQUEST' });
