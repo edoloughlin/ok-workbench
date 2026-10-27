@@ -57,6 +57,11 @@ test('external-link approval grants only the approved browser alias', { skip: !p
   const port = await availablePort(); let assetPort = await availablePort(); while (assetPort === port) assetPort = await availablePort(); let child;
   try {
     const project = path.join(workspace, 'alpha'); await mkdir(project); await mkdir(path.join(project, 'notes')); await writeFile(path.join(workspace, 'index.md'), '# Workspace\n'); await writeFile(path.join(project, 'index.md'), '# Alpha\n'); await writeFile(path.join(outside, 'guide.md'), '# External guide\n'); await symlink(outside, path.join(project, 'notes', 'reference'));
+    await mkdir(path.join(outside, 'src'));
+    await mkdir(path.join(outside, 'empty'));
+    await writeFile(path.join(outside, 'src', 'core.clj'), '(ns core)\n');
+    await writeFile(path.join(outside, '.env'), 'SECRET=hidden');
+    await symlink(path.join(outside, 'guide.md'), path.join(outside, 'nested-link.md'));
     child = await startWorkbench({ workspace, state, port, assetPort });
     const page = await request({ port, host: `localhost:${port}`, pathname: '/workspace/' }); const csrf = page.body.toString().match(/name="ok-workbench-csrf" content="([^"]+)"/)?.[1]; assert.ok(csrf);
     const discovered = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha/' })).body);
@@ -69,9 +74,23 @@ test('external-link approval grants only the approved browser alias', { skip: !p
     const approvedNavigation = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha/notes/' })).body);
     const approvedNotes = approvedNavigation.tree.find(item => item.path === '/workspace/alpha/notes'); const approvedLink = approvedNotes?.children.find(item => item.path === '/workspace/alpha/notes/reference'); assert.equal(approvedLink?.status, 'approved');
     const document = await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` }); assert.equal(document.status, 200); const body = JSON.parse(document.body); assert.equal(body.text, '# External guide\n'); assert.equal(body.path, linkPath); assert.equal(body.external, true); assert.doesNotMatch(JSON.stringify(body), new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    const directoryPath = '/workspace/alpha/notes/reference';
+    const listing = await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}` });
+    assert.equal(listing.status, 200);
+    const directory = JSON.parse(listing.body);
+    assert.equal(directory.kind, 'directory'); assert.equal(directory.readOnly, true);
+    assert.deepEqual(directory.entries.map(entry => entry.name), ['empty', 'src', 'guide.md']);
+    assert.equal(directory.entries.find(entry => entry.name === 'src').path, `${directoryPath}/src`);
+    assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/project?path=${directoryPath}` })).status, 200);
+    const nested = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}/src` })).body);
+    assert.deepEqual(nested.entries, [{ name: 'core.clj', path: `${directoryPath}/src/core.clj`, kind: 'file' }]);
+    const empty = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}/empty` })).body);
+    assert.deepEqual(empty.entries, []);
+    for (const denied of ['.env', 'nested-link.md']) assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}/${denied}` })).status, 404);
     const asset = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: linkPath }); assert.equal(asset.status, 200); assert.equal(asset.body.toString(), '# External guide\n');
     const revoked = await request({ port, host: `localhost:${port}`, pathname: `/api/projects/alpha/external-links/${JSON.parse(approved.body).id}`, method: 'DELETE', headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(revoked.status, 204);
     assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` })).status, 404);
+    assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}` })).status, 404);
   } finally { await stop(child); await rm(workspace, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 });
 

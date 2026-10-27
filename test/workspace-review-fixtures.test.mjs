@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm as remove, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 
+// Retry temporary-directory cleanup while detached expiry workers acquire locks.
+const rm = (file, options) => remove(file, { maxRetries: 5, retryDelay: 20, ...options });
 const require = createRequire(import.meta.url);
 const { WorkspaceReviewCoordinator, collectEvidence } = require('../src/workspace-review.js');
 const { validateReview } = require('../src/workspace-review-schema.js');
@@ -16,7 +18,7 @@ function validProjectResponse(projectId, evidence) {
 }
 function validSynthesisResponse(evidence, headline = 'Current workspace review') {
   const projects = evidence.projects; const sourceId = projects[0]?.sources[0]?.id;
-  return JSON.stringify({ headline, summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: sourceId ? [sourceId] : [], changes: [], priorities: projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Review its current evidence.' })), attention: [], question: null });
+  return JSON.stringify({ headline, summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: sourceId ? [sourceId] : [], changes: [], priorities: projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Review its current evidence.' })), attention: [], question: null });
 }
 
 // Fixture-portfolio acceptance tests (spec: "Include fixture portfolios for
@@ -45,7 +47,7 @@ for (const portfolio of PORTFOLIOS) {
             const { priority, rank, priorityReason, ...assessment } = item;
             return JSON.stringify({ assessment, attentionCandidates: response.attention.filter(item => item.projectId === projectId) });
           }
-          return JSON.stringify({ headline: response.headline, summary: response.summary, focusProjectId: response.focusProjectId, evidenceIds: response.evidenceIds, changes: response.changes, priorities: response.projects.map(({ projectId, priority, rank, priorityReason }) => ({ projectId, priority, rank, priorityReason })), attention: response.attention, question: response.question });
+          return JSON.stringify({ headline: response.headline, summary: response.summary, focusProjectId: response.focusProjectId, evidenceIds: response.evidenceIds, changes: response.changes, priorities: response.projects.toSorted((a, b) => a.rank - b.rank).map(({ projectId, priority, priorityReason }) => ({ projectId, priority, priorityReason })), attention: response.attention, question: response.question });
         }
       });
       await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
@@ -78,7 +80,7 @@ test('project assessments survive restart, reuse unchanged inputs, and invalidat
     }
     const ids = evidence.projects.map(item => item.projectId);
     const sourceId = evidence.projects[0].sources[0].id;
-    return JSON.stringify({ headline: 'Workspace review', summary: 'Projects are progressing.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: ids.map((id, rank) => ({ projectId: id, priority: 'next', rank: rank + 1, priorityReason: 'Current project.' })), attention: [], question: null });
+    return JSON.stringify({ headline: 'Workspace review', summary: 'Projects are progressing.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: ids.map(id => ({ projectId: id, priority: 'next', priorityReason: 'Current project.' })), attention: [], question: null });
   };
   const build = () => new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider });
   try {
@@ -149,7 +151,7 @@ test('a synthesis-only control change during a project call preserves that valid
         return JSON.stringify({ assessment: { projectId, confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', outcome: `Review ${projectId}`, assessment: 'Evidence is available.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] });
       }
       const sourceId = evidence.projects[0].sources[0].id;
-      return JSON.stringify({ headline: 'Review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'next', rank: rank + 1, priorityReason: 'Current evidence.' })), attention: [], question: null });
+      return JSON.stringify({ headline: 'Review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'next', priorityReason: 'Current evidence.' })), attention: [], question: null });
     }
   });
   try {
@@ -176,7 +178,7 @@ test('the 20-project ceiling rotates fairly and discloses omitted rows without o
         return JSON.stringify({ assessment: { projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: `Unknown ${projectId}`, assessment: 'Evidence requires review.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Review weekly.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] });
       }
       const first = evidence.projects[0]; const sourceId = first.sources[0].id;
-      return JSON.stringify({ headline: 'Portfolio review', summary: 'Some projects need review.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Evidence is limited.' })), attention: [], question: null });
+      return JSON.stringify({ headline: 'Portfolio review', summary: 'Some projects need review.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Evidence is limited.' })), attention: [], question: null });
     }
   });
   try {
@@ -201,7 +203,7 @@ test('manual calls do not consume the rolling automatic call allowance', async (
   const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, now: () => new Date(now), provider: async ({ stage, projectId, evidence, trigger }) => {
     calls.push({ stage, projectId, trigger });
     if (stage === 'project') { const sourceId = evidence.sources[0].id; return JSON.stringify({ assessment: { projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: 'Review alpha', assessment: 'Evidence is available.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] }); }
-    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'Evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Current evidence.' })), attention: [], question: null });
+    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'Evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Current evidence.' })), attention: [], question: null });
   } });
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nEvidence.\n');
@@ -223,7 +225,7 @@ test('cadence overrides recompute from the original assessment without refreshin
   const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, now: () => new Date(now), provider: async ({ stage, projectId, evidence }) => {
     calls.push({ stage, projectId });
     if (stage === 'project') { const sourceId = evidence.sources[0].id; return JSON.stringify({ assessment: { projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: 'Review alpha', assessment: 'Evidence needs a steady review.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly evidence review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] }); }
-    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'Evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Evidence is limited.' })), attention: [], question: null });
+    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'Evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Evidence is limited.' })), attention: [], question: null });
   } });
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nEvidence.\n');
@@ -250,7 +252,7 @@ test('deadline refreshes follow the saved timezone and run at most once per loca
       const sourceId = evidence.sources.find(source => source.path === 'status.md').id;
       return JSON.stringify({ assessment: { projectId, confidence: 'medium', trajectory: 'watch', lifecycle: 'active', outcome: 'Prepare the review.', assessment: 'A documented deadline is approaching.', nextAction: null, blocker: null, cadence: 'monthly', cadenceReason: 'Deadline-aware review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [{ projectId, kind: 'deadline', topic: 'Status', urgency: 'soon', title: 'Review deadline', observation: 'Status records a date.', inference: 'The review needs attention before then.', action: 'Review the checklist.', firstStep: 'Open status.md.', evidenceIds: [sourceId], dueDate: '2026-10-01', dueDateEvidence: { sourceId, excerpt: 'Due 2026-10-01.' }, claimEvidence: [] }] });
     }
-    const item = evidence.projects[0]; return JSON.stringify({ headline: 'Review', summary: 'A date is documented.', focusProjectId: null, evidenceIds: [item.sources[0].id], changes: [], priorities: evidence.projects.map((project, rank) => ({ projectId: project.projectId, priority: 'next', rank: rank + 1, priorityReason: 'Review its evidence.' })), attention: [], question: null });
+    const item = evidence.projects[0]; return JSON.stringify({ headline: 'Review', summary: 'A date is documented.', focusProjectId: null, evidenceIds: [item.sources[0].id], changes: [], priorities: evidence.projects.map(project => ({ projectId: project.projectId, priority: 'next', priorityReason: 'Review its evidence.' })), attention: [], question: null });
   } });
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nDue 2026-10-01.\n');
@@ -278,7 +280,7 @@ test('project and synthesis failures preserve independently successful assessmen
     }
     if (failSynthesis) return '{}';
     const ids = evidence.projects.map(item => item.projectId); const sourceId = evidence.projects.find(item => item.projectId === 'b').sources[0].id;
-    return JSON.stringify({ headline: 'Latest portfolio briefing', summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: ids.map((id, rank) => ({ projectId: id, priority: 'maintain', rank: rank + 1, priorityReason: 'Review its evidence.' })), attention: [], question: null });
+    return JSON.stringify({ headline: 'Latest portfolio briefing', summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: ids.map(id => ({ projectId: id, priority: 'maintain', priorityReason: 'Review its evidence.' })), attention: [], question: null });
   } });
   try {
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
@@ -293,7 +295,7 @@ test('project and synthesis failures preserve independently successful assessmen
     const mixed = await coordinator.state();
     assert.equal(mixed.review.projects.find(item => item.projectId === 'a').assessmentState, 'stale');
     assert.equal(mixed.review.projects.find(item => item.projectId === 'a').assessedAt, originalA.assessedAt);
-    assert.equal(mixed.review.partial, true); assert.equal(mixed.review.projectErrors.find(item => item.projectId === 'a').validationDiagnostic, 'unsupported_value');
+    assert.equal(mixed.review.partial, true); assert.equal(mixed.review.projectErrors.find(item => item.projectId === 'a').validationDiagnostic, 'schema_mismatch');
 
     for (const id of ['a', 'b', 'c']) await writeFile(path.join(root, id, 'status.md'), `# ${id}\nUpdated evidence two.\n`);
     calls.length = 0; failA = false; failSynthesis = true; const beforeSynthesisFailure = await coordinator.store.latest();
@@ -317,7 +319,7 @@ test('automatic fan-out reserves synthesis, honors six rolling calls, and rotate
     calls.push({ stage, projectId, trigger, attemptNumber });
     dispatches.push({ stage, projectId, promptBytes: Buffer.byteLength(prompt), evidenceBytes: Buffer.byteLength(JSON.stringify(evidence)), attemptNumber, maxTokens });
     if (stage === 'project') { const sourceId = evidence.sources[0].id; return JSON.stringify({ assessment: { projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: `Review ${projectId}`, assessment: 'Current evidence is sparse.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] }); }
-    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Partial review', summary: 'Five projects were refreshed within the call allowance.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Review its evidence.' })), attention: [], question: null });
+    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Partial review', summary: 'Five projects were refreshed within the call allowance.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Review its evidence.' })), attention: [], question: null });
   } });
   try {
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer', automatic: true, dailyAutomaticLimit: 6 }, 0);
@@ -345,7 +347,7 @@ test('priority expiry and snooze expiry are projected immediately and scheduled 
   const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, now: () => new Date(now), provider: async ({ stage, projectId, evidence, trigger }) => {
     calls.push({ stage, projectId, trigger });
     if (stage === 'project') { const sourceId = evidence.sources[0].id; return JSON.stringify({ assessment: { projectId, confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', outcome: 'Complete the draft.', assessment: 'Current evidence names a draft.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] }); }
-    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'A documented draft remains.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'next', rank: rank + 1, priorityReason: 'The draft needs attention.' })), attention: [{ projectId: 'alpha', kind: 'update', topic: 'Status', urgency: 'soon', title: 'Update the draft', observation: 'Status names a draft.', inference: 'A short update would clarify its state.', action: 'Record the draft status.', firstStep: 'Open status.md.', evidenceIds: [sourceId], dueDate: null, dueDateEvidence: null, claimEvidence: [] }], question: null });
+    const sourceId = evidence.projects[0].sources[0].id; return JSON.stringify({ headline: 'Review', summary: 'A documented draft remains.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: evidence.projects.map(item => ({ projectId: item.projectId, priority: 'next', priorityReason: 'The draft needs attention.' })), attention: [{ projectId: 'alpha', kind: 'update', topic: 'Status', urgency: 'soon', title: 'Update the draft', observation: 'Status names a draft.', inference: 'A short update would clarify its state.', action: 'Record the draft status.', firstStep: 'Open status.md.', evidenceIds: [sourceId], dueDate: null, dueDateEvidence: null, claimEvidence: [] }], question: null });
   } });
   try {
     await mkdir(path.join(root, 'alpha')); await writeFile(path.join(root, 'alpha', 'status.md'), '# Alpha\nDraft remains in progress.\n');
@@ -425,7 +427,7 @@ test('one remaining automatic attempt runs synthesis with fallbacks and no proje
     calls.push({ stage: request.stage, projectId: request.projectId });
     if (request.stage === 'project') return validProjectResponse(request.projectId, request.evidence);
     const sourceId = request.evidence.workspace[0].id;
-    return JSON.stringify({ headline: 'Insufficient current project evidence', summary: 'No project assessment could be refreshed within the remaining call budget.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: request.evidence.projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Current evidence is unavailable.' })), attention: [], question: null });
+    return JSON.stringify({ headline: 'Insufficient current project evidence', summary: 'No project assessment could be refreshed within the remaining call budget.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: request.evidence.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Current evidence is unavailable.' })), attention: [], question: null });
   } });
   try {
     await writeFile(path.join(root, 'index.md'), '# Workspace context\n');
@@ -469,7 +471,7 @@ test('allocation and effective feedback changes invalidate synthesis only', asyn
       return JSON.stringify({ assessment: { projectId: request.projectId, confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', outcome: `Review ${request.projectId}`, assessment: 'Current evidence is available.', nextAction: null, blocker: null, cadence: 'monthly', cadenceReason: 'Monthly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: deadline ? [{ projectId: request.projectId, kind: 'deadline', topic: 'Status', urgency: 'soon', title: 'Prepare for the due date', observation: 'The status records a date.', inference: 'A review before the date would help.', action: 'Review the checklist.', firstStep: 'Open status.md.', evidenceIds: [sourceId], dueDate: '2026-09-30', dueDateEvidence: { sourceId, excerpt: 'Due 2026-09-30.' }, claimEvidence: [] }] : [] });
     }
     const projects = request.evidence.projects; const beta = projects.find(item => item.projectId === 'beta'); const source = beta?.sources.find(item => item.path === 'status.md');
-    return JSON.stringify({ headline: 'Portfolio review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: source ? [source.id] : [], changes: [], priorities: projects.map((item, rank) => ({ projectId: item.projectId, priority: item.projectId === 'beta' ? 'next' : 'maintain', rank: rank + 1, priorityReason: 'Review current evidence.' })), attention: source ? [{ projectId: 'beta', kind: 'deadline', topic: 'Status', urgency: 'soon', title: 'Prepare for the due date', observation: 'The status records a date.', inference: 'A review before the date would help.', action: 'Review the checklist.', firstStep: 'Open status.md.', evidenceIds: [source.id], dueDate: '2026-09-30', dueDateEvidence: { sourceId: source.id, excerpt: 'Due 2026-09-30.' }, claimEvidence: [] }] : [], question: null });
+    return JSON.stringify({ headline: 'Portfolio review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: source ? [source.id] : [], changes: [], priorities: projects.map(item => ({ projectId: item.projectId, priority: item.projectId === 'beta' ? 'next' : 'maintain', priorityReason: 'Review current evidence.' })), attention: source ? [{ projectId: 'beta', kind: 'deadline', topic: 'Status', urgency: 'soon', title: 'Prepare for the due date', observation: 'The status records a date.', inference: 'A review before the date would help.', action: 'Review the checklist.', firstStep: 'Open status.md.', evidenceIds: [source.id], dueDate: '2026-09-30', dueDateEvidence: { sourceId: source.id, excerpt: 'Due 2026-09-30.' }, claimEvidence: [] }] : [], question: null });
   } });
   try {
     for (const id of ['alpha', 'beta']) { await mkdir(path.join(root, id)); await writeFile(path.join(root, id, 'status.md'), id === 'beta' ? '# Beta\nDue 2026-09-30.\n' : '# Alpha\nCurrent evidence.\n'); }
@@ -588,7 +590,7 @@ for (const invalid of [false, 'json', 'schema']) {
         ...(invalid ? [{ stage: 'project', provider: 'openai', model: 'synthesis', effort: 'high' }] : []),
         { stage: 'synthesis', provider: 'openai', model: 'synthesis', effort: 'high' }
       ]);
-      if (invalid) assert.deepEqual(calls[1].evidence, calls[0].evidence, 'retry sends original evidence without the rejected candidate');
+      if (invalid) { const { validationFeedback, ...original } = calls[1].evidence; assert.deepEqual(original, calls[0].evidence, 'retry sends original evidence without the rejected candidate'); assert.ok(validationFeedback.issues.length); }
       const cached = await coordinator.store.projectAssessment('alpha');
       assert.equal(cached.provider, invalid ? 'openai' : 'openai-codex');
       assert.equal(cached.assessmentFallback, Boolean(invalid));

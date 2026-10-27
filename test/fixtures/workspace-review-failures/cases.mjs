@@ -63,7 +63,7 @@ const synthesisReference = {
   headline: 'Validate the delivery kit.', summary: 'M1 is pending. The archive catalog assessment is stale and needs a refresh before acting on its old deadline.',
   focusProjectId: 'delivery-kit', evidenceIds: ['delivery-kit-status'], changes: [],
   priorities: synthesisEvidence.projects.map((project, index) => ({
-    projectId: project.projectId, priority: index === 1 ? 'focus' : 'maintain', rank: index === 1 ? 1 : index === 0 ? 2 : index + 1,
+    projectId: project.projectId, priority: index === 1 ? 'focus' : 'maintain',
     priorityReason: index === 0 ? 'Stale context; obtain a current assessment.' : index === 1 ? 'The current source records pending validation.' : 'No open blocker in current evidence.'
   })),
   attention: clone(projectReference.attentionCandidates), question: null
@@ -86,7 +86,7 @@ staleCorrection.attention = [attention('archive-catalog', 'archive-catalog-statu
 const chainedStep = clone(projectReference);
 chainedStep.attentionCandidates[0].firstStep = 'Run M1 and record its outcome in review.md.';
 const longOutcome = clone(projectReference);
-// Preserve the observed length (244), just beyond the validator's 240 limit.
+// Preserve the observed length (244). It now exceeds a display target, not a hard limit.
 longOutcome.assessment.outcome = ('Validate the delivery kit against the acceptance checklist, document repeatable results, resolve outstanding compatibility questions, record the final configuration, and provide a concise handover guide for the trial team. Additional requirements.').slice(0, 244);
 const malformed = JSON.stringify(projectReference).replace(/\[\]\}\]\}$/, '[]}}]}');
 const recoveredTail = `${JSON.stringify(projectReference)}}`;
@@ -110,7 +110,7 @@ export const FAILURE_CASES = [
     description: 'An urgent-looking cached project attracts focus despite its stale state; the input still includes five current projects.',
     promptTarget: 'Make eligibility for focus and the current project IDs explicit before ranking urgency.',
     input: synthesisEvidence, failedResponse: JSON.stringify(staleFocus), referenceResponse: JSON.stringify(synthesisReference),
-    expectedFailure: { message: 'focus must use a current project assessment' }, criteria: criteria.synthesis
+    expectedFailure: { issueCode: 'FOCUS_NOT_CURRENT' }, criteria: criteria.synthesis
   },
   {
     id: 'correction-retains-stale-citations', stage: 'synthesis',
@@ -119,7 +119,7 @@ export const FAILURE_CASES = [
     promptTarget: 'Recheck every output citation after a focus correction; changing only focusProjectId does not repair the review.',
     input: { ...clone(synthesisEvidence), priorCandidate: JSON.stringify(staleFocus), validationFeedback: 'focus must use a current project assessment' },
     failedResponse: JSON.stringify(staleCorrection), referenceResponse: JSON.stringify(synthesisReference),
-    expectedFailure: { message: 'synthesis cannot cite stale project evidence' }, criteria: criteria.synthesis
+    expectedFailure: { issueCode: 'STALE_EVIDENCE' }, criteria: criteria.synthesis
   },
   {
     id: 'first-step-chains-execution-and-recording', stage: 'project',
@@ -127,16 +127,16 @@ export const FAILURE_CASES = [
     description: 'A useful recommendation fails because the first step includes running a check and recording the result.',
     promptTarget: 'Keep one visible action in firstStep and follow-up work in action.',
     input: projectEvidence, failedResponse: JSON.stringify(chainedStep), referenceResponse: JSON.stringify(projectReference),
-    expectedFailure: { message: 'firstStep must be one concrete, startable action' }, criteria: criteria.project
+    expectedFailure: { issueCode: 'ACTION' }, criteria: criteria.project
   },
   {
     id: 'outcome-exceeds-field-budget', stage: 'project',
     provenance: provenance(1, 'unsupported_value'),
-    description: 'A 244-character outcome exceeds the 240-character accepted limit; verbose source requirements tempt verbatim copying.',
+    description: 'A 244-character outcome exceeds the display target. Accept it as valid production output while grading concision separately.',
     promptTarget: 'Summarise the desired outcome within the 200-character target instead of copying its full requirements.',
     input: projectInput(`# Status\nOutcome: ${longOutcome.assessment.outcome}\nM1 validation is pending. Record the result in review.md.\n`),
     failedResponse: JSON.stringify(longOutcome), referenceResponse: JSON.stringify(projectReference),
-    expectedFailure: { message: 'outcome must be 1 to 240 plain-text characters' }, criteria: criteria.project
+    expectedFailure: { presentationOnly: true }, criteria: criteria.project
   },
   {
     id: 'malformed-nested-array-closure', stage: 'project',

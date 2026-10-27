@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { NARRATIVE_FIELDS, hardLimit, inspectOutput, canonicalCandidate, outputError, issue } = require('./workspace-review-output.js');
 
 const PRIORITIES = new Set(['focus', 'next', 'maintain', 'parked']);
 const TRAJECTORIES = new Set(['on_course', 'watch', 'at_risk', 'drifting', 'unknown']);
@@ -18,8 +19,9 @@ function plain(value, name, max, { nullable = false, optional = false } = {}) {
   if (value === null && nullable) return null;
   if (typeof value !== 'string') throw error(`${name} must be a string`);
   const text = value.trim();
-  const acceptedMax = Math.floor(max * 1.2);
-  if (!text || text.length > acceptedMax || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw error(`${name} must be 1 to ${acceptedMax} plain-text characters (target ${max})`);
+  const acceptedMax = Object.hasOwn(NARRATIVE_FIELDS, name) ? hardLimit(NARRATIVE_FIELDS[name]) : Math.floor(max * 1.2);
+  const length = Object.hasOwn(NARRATIVE_FIELDS, name) ? [...text].length : text.length;
+  if (!text || length > acceptedMax || /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(text)) throw error(`${name} must be 1 to ${acceptedMax} plain-text characters (target ${max})`);
   return text;
 }
 // Verbs that, directly after "and", mark a second chained action. A bare
@@ -141,6 +143,15 @@ function validateProjectResult(raw, { project, sources }) {
   const attentionCandidates = candidates.map(candidate => validateAttentionItem(candidate, { projectIds, sourceMap, known, allowedKinds }));
   return { assessment, attentionCandidates: attentionCandidates.map(({ id, evidenceSignature, ...candidate }) => candidate) };
 }
+// One definition for model guidance and both validation boundaries. A priority
+// override never makes a stale assessment current. Generated gap facts remain
+// citable for updates/clarifications, but the existing quote rules still apply.
+function synthesisEligibility({ projects, sources, currentProjectIds = new Set(projects.map(project => project.id)) }) {
+  return {
+    focusProjectIds: projects.filter(project => currentProjectIds.has(project.id)).map(project => project.id),
+    evidenceIds: [...new Set(sources.filter(source => !source.projectId || source.generated || currentProjectIds.has(source.projectId)).map(source => source.id))]
+  };
+}
 function validateWorkspaceSynthesis(raw, { projects, sources, originalSources = sources, currentProjectIds = new Set(projects.map(project => project.id)) }) {
   object(raw, 'workspace synthesis');
   exactKeys(raw, new Set(['headline', 'summary', 'focusProjectId', 'evidenceIds', 'changes', 'priorities', 'attention', 'question']), 'workspace synthesis');
@@ -170,8 +181,9 @@ function validateWorkspaceSynthesis(raw, { projects, sources, originalSources = 
     if (item.claimEvidence?.some(claim => !originalMap.get(claim.sourceId)?.excerpt?.includes(claim.excerpt))) throw error('synthesis quote must also match the retained original source snapshot');
     if (item.dueDateEvidence && !originalMap.get(item.dueDateEvidence.sourceId)?.excerpt?.includes(item.dueDateEvidence.excerpt)) throw error('synthesis date quote must also match the retained original source snapshot');
   }
-  if (validated.focusProjectId && !currentProjectIds.has(validated.focusProjectId)) throw error('focus must use a current project assessment');
-  const currentSource = id => { const source = sources.find(item => item.id === id); return !source?.projectId || source.generated || currentProjectIds.has(source.projectId); };
+  const eligibility = synthesisEligibility({ projects, sources, currentProjectIds });
+  if (validated.focusProjectId && !eligibility.focusProjectIds.includes(validated.focusProjectId)) throw error('focus must use a current project assessment');
+  const currentSource = id => eligibility.evidenceIds.includes(id);
   if (validated.evidenceIds.some(id => !currentSource(id))) throw error('synthesis cannot cite stale project evidence');
   for (const item of [...validated.changes, ...validated.attention, ...(validated.question ? [validated.question] : [])]) {
     if (item.evidenceIds.some(id => !currentSource(id))) throw error('synthesis cannot cite stale project evidence');
@@ -179,6 +191,52 @@ function validateWorkspaceSynthesis(raw, { projects, sources, originalSources = 
     if (item.dueDateEvidence && !currentSource(item.dueDateEvidence.sourceId)) throw error('synthesis cannot use a stale project date');
   }
   return validated;
+}
+// Collect independent semantic failures without ever echoing rejected text.
+function validateStageOutput(stage, raw, context) {
+  const inspected = inspectOutput(stage, raw);
+  if (!inspected.accepted) { const error = outputError(inspected.issues); error.validationFeedback.truncated = inspected.truncated; throw error; }
+  const candidate = canonicalCandidate(stage, raw); const issues = [];
+  const eligibility = stage === 'synthesis' ? synthesisEligibility(context) : null;
+  const citableIds = eligibility ? new Set(eligibility.evidenceIds) : null;
+  const check = (path, validate) => { try { validate(); } catch (error) { const message = String(error.message); const code = /firstStep/.test(message) ? 'ACTION' : /source|evidence|quote|excerpt|lifecycle|date/i.test(message) ? 'EVIDENCE' : /project|priorit|rank|focus/i.test(message) ? 'MEMBERSHIP' : 'SCHEMA'; issues.push(issue(path, code)); } };
+  if (stage === 'project') {
+    check('/assessment', () => validateProjectAssessment(candidate.assessment, context));
+    const sources = context.sources.filter(source => source.projectId === context.project.id); const sourceMap = new Map(sources.map(source => [source.id, source]));
+    candidate.attentionCandidates.forEach((item, index) => check(`/attentionCandidates/${index}`, () => validateAttentionItem(item, { projectIds: new Set([context.project.id]), sourceMap, known: new Set(sourceMap.keys()), allowedKinds: new Set([...ISSUE_KINDS].filter(kind => kind !== 'allocation')) })));
+  } else {
+    const projectIds = new Set(context.projects.map(project => project.id)); const seen = new Set();
+    if (candidate.focusProjectId !== null) {
+      if (!projectIds.has(candidate.focusProjectId)) issues.push(issue('/focusProjectId', 'MEMBERSHIP'));
+      else if (!eligibility.focusProjectIds.includes(candidate.focusProjectId)) issues.push(issue('/focusProjectId', 'FOCUS_NOT_CURRENT'));
+    }
+    candidate.priorities.forEach((item, index) => { if (!projectIds.has(item.projectId) || seen.has(item.projectId)) issues.push(issue(`/priorities/${index}/projectId`, 'MEMBERSHIP')); seen.add(item.projectId); });
+    if (seen.size !== projectIds.size || candidate.priorities.length !== projectIds.size) issues.push(issue('/priorities', 'MEMBERSHIP'));
+    const sourceMap = new Map(context.sources.map(source => [source.id, source]));
+    candidate.attention.forEach((item, index) => check(`/attention/${index}`, () => validateAttentionItem(item, { projectIds, sourceMap, known: new Set(sourceMap.keys()), allowGeneratedGap: true })));
+  }
+  // Check all evidence references and quotes independently of sibling validity.
+  const sources = new Map(context.sources.map(source => [source.id, source]));
+  const walk = (value, path, projectId = null) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach((item, index) => walk(item, `${path}/${index}`, projectId)); return; }
+    const owner = typeof value.projectId === 'string' ? value.projectId : projectId;
+    if (typeof value.firstStep === 'string') check(`${path}/firstStep`, () => firstStep(value.firstStep));
+    if (value.dueDate != null) check(`${path}/dueDate`, () => validDate(value.dueDate, 'dueDate'));
+    if (Object.hasOwn(value, 'dueDate') && ((value.dueDate === null) !== (value.dueDateEvidence === null))) issues.push(issue(`${path}/dueDateEvidence`, 'EVIDENCE'));
+    if (value.dueDate && value.dueDateEvidence && !value.dueDateEvidence.excerpt.includes(value.dueDate)) issues.push(issue(`${path}/dueDateEvidence`, 'EVIDENCE'));
+    if (value.lifecycle && !['active', 'unknown'].includes(value.lifecycle) && !value.claimEvidence.some(claim => claim.claim === value.lifecycle)) issues.push(issue(`${path}/claimEvidence`, 'EVIDENCE'));
+    if (Array.isArray(value.claimEvidence)) value.claimEvidence.forEach((claim, index) => { if (!value.evidenceIds?.includes(claim.sourceId)) issues.push(issue(`${path}/claimEvidence/${index}/sourceId`, 'EVIDENCE')); });
+    if (Array.isArray(value.evidenceIds)) { const seen = new Set(); value.evidenceIds.forEach((id, index) => { const source = sources.get(id); if (!source || seen.has(id) || (owner && source.projectId && source.projectId !== owner)) issues.push(issue(`${path}/evidenceIds/${index}`, 'UNKNOWN_EVIDENCE_ID')); if (source && citableIds && !citableIds.has(id)) issues.push(issue(`${path}/evidenceIds/${index}`, 'STALE_EVIDENCE')); seen.add(id); }); }
+    if (typeof value.sourceId === 'string' && typeof value.excerpt === 'string') { const source = sources.get(value.sourceId); if (!source || source.generated || !source.excerpt?.includes(value.excerpt.trim()) || (owner && source.projectId !== owner)) issues.push(issue(path, 'EVIDENCE')); if (source && citableIds && !citableIds.has(value.sourceId)) issues.push(issue(`${path}/sourceId`, 'STALE_EVIDENCE')); }
+    for (const [key, item] of Object.entries(value)) walk(item, `${path}/${key}`, owner);
+  };
+  walk(candidate, '');
+  if (issues.length) throw outputError(issues, issues.some(item => ['FOCUS_NOT_CURRENT', 'STALE_EVIDENCE'].includes(item.code)) ? 'stale_assessment' : issues.some(item => item.code === 'EVIDENCE' || item.code === 'UNKNOWN_EVIDENCE_ID') ? 'evidence_reference' : issues.some(item => item.code === 'ACTION') ? 'first_step' : 'schema_mismatch');
+  let value;
+  try { value = stage === 'project' ? validateProjectResult(candidate, context) : validateWorkspaceSynthesis(candidate, context); }
+  catch (error) { const code = /source|quote|evidence|date|lifecycle/i.test(error.message) ? 'EVIDENCE' : 'SCHEMA'; throw outputError([issue('', code)], code === 'EVIDENCE' ? 'evidence_reference' : 'schema_mismatch'); }
+  return { value, warnings: inspected.warnings };
 }
 function effectivePriority(assessment, controls, now = Date.now()) { const override = controls?.priorityOverrides?.[assessment.projectId]; if (override && (!override.expiresAt || Date.parse(override.expiresAt) > now)) return { priority: override.tier, source: 'user', override }; return { priority: assessment.priority, source: 'inferred', override: null }; }
 function runway(dueDate, now = new Date(), timeZone = 'UTC') {
@@ -203,4 +261,4 @@ function publicReview(record, controls, { now = new Date(), timeZone = 'UTC' } =
   return { ...record, projects, attention, deferred };
 }
 
-module.exports = { PRIORITIES, TRAJECTORIES, LIFECYCLES, CLAIM_KINDS, URGENCIES, CADENCES, ISSUE_KINDS, priorityOrder, urgencyOrder, hash, canonicalJSON, stableIssueId, validateReview, validateProjectAssessment, validateProjectResult, validateWorkspaceSynthesis, effectivePriority, runway, publicReview, error };
+module.exports = { PRIORITIES, TRAJECTORIES, LIFECYCLES, CLAIM_KINDS, URGENCIES, CADENCES, ISSUE_KINDS, priorityOrder, urgencyOrder, hash, canonicalJSON, stableIssueId, validateReview, validateProjectAssessment, validateProjectResult, validateWorkspaceSynthesis, validateStageOutput, synthesisEligibility, effectivePriority, runway, publicReview, error };

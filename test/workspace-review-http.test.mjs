@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm as remove, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import test from 'node:test';
 
+const rm = (file, options) => remove(file, { maxRetries: 5, retryDelay: 20, ...options });
 const root = path.resolve(import.meta.dirname, '..');
 async function port() { const server = http.createServer(); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); const value = server.address().port; await new Promise(resolve => server.close(resolve)); return value; }
 function request(port, pathname, { method = 'GET', body, headers = {} } = {}) { return new Promise((resolve, reject) => { const req = http.request({ hostname: '127.0.0.1', port, path: pathname, method, headers: { Host: `localhost:${port}`, ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}), ...headers } }, response => { const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8') })); }); req.once('error', reject); req.end(body); }); }
@@ -53,7 +54,7 @@ test('workspace review HTTP GET stays provider-free and both run bodies dispatch
         output = { assessment: { projectId: input.projectId, confidence: 'low', trajectory: 'unknown', lifecycle: 'unknown', outcome: 'Review current evidence', assessment: 'Evidence is available.', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Weekly review.', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] };
       } else {
         const project = input.projects[0]; const sourceId = project.sources[0].id;
-        output = { headline: 'Workspace review', summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: input.projects.map((item, index) => ({ projectId: item.projectId, priority: 'maintain', rank: index + 1, priorityReason: 'Review current evidence.' })), attention: [], question: null };
+        output = { headline: 'Workspace review', summary: 'Current project evidence is available.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: input.projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Review current evidence.' })), attention: [], question: null };
       }
       const payload = `data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(output) }, finish_reason: null }] })}\n\ndata: [DONE]\n\n`;
       res.writeHead(200, { 'content-type': 'text/event-stream' }); res.end(payload);

@@ -11,7 +11,8 @@ for (const fixture of FAILURE_CASES) {
   test(`recorded prompt failure: ${fixture.id}`, () => {
     const bad = gradeResponse(fixture, fixture.failedResponse);
     assert.equal(bad.passed, false, 'the recorded bad behavior must not pass prompt evaluation');
-    if (fixture.expectedFailure.message) assert.ok(bad.error.includes(fixture.expectedFailure.message), bad.error);
+    if (fixture.expectedFailure.issueCode) assert.ok(bad.validationIssues.some(item => item.code === fixture.expectedFailure.issueCode), JSON.stringify(bad));
+    if (fixture.expectedFailure.presentationOnly) { assert.equal(bad.productionValid, true); assert.ok(bad.checks.some(item => item.name === 'outcome-within-prompt-target' && !item.passed)); }
     if (fixture.expectedFailure.parseError) { assert.equal(bad.strictJson, false); assert.equal(bad.productionValid, false); }
     if (fixture.expectedFailure.recovery) {
       assert.equal(bad.strictJson, false);
@@ -38,7 +39,14 @@ test('requests use current production prompts and exclude expected answers', () 
     const request = promptRequest(fixture);
     assert.equal(request.messages.length, 2);
     assert.match(request.messages[0].content, /read-only/);
-    assert.deepEqual(JSON.parse(request.messages[1].content), fixture.input);
+    const { eligibility, ...input } = JSON.parse(request.messages[1].content);
+    assert.deepEqual(input, fixture.input);
+    if (fixture.stage === 'synthesis') {
+      assert.deepEqual(eligibility.focusProjectIds, fixture.input.projects.filter(project => project.state === 'current').map(project => project.projectId));
+      const staleSources = fixture.input.projects.filter(project => project.state !== 'current').flatMap(project => project.sources.filter(source => !source.generated).map(source => source.id));
+      assert.ok(eligibility.evidenceIds.every(id => !staleSources.includes(id)));
+      assert.match(request.messages[0].content, /a user focus override does not make a stale\/unavailable assessment eligible/);
+    }
     assert.equal(request.referenceResponse, undefined);
     if (fixture.input.priorCandidate) assert.match(request.messages[0].content, /untrusted model output/);
   }

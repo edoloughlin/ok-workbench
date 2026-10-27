@@ -13,6 +13,13 @@ const externalLinks = require('./external-links.js');
 const { withCurrentDateTime, currentTimeZone } = require('./time-context.js');
 const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired } = require('./workspace-review.js');
 const { createPiVersionChecker } = require('./pi-version-check.js');
+const { createCapabilityResolver } = require('./workspace-review-output.js');
+const reviewOutputCapabilities = createCapabilityResolver();
+// Enable known Pi protocol families independently of authentication type.
+// Live model-quality evaluation is optional; runtime stays in capability keys.
+let reviewRuntimeVersion;
+function reviewOutputSelection(provider, model, endpoint = 'openai-completions') { return { adapter: providerUsesPi(provider) ? 'pi' : 'direct', endpoint: `${provider}:${endpoint}`, model, runtimeVersion: reviewRuntimeVersion }; }
+function effectiveReviewOutput(selection, forceText = false) { return reviewOutputCapabilities.resolve(selection, forceText || process.env.OK_WORKBENCH_REVIEW_OUTPUT_MODE === 'json_text' ? 'json_text' : undefined); }
 const { documentDefinitions } = require('./document-definitions.js');
 const { findProjectDefinition } = require('./project-definitions.js');
 
@@ -463,6 +470,18 @@ async function projectData(requested) {
 async function documentData(requested) {
   let resolved = await readableWorkspacePath(requested);
   if (!resolved) throw new Error('Not found');
+  if (resolved.external && await isDirectory(resolved.target)) {
+    const entries = [];
+    for (const entry of await fs.readdir(resolved.target, { withFileTypes: true })) {
+      const route = publicPath(path.join(resolved.lexical, entry.name));
+      // Resolve each child through the same grant and protected-name checks as a read.
+      if (!(await readableWorkspacePath(route))) continue;
+      entries.push({ name: entry.name, path: route, kind: entry.isDirectory() ? 'directory' : 'file' });
+    }
+    entries.sort((a, b) => Number(b.kind === 'directory') - Number(a.kind === 'directory') || a.name.localeCompare(b.name));
+    const name = path.basename(resolved.lexical);
+    return { kind: 'directory', name, title: name, path: publicPath(resolved.lexical), entries, external: true, readOnly: true };
+  }
   if (await isDirectory(resolved.target)) resolved = await readableWorkspacePath(`${String(requested).replace(/\/$/, '')}/index.md`);
   if (!resolved || !(await exists(resolved.target))) throw new Error('Not found');
   const target = resolved.target;
@@ -851,12 +870,13 @@ async function listThreads(project) {
 }
 
 async function providerCatalog() {
-  const { configuredPiProviders } = await import('./pi-harness.mjs');
+  const { configuredPiProviders, piRuntimeVersion } = await import('./pi-harness.mjs');
+  reviewRuntimeVersion = piRuntimeVersion;
   const configured = await configuredPiProviders({ stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() });
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
   if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', authType: 'api_key', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
-  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id) })) }));
+  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id), reviewOutput: effectiveReviewOutput(reviewOutputSelection(provider.id, model.id, model.reviewEndpoint)) })) }));
 }
 function providerUsesPi(provider) {
   const direct = process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1';
@@ -985,7 +1005,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
     try { const parsed = JSON.parse(payload); detail = parsed.error?.message || parsed.message || ''; } catch { detail = payload.trim(); }
     throw new Error(`${providerLabel(provider)} request failed (${response.status})${detail ? `: ${detail}` : ''}`);
   }
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let eventName = ''; let outputLimitReached = false;
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let eventName = ''; let outputLimitReached = false; let streamComplete = false;
   while (true) {
     const { value, done } = await reader.read(); if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -994,27 +1014,44 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
       const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('');
       const named = block.split(/\r?\n/).find(line => line.startsWith('event:'));
       if (named) eventName = named.slice(6).trim();
-      if (!data || data === '[DONE]') continue;
+      if (data === '[DONE]') { streamComplete = true; continue; }
+      if (!data) continue;
       try {
-        const item = JSON.parse(data); const delta = provider === 'anthropic' ? (eventName === 'content_block_delta' ? item.delta?.text : '') : item.choices?.[0]?.delta?.content;
+        const item = JSON.parse(data);
+        if (eventName === 'message_stop' || item.choices?.[0]?.finish_reason === 'stop') streamComplete = true;
+        const delta = provider === 'anthropic' ? (eventName === 'content_block_delta' ? item.delta?.text : '') : item.choices?.[0]?.delta?.content;
         if (provider === 'anthropic' ? item.delta?.stop_reason === 'max_tokens' : item.choices?.[0]?.finish_reason === 'length') outputLimitReached = true;
         if (delta) onDelta(delta);
       } catch { /* ignore malformed provider event */ }
     }
   }
-  if (outputLimitReached && noWorkspaceTools) throw new Error('The selected model stopped before completing the review response (output limit)');
+  if (!streamComplete && noWorkspaceTools) throw Object.assign(new Error('Review stream ended without completion'), { code: 'OUTPUT_TRUNCATED' });
+  if (outputLimitReached && noWorkspaceTools) throw Object.assign(new Error('The selected model stopped before completing the review response (output limit)'), { code: 'OUTPUT_TRUNCATED' });
 }
 
-async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal, maxTokens }) {
-  let output = ''; const abort = new AbortController();
+async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal, maxTokens, stage, forceText = false }) {
+  let output = ''; let outputTooLarge = false; const abort = new AbortController();
   const forwardAbort = () => abort.abort(); signal?.addEventListener('abort', forwardAbort, { once: true });
   if (signal?.aborted) abort.abort();
   const timer = setTimeout(() => abort.abort(), timeout || 120_000); timer.unref?.();
   try {
-    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: Math.min(maxTokens || 16384, 16384), messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; } });
-    return output;
+    // Reports still use the existing text contract. Review stages use a single
+    // low-level request with no agent tools, retries, or automatic continuation.
+    if (stage && providerUsesPi(provider)) {
+      const { runPiReview } = await import('./pi-harness.mjs');
+      const descriptor = (await providerCatalog()).find(item => item.id === provider)?.models.find(item => item.id === model);
+      const selection = reviewOutputSelection(provider, model, descriptor?.reviewEndpoint);
+      const { transport } = effectiveReviewOutput(selection, forceText);
+      try { return await runPiReview({ provider, model, effort, prompt, evidence, stage, transport, timeout, maxTokens: maxTokens || 16384, signal: abort.signal, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() }); }
+      catch (error) { if (error.code === 'OUTPUT_TOOL_UNSUPPORTED') reviewOutputCapabilities.markUnsupported(selection); throw error; }
+    }
+    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: Math.min(maxTokens || 16384, 16384), messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; if (stage && Buffer.byteLength(output) > (stage === 'project' ? 16 * 1024 : 64 * 1024)) { outputTooLarge = true; abort.abort(); } } });
+    return stage ? { version: 1, transport: 'json_text', text: output, finishReason: 'complete', responseBytes: Buffer.byteLength(output), requestCount: 1, outputLimitEnforced: true } : output;
   } catch (error) {
-    if (abort.signal.aborted) throw Object.assign(new Error('The review exceeded its 120-second limit'), { code: 'REVIEW_TIMEOUT' });
+    if (outputTooLarge) throw Object.assign(new Error('Review response exceeds byte limit'), { code: 'RESPONSE_TOO_LARGE' });
+    if (signal?.aborted) throw Object.assign(new Error('The review was superseded'), { code: 'SUPERSEDED' });
+    if (abort.signal.aborted || error.code === 'REVIEW_TIMEOUT') throw Object.assign(new Error('The review exceeded its 120-second limit'), { code: 'REVIEW_TIMEOUT' });
+    if (['INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_TRUNCATED', 'RESPONSE_TOO_LARGE', 'SUPERSEDED'].includes(error.code)) throw error;
     throw Object.assign(new Error(error?.message || 'The selected provider is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', forwardAbort); }
 }

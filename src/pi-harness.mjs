@@ -19,6 +19,9 @@ import {
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 
+// Resolve through ESM exports so this also works when npm hoists dependencies.
+export const piRuntimeVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.resolve('@earendil-works/pi-ai')), 'utf8')).version;
+
 const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKER = path.join(APP_DIR, 'tool-worker.js');
 const PROJECT_TEMPLATE = path.resolve(APP_DIR, '..', 'seed', 'workspace', 'templates', 'project');
@@ -265,6 +268,7 @@ export async function configuredPiProviders({ stateDir, env = process.env } = {}
           label: model.name || model.id,
           contextWindow: Number(model.contextWindow || model.contextLength || model.context_size || 0) || null,
           supportsSteering: true,
+          reviewEndpoint: model.api,
           // Pi maps only exceptional values. Unmapped low-through-high levels
           // use the provider default; xhigh and max require explicit support.
           thinkingLevels: model.reasoning ? ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter(level => {
@@ -385,6 +389,17 @@ export function projectToolResult(toolResult, git) {
   if (!git) return toolResult;
   const result = { ...(toolResult.details?.result || {}), git };
   return { content: [{ type: 'text', text: JSON.stringify(result) }], details: { result } };
+}
+
+// Reviews bypass AgentSession so tool submission cannot trigger an agent loop.
+export async function runPiReview({ provider, model: modelId, stateDir, env = process.env, ...request }) {
+  const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false, signal: request.signal });
+  const apiKey = apiKeyFor(provider, env);
+  if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey);
+  const model = modelRuntime.getPhysicalModel(provider, modelId);
+  if (!model) throw new Error('Review requires a physical configured model');
+  const { collectReviewSubmission } = await import('./review-submission.mjs');
+  return collectReviewSubmission({ runtime: modelRuntime, model, ...request });
 }
 
 export async function runPiTurn({ provider, model: modelId, effort, maxTokens, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools = false }) {

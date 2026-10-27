@@ -550,6 +550,7 @@ function formatBytes(bytes) {
 }
 
 function renderFile(file, kicker) {
+  if (file.kind === 'directory') return `<p class="doc-kicker">${escapeHtml(kicker)}</p><h1>${escapeHtml(file.name)}</h1><p>External directory · read-only</p>${file.entries.length ? `<ul>${file.entries.map(entry => `<li><a href="${escapeHtml(entry.path)}">${escapeHtml(entry.name)}${entry.kind === 'directory' ? '/' : ''}</a></li>`).join('')}</ul>` : '<p>This directory has no accessible entries.</p>'}`;
   const header = `<p class="doc-kicker">${escapeHtml(kicker)}</p><div class="file-header"><h1>${escapeHtml(file.name)}</h1><span>${escapeHtml(file.fileType)} · ${formatBytes(file.size)}</span></div>`;
   if (file.kind === 'code' && file.language === 'csv') return `${header}${csvTable(file.text)}`;
   if (file.kind === 'code') return `${header}<pre class="source-view" data-language="${escapeHtml(file.language)}"><code>${highlightCode(file.text, file.language)}</code></pre>`;
@@ -603,6 +604,7 @@ function reviewValidationDiagnostic(code) {
     project_identity: 'The response named an unknown or mismatched project.',
     project_coverage: 'The response omitted projects or used duplicate ranks.',
     evidence_reference: 'An evidence citation was missing, unknown, or outside the project.',
+    stale_assessment: 'The overview selected a stale project assessment as focus or cited its old evidence. Saved priority overrides remain in effect.',
     quote_mismatch: 'A supporting quote or date did not exactly match the supplied evidence.',
     lifecycle_support: 'A waiting, parked, or complete assessment lacked its required supporting quote.',
     first_step: 'An attention first step was vague or combined multiple actions.',
@@ -638,6 +640,24 @@ function reviewAttemptNotice(error, pending = [], hasSavedReview = false) {
   if (!error) return `<section class="workspace-review-notice workspace-review-notice-pending" aria-label="Review status"><p class="workspace-review-notice-title">Workspace synthesis is pending</p>${cache}</section>`;
   return `<section class="workspace-review-notice" aria-label="Review status"><div class="workspace-review-notice-content"><span class="workspace-review-notice-mark" aria-hidden="true">!</span><div><p class="workspace-review-notice-title">Review unavailable: ${reviewEscape(reviewErrorMessage(error))}</p><p class="workspace-review-notice-meta">${attempted}${attempted ? ' · ' : ''}${summary}</p></div></div>${cache}${detail}</section>`;
 }
+documentPane.addEventListener('click', event => {
+  const button = event.target.closest('[data-review-expand]'); if (!button) return;
+  const expanded = button.getAttribute('aria-expanded') !== 'true';
+  button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? 'Show less' : 'Show more';
+  const container = button.closest('.review-narrative');
+  container.querySelector('.review-narrative-preview').hidden = expanded;
+  container.querySelector('.review-narrative-full').hidden = !expanded;
+});
+function reviewNarrative(value, target = 300) {
+  const text = String(value || '');
+  if ([...text].length <= target) return reviewEscape(text);
+  return `<span class="review-narrative"><span class="review-narrative-preview">${reviewEscape([...text].slice(0, target).join(''))}… </span><span class="review-narrative-full" hidden>${reviewEscape(text)}</span><button type="button" class="quiet" data-review-expand aria-expanded="false">Show more</button></span>`;
+}
+function independentAssessmentsMarkup(state) {
+  const items = state.projectAssessments || [];
+  if (!items.length) return '';
+  return `<section class="workspace-independent-assessments" aria-label="Saved project assessments"><h2>Saved project assessments</h2><p>These assessments are separate from the workspace overview. Priorities and focus require a successful overview.</p>${items.map(item => `<article><h3>${reviewEscape(item.projectId)}</h3><small>${item.assessmentState === 'stale' ? 'Stale · ' : ''}Last assessed ${reviewEscape(new Date(item.assessedAt).toLocaleString())}</small><p>${reviewNarrative(item.assessment.outcome, 200)}</p><p>${reviewNarrative(item.assessment.assessment, 500)}</p></article>`).join('')}</section>`;
+}
 function reviewSource(item, sources) { const source = sources?.find(value => value.id === item.evidenceIds?.[0]); if (!source?.path) return ''; const prefix = source.projectId ? `/workspace/${encodeURIComponent(source.projectId)}/` : '/workspace/'; const href = `${prefix}${source.path.split('/').map(encodeURIComponent).join('/')}`; return `<a class="workspace-source" href="${href}">Evidence: ${reviewEscape(source.path)}${source.heading ? ` · ${reviewEscape(source.heading)}` : ''}</a>`; }
 async function loadWorkspaceReview() {
   const response = await chatApi('/api/workspace-review'); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not load workspace review'); workspaceReviewState = data; return data;
@@ -657,10 +677,10 @@ function renderWorkspaceOverview(state) {
     const running = state.job?.state === 'running';
     const label = running ? 'Reviewing\u2026' : (state.settings?.provider ? 'Review now' : 'Set up reviews');
     const action = running ? '' : (state.settings?.provider ? 'data-review-run' : 'data-review-settings');
-    const heading = running ? 'Reviewing your projects for the first time\u2026' : (state.settings?.provider ? 'Review your projects when you are ready.' : 'Set up a read-only workspace review.');
+    const heading = running ? 'Reviewing your projects for the first time\u2026' : state.projectAssessments?.length ? 'Workspace overview unavailable' : (state.settings?.provider ? 'Review your projects when you are ready.' : 'Set up a read-only workspace review.');
     const progress = state.job?.progress; const progressText = workspaceReviewProgress(progress);
     const pending = state.pendingProjectStatus?.filter(item => item.state === 'current') || [];
-    documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite">${running ? `Reviewing ${reviewEscape(state.job.phase || 'workspace')}… ${reviewEscape(progressText)}` : ''}</p><p class="doc-kicker">WORKSPACE</p><h1>Workspace overview</h1>${reviewAttemptNotice(state.error, pending)}${state.modelWarning ? `<p class="workspace-model-warning">${reviewEscape(state.modelWarning)}</p>` : ''}<div class="workspace-empty"><h2>${reviewEscape(heading)}</h2><p>The review reads bounded project evidence, highlights priorities and risks, and never edits your files or starts work.</p><div class="workspace-actions"><button class="workspace-primary" ${action} ${running ? 'disabled' : ''}>${reviewEscape(label)}</button>${state.settings?.provider ? '<button data-review-settings>Review settings</button>' : ''}</div></div></section>`;
+    documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite">${running ? `Reviewing ${reviewEscape(state.job.phase || 'workspace')}… ${reviewEscape(progressText)}` : ''}</p><p class="doc-kicker">WORKSPACE</p><h1>Workspace overview</h1>${reviewAttemptNotice(state.error, pending)}${independentAssessmentsMarkup(state)}${state.modelWarning ? `<p class="workspace-model-warning">${reviewEscape(state.modelWarning)}</p>` : ''}<div class="workspace-empty"><h2>${reviewEscape(heading)}</h2><p>The review reads bounded project evidence, highlights priorities and risks, and never edits your files or starts work.</p><div class="workspace-actions"><button class="workspace-primary" ${action} ${running ? 'disabled' : ''}>${reviewEscape(label)}</button>${state.settings?.provider ? '<button data-review-settings>Review settings</button>' : ''}</div></div></section>`;
     scheduleWorkspaceReviewPolling(state);
     return;
   }
@@ -679,7 +699,7 @@ function renderWorkspaceOverview(state) {
         <div class="workspace-attention-project">Project <a href="/workspace/${encodeURIComponent(item.projectId)}/">${reviewEscape(projectName)}</a></div>
         <div class="workspace-attention-timing"><span class="workspace-urgency ${reviewEscape(item.urgency)}">${reviewUrgency(item.urgency, item.kind)}</span>${reviewRunway(item)}</div>
       </div>
-      <h3>${reviewEscape(item.title)}</h3>
+      <h3>${reviewNarrative(item.title, 140)}</h3>
       <p class="workspace-first-step"><span>Next step:</span> ${reviewEscape(item.firstStep)}</p>
       <div class="workspace-actions workspace-attention-actions">
         <button data-review-discuss="${reviewEscape(item.id)}">Discuss next step</button>
@@ -689,28 +709,28 @@ function renderWorkspaceOverview(state) {
       </div>
       <details>
         <summary>Why this matters</summary>
-        <p>${reviewEscape(item.inference)}</p>
+        <p>${reviewNarrative(item.inference, 400)}</p>
         ${escalation}
-        <p>Observed: ${reviewEscape(item.observation)}</p>
+        <p>Observed: ${reviewNarrative(item.observation, 400)}</p>
         <p>Proposed: ${reviewEscape(item.action)}</p>
         ${reviewSource(item, sources)}
         <div class="workspace-actions"><button class="quiet" data-review-correct="${reviewEscape(item.id)}">Correct assessment</button><button class="quiet" data-review-dismiss="${reviewEscape(item.id)}">Dismiss</button><button class="quiet" data-review-resolved="${reviewEscape(item.id)}">Resolved elsewhere</button></div>
       </details>
     </article>`;
   }).join('') : '<p class="workspace-quiet">No immediate action surfaced from the saved evidence.</p>';
-  const changes = review.assessment?.changes || []; const sinceLastReview = changes.length ? `<section class="workspace-since-last"><p class="doc-kicker">SINCE THE LAST REVIEW</p><ul>${changes.map(item => `<li>${reviewEscape(item.text)} ${reviewSource(item, sources)}</li>`).join('')}</ul></section>` : '';
+  const changes = review.assessment?.changes || []; const sinceLastReview = changes.length ? `<section class="workspace-since-last"><p class="doc-kicker">SINCE THE LAST REVIEW</p><ul>${changes.map(item => `<li>${reviewNarrative(item.text, 300)} ${reviewSource(item, sources)}</li>`).join('')}</ul></section>` : '';
   const deferred = review.deferred || []; const deferredSection = deferred.length ? `<section class="workspace-deferred"><p class="doc-kicker">DEFERRED</p><ul>${deferred.map(item => `<li><span>${reviewEscape(item.title)}</span><small>Revisit ${reviewEscape(new Date(item.feedback.until).toLocaleString())}</small><button class="quiet" data-review-undo-feedback="${reviewEscape(item.feedback.id)}">Undo</button></li>`).join('')}</ul></section>` : '';
   const closure = briefingReady && !attention.length && !deferred.length && !review.assessment?.question ? '<p class="workspace-closure">Nothing else here needs a decision right now.</p>' : '';
-  const briefing = briefingReady ? `<div class="workspace-brief"><p class="doc-kicker">RECOMMENDED FOCUS</p><h2>${reviewEscape(review.assessment?.headline || 'Workspace review')}</h2><p>${reviewEscape(review.assessment?.summary || '')}</p>${focus ? `<button data-review-session-focus="${reviewEscape(focus.projectId)}">I have 30 minutes</button>` : ''}</div>` : '';
+  const briefing = briefingReady ? `<div class="workspace-brief"><p class="doc-kicker">${state.error?.stage === 'synthesis' ? 'Previous overview' : 'RECOMMENDED FOCUS'}</p><h2>${reviewNarrative(review.assessment?.headline || 'Workspace review', 160)}</h2><p>${reviewNarrative(review.assessment?.summary, 600)}</p>${focus ? `<button data-review-session-focus="${reviewEscape(focus.projectId)}">I have 30 minutes</button>` : ''}</div>` : '';
   const attentionSection = briefingState !== 'empty' && (attention.length || briefingReady) ? `<section class="workspace-attention-list"><div class="workspace-section-heading"><div><h2>Needs attention</h2></div>${attention.length > 3 ? `<button class="quiet" data-review-show-all>${workspaceReviewShowAll ? 'Show fewer' : `Show all ${attention.length}`}</button>` : ''}</div>${itemMarkup}</section>` : '';
   const quietState = briefingState === 'empty' ? '<p class="workspace-quiet">No projects selected for review.</p><button data-review-settings>Choose projects</button>' : !briefingReady && !attention.length ? '<p class="workspace-quiet">No current recommendations for these projects yet.</p>' : '';
-  const todayContent = briefingState === 'empty' ? quietState : `${briefing}${briefingReady ? sinceLastReview : ''}${attention.length ? attentionSection : quietState + attentionSection}${deferredSection}${briefingReady && review.assessment?.question ? `<section class="workspace-question"><p class="doc-kicker">ONE THING TO CLARIFY</p><h2>${reviewEscape(review.assessment.question.text)}</h2><p>${reviewEscape(review.assessment.question.reason)}</p>${review.assessment.question.options.map(option => `<button data-review-answer="${reviewEscape(option)}">${reviewEscape(option)}</button>`).join(' ')} <button class="quiet" data-review-guidance>Add context…</button></section>` : ''}${closure}`;
+  const todayContent = briefingState === 'empty' ? quietState : `${briefing}${briefingReady ? sinceLastReview : ''}${attention.length ? attentionSection : quietState + attentionSection}${deferredSection}${briefingReady && review.assessment?.question ? `<section class="workspace-question"><p class="doc-kicker">ONE THING TO CLARIFY</p><h2>${reviewNarrative(review.assessment.question.text, 240)}</h2><p>${reviewNarrative(review.assessment.question.reason, 300)}</p>${review.assessment.question.options.map(option => `<button data-review-answer="${reviewEscape(option)}">${reviewEscape(option)}</button>`).join(' ')} <button class="quiet" data-review-guidance>Add context…</button></section>` : ''}${closure}`;
   const today = `<section id="review-panel-today" role="tabpanel" aria-labelledby="review-tab-today" ${active === 'today' ? '' : 'hidden'}>${todayContent}</section>`;
   const rows = projects.map(project => {
     const projectError = review.projectErrors?.find(error => error.projectId === project.projectId);
     const projectDiagnostic = reviewValidationDiagnostic(projectError?.validationDiagnostic);
     const errorNotice = projectError ? `<small class="workspace-project-review-error">Review failed${projectDiagnostic ? `: ${reviewEscape(projectDiagnostic)}` : ` (${reviewEscape(projectError.code)})`}</small>` : '';
-    return `<tr><td data-label="Project / outcome"><strong>${reviewEscape(project.projectId)}</strong><small>${reviewEscape(project.outcome)}</small>${project.reviewInclusion === 'not_included' ? `<small>Not included in this review${project.assessedAt ? ` · last assessed ${new Date(project.assessedAt).toLocaleString()}` : ''}</small>` : project.assessmentState !== 'current' ? `<small>${project.assessmentState === 'stale' ? 'Last assessment is stale' : 'Assessment unavailable'}${project.assessedAt ? ` · last assessed ${new Date(project.assessedAt).toLocaleString()}` : ''}</small>` : project.assessedAt ? `<small>Last assessed ${new Date(project.assessedAt).toLocaleString()}</small>` : ''}${errorNotice}</td><td data-label="Priority"><button class="workspace-priority" data-review-priority="${reviewEscape(project.projectId)}">${reviewEscape(reviewPriority(project.effectivePriority?.priority || project.priority))} <small>${project.effectivePriority?.source === 'user' ? 'Your priority' : 'Inferred'}</small></button></td><td data-label="Trajectory"><span class="workspace-trajectory ${reviewEscape(project.trajectory)}">${reviewEscape(reviewLifecycleLabel(project))}</span><small>${reviewEscape(project.assessment)}</small></td><td data-label="Next useful step">${reviewEscape(project.nextAction || 'No next action recorded')}<br><button class="quiet" data-review-report="${reviewEscape(project.projectId)}">Draft progress report</button></td></tr>`;
+    return `<tr><td data-label="Project / outcome"><strong>${reviewEscape(project.projectId)}</strong><small>${reviewNarrative(project.outcome, 200)}</small>${project.reviewInclusion === 'not_included' ? `<small>Not included in this review${project.assessedAt ? ` · last assessed ${new Date(project.assessedAt).toLocaleString()}` : ''}</small>` : project.assessmentState !== 'current' ? `<small>${project.assessmentState === 'stale' ? 'Last assessment is stale' : 'Assessment unavailable'}${project.assessedAt ? ` · last assessed ${new Date(project.assessedAt).toLocaleString()}` : ''}</small>` : project.assessedAt ? `<small>Last assessed ${new Date(project.assessedAt).toLocaleString()}</small>` : ''}${errorNotice}</td><td data-label="Priority"><button class="workspace-priority" data-review-priority="${reviewEscape(project.projectId)}">${reviewEscape(reviewPriority(project.effectivePriority?.priority || project.priority))} <small>${project.effectivePriority?.source === 'user' ? 'Your priority' : 'Inferred'}</small></button></td><td data-label="Trajectory"><span class="workspace-trajectory ${reviewEscape(project.trajectory)}">${reviewEscape(reviewLifecycleLabel(project))}</span><small>${reviewNarrative(project.assessment, 500)}</small></td><td data-label="Next useful step">${reviewEscape(project.nextAction || 'No next action recorded')}<br><button class="quiet" data-review-report="${reviewEscape(project.projectId)}">Draft progress report</button></td></tr>`;
   }).join('');
   const projectsPanel = `<section id="review-panel-projects" role="tabpanel" aria-labelledby="review-tab-projects" ${active === 'projects' ? '' : 'hidden'}><div class="workspace-section-heading"><div><h2>All projects</h2><p>Priority and trajectory remain separate judgments.</p></div></div><div class="workspace-table-wrap"><table class="workspace-table"><thead><tr><th>Project / outcome</th><th>Priority</th><th>Trajectory</th><th>Next useful step</th></tr></thead><tbody>${rows}</tbody></table></div></section>`;
   const focusPanel = `<section id="review-panel-focus" role="tabpanel" aria-labelledby="review-tab-focus" ${active === 'focus' ? '' : 'hidden'}><div class="workspace-section-heading"><div><h2>Where your attention went</h2><p>Activity is not progress. Counts include chat turns and changed-file events.</p></div></div><div id="workspace-focus-content" class="workspace-focus-loading">Loading local activity…</div></section>`;
@@ -719,7 +739,7 @@ function renderWorkspaceOverview(state) {
   const overviewMeta = `${state.job?.state === 'running' ? `<span>Reviewing ${reviewEscape(state.job.phase || 'workspace')}…</span><span>${reviewEscape(progressText)}</span>` : ''}${reviewedTime ? `<span><time title="${reviewedTime.toISOString()}">Last reviewed ${reviewedTime.toLocaleString()}</time></span>` : '<span>No completed review</span>'}<span>${coveredProjects} projects covered</span>${staleNotice}${partialNotice}`;
   const pending = state.pendingProjectStatus?.filter(item => item.state === 'current') || [];
   const nextCheck = state.nextCheckAt ? `<time title="${reviewEscape(state.nextCheckAt)}">Next check ${new Date(state.nextCheckAt).toLocaleString()}</time>` : 'No automatic check scheduled'; const monitor = state.settings?.automatic ? `${state.monitor === 'paused' ? 'Automatic reviews are paused' : 'Automatic reviews are enabled'} while Workbench is running. ${nextCheck}. Scope: ${review.coverage?.filter(item => item.included).length || 0} included projects; saved reviews never edit files or start work.` : 'Automatic reviews are off. You can request a manual review; saved reviews never edit files or start work.';
-  documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite"></p><header class="workspace-overview-header"><div><p class="doc-kicker">THE BIG PICTURE</p><h1>Workspace overview</h1><div class="workspace-overview-meta">${overviewMeta}</div></div><div class="workspace-header-actions"><button data-review-settings>Monitoring</button>${state.settings?.automatic ? `<button data-review-pause="${state.monitor !== 'paused'}">${state.monitor === 'paused' ? 'Resume reviews' : 'Pause reviews'}</button>` : ''}<button class="workspace-primary" data-review-run ${state.job?.state === 'running' ? 'disabled' : ''}>${state.job?.state === 'running' ? 'Reviewing…' : 'Review now'}</button>${review.partial ? `<button data-review-reassess ${state.job?.state === 'running' ? 'disabled' : ''}>Reassess all</button>` : ''}</div></header>${reviewAttemptNotice(state.error, pending, true)}${state.modelWarning ? `<p class="workspace-model-warning">${reviewEscape(state.modelWarning)}</p>` : ''}${tabs}${today}${projectsPanel}${focusPanel}<footer class="workspace-monitor">${monitor}</footer></section>`;
+  documentPane.innerHTML = `<section class="workspace-overview"><p id="workspace-review-status" class="workspace-status" role="status" aria-live="polite"></p><header class="workspace-overview-header"><div><p class="doc-kicker">THE BIG PICTURE</p><h1>Workspace overview</h1><div class="workspace-overview-meta">${overviewMeta}</div></div><div class="workspace-header-actions"><button data-review-settings>Monitoring</button>${state.settings?.automatic ? `<button data-review-pause="${state.monitor !== 'paused'}">${state.monitor === 'paused' ? 'Resume reviews' : 'Pause reviews'}</button>` : ''}<button class="workspace-primary" data-review-run ${state.job?.state === 'running' ? 'disabled' : ''}>${state.job?.state === 'running' ? 'Reviewing…' : 'Review now'}</button>${review.partial ? `<button data-review-reassess ${state.job?.state === 'running' ? 'disabled' : ''}>Reassess all</button>` : ''}</div></header>${reviewAttemptNotice(state.error, pending, true)}${independentAssessmentsMarkup(state)}${state.modelWarning ? `<p class="workspace-model-warning">${reviewEscape(state.modelWarning)}</p>` : ''}${tabs}${today}${projectsPanel}${focusPanel}<footer class="workspace-monitor">${monitor}</footer></section>`;
   if (!review.partial) documentPane.querySelector('.workspace-header-actions')?.insertAdjacentHTML('beforeend', `<button data-review-reassess ${state.job?.state === 'running' ? 'disabled' : ''}>Reassess all</button>`);
   if (active === 'focus' && state.settings?.activityTracking !== false) void renderFocusReport();
   if (workspaceReviewNotice) { const region = document.querySelector('#workspace-review-status'); if (region) region.innerHTML = `${reviewEscape(workspaceReviewNotice.message)} ${workspaceReviewNotice.feedbackId ? `<button class="quiet" data-review-undo-feedback="${reviewEscape(workspaceReviewNotice.feedbackId)}">Undo</button>` : ''}`; }
@@ -812,7 +832,7 @@ async function renderMonitoringSettings(dialog) {
   const automaticHeading = document.createElement('h4'); automaticHeading.textContent = '03 · Schedule & activity';
   dialog.querySelector('[name=automatic]').closest('label').before(automaticHeading);
   const model = dialog.querySelector('#review-settings-model'); const provider = dialog.querySelector('#review-settings-provider'); const effort = dialog.querySelector('#review-settings-effort');
-  const refreshEffort = () => { effort.innerHTML = effortOptions(provider.value, model.value); const levels = [...effort.options].map(option => option.value).filter(Boolean); effort.value = state.settings?.provider === provider.value && state.settings?.model === model.value && levels.includes(state.settings?.effort) ? state.settings.effort : (levels.at(-1) || ''); };
+  const refreshEffort = () => { effort.innerHTML = effortOptions(provider.value, model.value); const levels = [...effort.options].map(option => option.value).filter(Boolean); effort.value = state.settings?.provider === provider.value && state.settings?.model === model.value ? (levels.includes(state.settings?.effort) ? state.settings.effort : '') : (levels.at(-1) || ''); };
   const tierHint = dialog.querySelector('#review-settings-model-tier');
   const refreshTierHint = () => { const tier = model.options[model.selectedIndex]?.dataset.reviewTier || 'unverified'; tierHint.textContent = reviewTierHint(tier); tierHint.dataset.reviewTier = tier; };
   const refreshModels = () => { const current = providers.find(item => item.id === provider.value); model.innerHTML = modelOptions(provider.value); const desired = state.settings?.provider === provider.value ? state.settings?.model : current?.models?.[0]?.id; if (desired) model.value = desired; refreshEffort(); refreshTierHint(); };
@@ -840,14 +860,16 @@ async function renderMonitoringSettings(dialog) {
   const modelSummary = document.createElement('div'); modelSummary.className = 'monitoring-model-summary'; modelSummary.setAttribute('role', 'status'); introduction.after(modelSummary);
   const updateModelSummary = () => {
     const workspaceName = model.options[model.selectedIndex]?.textContent || 'Choose a workspace model';
+    const outputMode = (providerId, modelId) => providers.find(item => item.id === providerId)?.models?.find(item => item.id === modelId)?.reviewOutput;
+    const modeHelp = mode => ['supported', 'verified'].includes(mode?.resultTool) && mode.transport === 'result_tool' ? 'Structured submission · evidence checks still apply' : mode?.resultTool === 'unsupported' ? 'JSON text fallback · structured submission unsupported' : ['supported', 'verified'].includes(mode?.resultTool) ? 'JSON text fallback · structured submission disabled for reviews' : 'JSON text fallback · structured submission unavailable for this adapter';
     const projectName = hybrid.checked ? assessmentModel.options[assessmentModel.selectedIndex]?.textContent || 'Choose a project model' : workspaceName;
     modelSummary.replaceChildren();
     for (const [title, name, help] of [['Project assessments', projectName, 'Reads individual projects → findings, risks and priorities'], ['Workspace overview', workspaceName, 'Combines those findings → cross-project recommendations']]) {
-      const card = document.createElement('div'); const heading = document.createElement('strong'); heading.textContent = title; const value = document.createElement('span'); value.textContent = name; const detail = document.createElement('small'); detail.textContent = help; card.append(heading, value, detail); modelSummary.append(card);
+      const card = document.createElement('div'); const heading = document.createElement('strong'); heading.textContent = title; const value = document.createElement('span'); value.textContent = name; const detail = document.createElement('small'); detail.textContent = help; const mode = document.createElement('small'); mode.textContent = modeHelp(title === 'Project assessments' && hybrid.checked ? outputMode(assessmentProvider.value, assessmentModel.value) : outputMode(provider.value, model.value)); card.append(heading, value, detail, mode); modelSummary.append(card);
     }
     assessmentHelp.textContent = hybrid.checked ? 'This model reads each project’s evidence and assesses its priorities and risks. Choose a faster or lower-cost model for this per-project work if appropriate.' : 'One model is used for both stages. Project assessments use the workspace model selected below. Enable a different model to configure this stage separately.';
   };
-  dialog.addEventListener('change', () => { updateModelSummary(); dialog.querySelector('.monitoring-save-status').textContent = ''; });
+  dialog.addEventListener('change', () => { updateModelSummary(); updateSaveButton(); dialog.querySelector('.monitoring-save-status').textContent = ''; });
   const refreshHybrid = () => { assessmentFields.hidden = !hybrid.checked; assessmentFields.disabled = !hybrid.checked; updateModelSummary(); };
   hybrid.addEventListener('change', () => { resetConfirmations(); refreshHybrid(); });
   assessmentProvider.addEventListener('change', () => { resetConfirmations(); refreshAssessmentModels(); });
@@ -859,8 +881,37 @@ async function renderMonitoringSettings(dialog) {
     try { await reviewControl({ operation: 'remove_guidance', guidanceId: button.dataset.reviewRemoveGuidance }); currentGuidance = currentGuidance.filter(entry => entry.id !== button.dataset.reviewRemoveGuidance); dialog.querySelector('#review-settings-guidance-list').innerHTML = guidanceListMarkup(currentGuidance); copyGuidanceButton.disabled = !currentGuidance.length; } catch (caught) { alert(caught.message); }
   });
   copyGuidanceButton?.addEventListener('click', async () => { await navigator.clipboard.writeText(guidanceToText(currentGuidance)); copyGuidanceButton.textContent = 'Copied'; setTimeout(() => { copyGuidanceButton.textContent = 'Copy guidance'; }, 2000); });
-  dialog.querySelector('[data-review-save-settings]').addEventListener('click', async event => { event.preventDefault(); const form = new FormData(dialog.closest('form')); const body = { expectedRevision: state.settings.revision, provider: form.get('provider') || null, model: form.get('model') || null, effort: form.get('effort') || null, assessmentModel: hybrid.checked ? { provider: form.get('assessmentProvider'), model: form.get('assessmentModel'), effort: form.get('assessmentEffort') || null } : null, automatic: form.get('automatic') === 'on', confirmations: { meteredAutomatic: form.get('meteredAutomatic') === 'on', belowRecommendedModel: form.get('belowRecommendedModel') === 'on' }, activityTracking: form.get('activityTracking') === 'on', excludedProjects: form.getAll('excludedProjects'), timezone: state.settings.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', dailyAutomaticLimit: state.settings.dailyAutomaticLimit || 6 };
-    const error = dialog.querySelector('.workspace-dialog-error'); const save = event.currentTarget; save.disabled = true; error.hidden = true; const saved = dialog.querySelector('.monitoring-save-status'); saved.textContent = ''; try { const response = await chatApi('/api/workspace-review/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not save review settings'); state.settings = data.settings || { ...state.settings, ...body }; saved.textContent = 'Monitoring settings saved'; await refreshWorkspaceOverview(); } catch (caught) { error.textContent = caught.message; error.hidden = false; } finally { save.disabled = false; }
+  const save = dialog.querySelector('[data-review-save-settings]');
+  let saving = false;
+  const timezone = state.settings?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const settingsSnapshot = settings => JSON.stringify({
+    provider: settings.provider || null, model: settings.model || null, effort: settings.effort || null,
+    assessmentModel: settings.assessmentModel ? { provider: settings.assessmentModel.provider, model: settings.assessmentModel.model, effort: settings.assessmentModel.effort || null } : null,
+    automatic: Boolean(settings.automatic), activityTracking: settings.activityTracking !== false,
+    confirmations: { meteredAutomatic: Boolean(settings.confirmations?.meteredAutomatic), belowRecommendedModel: Boolean(settings.confirmations?.belowRecommendedModel) },
+    excludedProjects: [...(settings.excludedProjects || [])].sort(), timezone: settings.timezone || timezone, dailyAutomaticLimit: settings.dailyAutomaticLimit || 6
+  });
+  const readSettings = () => {
+    const form = new FormData(dialog.closest('form'));
+    return { expectedRevision: state.settings.revision, provider: form.get('provider') || null, model: form.get('model') || null, effort: form.get('effort') || null, assessmentModel: hybrid.checked ? { provider: form.get('assessmentProvider'), model: form.get('assessmentModel'), effort: form.get('assessmentEffort') || null } : null, automatic: form.get('automatic') === 'on', confirmations: { meteredAutomatic: form.get('meteredAutomatic') === 'on', belowRecommendedModel: form.get('belowRecommendedModel') === 'on' }, activityTracking: form.get('activityTracking') === 'on', excludedProjects: form.getAll('excludedProjects'), timezone, dailyAutomaticLimit: state.settings.dailyAutomaticLimit || 6 };
+  };
+  let savedSnapshot = settingsSnapshot(state.settings || {});
+  function updateSaveButton() { save.disabled = saving || settingsSnapshot(readSettings()) === savedSnapshot; }
+  updateSaveButton();
+  save.addEventListener('click', async event => {
+    event.preventDefault(); if (save.disabled) return;
+    const body = readSettings(); const error = dialog.querySelector('.workspace-dialog-error');
+    saving = true; updateSaveButton(); error.hidden = true;
+    const saved = dialog.querySelector('.monitoring-save-status'); saved.textContent = '';
+    try {
+      const response = await chatApi('/api/workspace-review/settings', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not save review settings');
+      state.settings = data.settings || { ...state.settings, ...body };
+      savedSnapshot = settingsSnapshot(state.settings);
+      saved.textContent = 'Monitoring settings saved'; await refreshWorkspaceOverview();
+    } catch (caught) { error.textContent = caught.message; error.hidden = false; }
+    finally { saving = false; updateSaveButton(); }
   });
 }
 function openPriorityDialog(projectId) {

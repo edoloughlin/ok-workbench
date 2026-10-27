@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm as remove, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 
+// Detached trace-expiry workers can briefly hold/create their local lock while
+// a temporary workspace is being removed. Retry teardown, not review requests.
+const rm = (file, options) => remove(file, { maxRetries: 5, retryDelay: 20, ...options });
 const require = createRequire(import.meta.url);
 const { WorkspaceReviewStore } = require('../src/workspace-review-store.js');
 const { runway, publicReview, validateReview } = require('../src/workspace-review-schema.js');
@@ -28,24 +31,24 @@ function stagedLegacyProvider(provider) {
       const { priority, rank, priorityReason, ...assessment } = project;
       return JSON.stringify({ assessment, attentionCandidates: (full.attention || []).filter(item => item.projectId === request.projectId) });
     }
-    return JSON.stringify({ headline: full.headline, summary: full.summary, focusProjectId: full.focusProjectId, evidenceIds: full.evidenceIds, changes: full.changes, priorities: (full.projects || []).map(({ projectId, priority, rank, priorityReason }) => ({ projectId, priority, rank, priorityReason })), attention: full.attention, question: full.question });
+    return JSON.stringify({ headline: full.headline, summary: full.summary, focusProjectId: full.focusProjectId, evidenceIds: full.evidenceIds, changes: full.changes, priorities: (full.projects || []).toSorted((a, b) => a.rank - b.rank).map(({ projectId, priority, priorityReason }) => ({ projectId, priority, priorityReason })), attention: full.attention, question: full.question });
   };
 }
 
-test('review text lengths allow 20% beyond the prompt targets, but no more', () => {
+test('narrative text allows bounded presentation overruns', () => {
   const source = { id: 'source', projectId: 'alpha', excerpt: 'Evidence.' };
   const raw = {
-    headline: 'H'.repeat(192), summary: 'S'.repeat(720), focusProjectId: null,
+    headline: 'H'.repeat(640), summary: 'S'.repeat(2400), focusProjectId: null,
     evidenceIds: ['source'], changes: [],
     projects: [{ projectId: 'alpha', priority: 'maintain', rank: 1, priorityReason: 'Reason', confidence: 'medium', trajectory: 'unknown', lifecycle: 'active', outcome: 'Outcome', assessment: 'Assessment', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Reason', evidenceIds: ['source'], claimEvidence: [] }],
     attention: [], question: null
   };
   const context = { projects: [{ id: 'alpha' }], sources: [source] };
-  assert.equal(validateReview(raw, context).headline.length, 192);
+  assert.equal(validateReview(raw, context).headline.length, 640);
   raw.headline += 'H';
-  assert.throws(() => validateReview(raw, context), /headline must be 1 to 192 plain-text characters/);
+  assert.throws(() => validateReview(raw, context), /headline must be 1 to 640 plain-text characters/);
   raw.headline = 'Headline'; raw.summary += 'S';
-  assert.throws(() => validateReview(raw, context), /summary must be 1 to 720 plain-text characters/);
+  assert.throws(() => validateReview(raw, context), /summary must be 1 to 2400 plain-text characters/);
 });
 
 test('workspace review state is isolated by canonical workspace root', async () => {
@@ -145,7 +148,7 @@ test('a non-JSON response is rejected with a bounded head/tail preview in the se
     const coordinator = new WorkspaceReviewCoordinator({ stateDir: root, workspaceRoot: root, provider: async request => {
       if (request.stage === 'project') return `Here is the review:\n{"headline": "${secret}"}\nLet me know if you need changes.`;
       const sourceId = request.evidence.projects[0].sources[0].id;
-      return JSON.stringify({ headline: 'Workspace review', summary: 'One assessment is unavailable.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: request.evidence.projects.map((project, index) => ({ projectId: project.projectId, priority: 'maintain', rank: index + 1, priorityReason: 'Insufficient evidence.' })), attention: [], question: null });
+      return JSON.stringify({ headline: 'Workspace review', summary: 'One assessment is unavailable.', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: request.evidence.projects.map(project => ({ projectId: project.projectId, priority: 'maintain', priorityReason: 'Insufficient evidence.' })), attention: [], question: null });
     } });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
@@ -174,7 +177,7 @@ test('provider-supplied error codes and messages are normalized before persisten
       const project = request.evidence.projects[0]; const gap = project.sources.find(source => source.generated);
       assert.ok(gap, 'cold project failure gets a generated evidence-gap source');
       assert.equal(gap.path, null); assert.equal(gap.reason, undefined, 'the bounded model projection omits internal source reason');
-      return JSON.stringify({ headline: 'Evidence unavailable', summary: 'A current project assessment could not be obtained.', focusProjectId: null, evidenceIds: [gap.id], changes: [], priorities: [{ projectId: 'alpha', priority: 'maintain', rank: 1, priorityReason: 'Evidence is unavailable.' }], attention: [], question: null });
+      return JSON.stringify({ headline: 'Evidence unavailable', summary: 'A current project assessment could not be obtained.', focusProjectId: null, evidenceIds: [gap.id], changes: [], priorities: [{ projectId: 'alpha', priority: 'maintain', priorityReason: 'Evidence is unavailable.' }], attention: [], question: null });
     } });
     await coordinator.store.saveSettings({ provider: 'openai', model: 'reviewer' }, 0);
     await coordinator.run(); await coordinator.running.task;
@@ -201,7 +204,7 @@ test('a manual Codex review corrects one invalid candidate within the same job',
       if (stage === 'project') {
         if (calls === 2) {
           assert.equal(evidence.priorCandidate, rejectedCandidate, 'the correction receives the rejected structured response');
-          assert.match(evidence.validationFeedback, /non-active lifecycle needs supporting claimEvidence/);
+          assert.ok(evidence.validationFeedback.issues.some(item => item.code === 'EVIDENCE'));
         }
         const sourceId = evidence.sources.find(source => source.path === 'status.md').id;
         const response = JSON.stringify({ assessment: { projectId: 'alpha', confidence: 'medium', trajectory: 'unknown', lifecycle: calls === 1 ? 'waiting' : 'active', outcome: 'Finish alpha', assessment: 'Status needs review', nextAction: null, blocker: null, cadence: 'weekly', cadenceReason: 'Check weekly', evidenceIds: [sourceId], claimEvidence: [] }, attentionCandidates: [] });
@@ -209,7 +212,7 @@ test('a manual Codex review corrects one invalid candidate within the same job',
         return response;
       }
       const sourceId = evidence.projects[0].sources.find(source => source.path === 'status.md').id;
-      return JSON.stringify({ headline: 'Alpha review', summary: 'Review alpha', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: [{ projectId: 'alpha', priority: 'next', rank: 1, priorityReason: 'Active work' }], attention: [], question: null });
+      return JSON.stringify({ headline: 'Alpha review', summary: 'Review alpha', focusProjectId: null, evidenceIds: [sourceId], changes: [], priorities: [{ projectId: 'alpha', priority: 'next', priorityReason: 'Active work' }], attention: [], question: null });
     } });
     await coordinator.store.saveSettings({ provider: 'openai-codex', model: 'gpt-5.6-terra' }, 0);
     await coordinator.run('manual'); await coordinator.running.task;
@@ -291,7 +294,7 @@ test('staged refresh recovers trailing punctuation, validates recovered objects,
         return mode === 'fenced' ? `\`\`\`json\n${body}\n\`\`\`` : body + (mode === 'extra-quote' ? '"' : ['extra-brace', 'schema-with-suffix', 'chained-first-step'].includes(mode) ? '}' : '');
       }
       const projects = request.evidence.projects; const sourceId = request.evidence.workspace?.[0]?.id || projects.find(project => project.state === 'current')?.sources[0]?.id;
-      return JSON.stringify({ headline: 'Current review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: sourceId ? [sourceId] : [], changes: [], priorities: projects.map((item, rank) => ({ projectId: item.projectId, priority: 'maintain', rank: rank + 1, priorityReason: 'Review current evidence.' })), attention: [], question: null }) + (mode === 'extra-brace' ? '}' : mode === 'extra-quote' ? '"' : '');
+      return JSON.stringify({ headline: 'Current review', summary: 'Current evidence is available.', focusProjectId: null, evidenceIds: sourceId ? [sourceId] : [], changes: [], priorities: projects.map(item => ({ projectId: item.projectId, priority: 'maintain', priorityReason: 'Review current evidence.' })), attention: [], question: null }) + (mode === 'extra-brace' ? '}' : mode === 'extra-quote' ? '"' : '');
     } });
     // Exercise trace persistence without leaving a five-day expiry worker
     // racing the temporary workspace teardown.
@@ -315,8 +318,8 @@ test('staged refresh recovers trailing punctuation, validates recovered objects,
       const persisted = JSON.stringify({ latest: await coordinator.store.latest(), runtime: await coordinator.store.runtime(), cache: await coordinator.store.projectAssessment('alpha') });
       assert.ok(!persisted.includes('priorCandidate'));
       if (mode === 'oversized') assert.ok(!persisted.includes('x'.repeat(100)));
-      if (mode === 'chained-first-step') assert.match(projectCalls[1].feedback, /firstStep.*Open status.md and mark/);
-      if (mode === 'schema-with-suffix') assert.match(projectCalls[1].feedback, /must match requested project/);
+      if (mode === 'chained-first-step') assert.ok(projectCalls[1].feedback.issues.some(item => item.code === 'ACTION'));
+      if (mode === 'schema-with-suffix') assert.ok(projectCalls[1].feedback.issues.some(item => item.code === 'MEMBERSHIP'));
       if (mode === 'extra-brace') {
         const traceRoot = coordinator.store.traceDirectory();
         const directories = (await readdir(traceRoot)).filter(name => /^[a-f0-9]{64}$/.test(name));

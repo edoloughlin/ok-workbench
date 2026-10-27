@@ -568,7 +568,7 @@ Human proxy handles WC-1.
     const glossaryHash = await sourceLink.getAttribute('href');
     assert.equal(await page.locator(glossaryHash).textContent(), 'Work contract');
     await page.locator('#document .definition-reference[data-definition-key="ZZ-9"]').hover();
-    assert.match(await preview.textContent(), /No definition in this document/);
+    await preview.getByText(/No definition (?:in this document|found in this project)/).waitFor();
     assert.equal(await sourceLink.isHidden(), true);
     await page.locator('#document .section-reference[data-section-number="21"]').hover();
     const sectionLink = page.locator('.section-preview .preview-source-link');
@@ -612,6 +612,34 @@ test('agent connections warns when the bundled Pi runtime is outdated', { skip: 
   });
 });
 
+test('failed overview shows independent assessments with safe expandable prose', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    let runs = 0;
+    await page.route('**/api/workspace-review/runs', route => { runs++; return route.fulfill({ json: {} }); });
+    await page.setViewportSize({ width: 480, height: 850 });
+    await page.evaluate(() => {
+      window.reviewExpansionUnsafe = false;
+      renderWorkspaceOverview({ review: null, eligibleProjectCount: 1, settings: { provider: 'github-copilot' }, job: { state: 'idle' }, error: { stage: 'synthesis', code: 'INVALID_REVIEW', validationDiagnostic: 'stale_assessment' }, pendingProjectStatus: [{ projectId: 'alpha', state: 'current' }], projectAssessments: [{ projectId: 'alpha', assessedAt: '2026-09-23T12:00:00Z', assessmentState: 'current', assessment: { outcome: 'Ship alpha', assessment: 'Evidence. '.repeat(80) + '<img src=x onerror="window.reviewExpansionUnsafe=true">' } }] });
+    });
+    assert.equal(await page.getByRole('heading', { name: 'Workspace overview unavailable', exact: true }).isVisible(), true);
+    assert.match(await page.locator('.workspace-review-notice').textContent(), /stale project assessment.*priority overrides remain in effect/);
+    const saved = page.locator('.workspace-independent-assessments');
+    assert.match(await saved.textContent(), /Last assessed/);
+    const expand = saved.locator('[data-review-expand]');
+    await expand.focus(); await page.keyboard.press('Enter');
+    assert.equal(await expand.getAttribute('aria-expanded'), 'true');
+    assert.equal(await saved.locator('.review-narrative-full').isVisible(), true);
+    assert.equal(await saved.locator('img').count(), 0);
+    assert.equal(await page.evaluate(() => window.reviewExpansionUnsafe), false);
+    assert.equal(runs, 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await expand.click(); assert.equal(await expand.getAttribute('aria-expanded'), 'false');
+    await page.evaluate(() => openChatSettings('monitoring'));
+    await page.locator('.monitoring-model-summary').waitFor();
+    assert.match(await page.locator('.monitoring-model-summary').textContent(), /Structured submission.*evidence checks still apply/);
+  });
+});
+
 test('sign-in buttons stay disabled while status is unknown and offer retry on failure', { skip: !chromium }, async () => {
   await withOverview(async page => {
     let release;
@@ -635,6 +663,41 @@ test('sign-in buttons stay disabled while status is unknown and offer retry on f
     assert.equal(await page.locator('#chat-copilot-login').isDisabled(), true);
     assert.equal(await page.locator('#chat-codex-login').isEnabled(), true);
     assert.equal(await page.locator('#chat-auth-status').isVisible(), false);
+  });
+});
+
+test('monitoring save tracks changes, reversions, failures and successful saves', { skip: !chromium }, async () => {
+  await withOverview(async page => {
+    await page.route('**/api/chat/status*', route => route.fulfill({ json: { providers: [{ id: 'openai', label: 'OpenAI', authType: 'api_key', models: [{ id: 'review-model', label: 'Review model', thinkingLevels: ['low', 'high'] }] }] } }));
+    await page.evaluate(() => {
+      workspaceReviewState.settings = { ...workspaceReviewState.settings, provider: 'openai', model: 'review-model', effort: null, assessmentModel: null, automatic: false, activityTracking: true, confirmations: { meteredAutomatic: false, belowRecommendedModel: false }, excludedProjects: [], timezone: 'UTC' };
+    });
+    await page.locator('[data-review-settings]').first().click();
+    const save = page.getByRole('button', { name: 'Save monitoring settings', exact: true });
+    const activity = page.locator('[name=activityTracking]');
+    assert.equal(await save.isDisabled(), true);
+    assert.equal(await page.locator('#review-settings-effort').inputValue(), '');
+    await activity.uncheck(); assert.equal(await save.isEnabled(), true);
+    await activity.check(); assert.equal(await save.isDisabled(), true);
+    await page.locator('[name=hybrid]').check(); assert.equal(await save.isEnabled(), true);
+    await page.locator('[name=hybrid]').uncheck(); assert.equal(await save.isDisabled(), true);
+    await page.locator('#review-settings-effort').selectOption('high'); assert.equal(await save.isEnabled(), true);
+    await page.locator('#review-settings-effort').selectOption(''); assert.equal(await save.isDisabled(), true);
+    let requests = 0; let fail = true;
+    await page.route('**/api/workspace-review/settings', route => {
+      requests++;
+      const body = route.request().postDataJSON();
+      return route.fulfill(fail ? { status: 400, json: { error: 'Try again' } } : { json: { settings: { ...body, revision: body.expectedRevision + 1 } } });
+    });
+    await activity.uncheck(); await save.click();
+    await page.locator('.workspace-dialog-error').getByText('Try again', { exact: true }).waitFor();
+    assert.equal(await save.isEnabled(), true);
+    fail = false; await save.click();
+    await page.waitForFunction(() => document.querySelector('.monitoring-save-status')?.textContent === 'Monitoring settings saved');
+    assert.equal(await save.isDisabled(), true);
+    assert.equal(requests, 2);
+    await activity.check(); assert.equal(await save.isEnabled(), true);
+    await activity.uncheck(); assert.equal(await save.isDisabled(), true);
   });
 });
 

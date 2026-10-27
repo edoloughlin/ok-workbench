@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { safeIssues } = require('./workspace-review-output.js');
 
 const SCHEMA_VERSION = 1;
 const TRACE_TTL_MS = 5 * 86400000;
@@ -54,11 +55,11 @@ class WorkspaceReviewStore {
     }
     return false;
   }
-  async saveTrace({ projectId, stage, jobId, attemptNumber, prompt, evidence, response = null, errorCode = null, diagnostic = null, validationMessage = null, recovery = null, createdAt = new Date().toISOString() }) {
+  async saveTrace({ projectId, stage, jobId, attemptNumber, prompt, evidence, response = null, errorCode = null, diagnostic = null, validationIssues = [], validationMessage = null, recovery = null, createdAt = new Date().toISOString() }) {
     const projectKey = crypto.createHash('sha256').update(String(projectId || 'workspace')).digest('hex');
     const id = `${Date.now()}-${crypto.randomUUID()}`;
     const directory = path.join(this.traceDirectory(), projectKey);
-    await writeJson(path.join(directory, `${id}.json`), { schemaVersion: SCHEMA_VERSION, createdAt, expiresAt: new Date(Date.parse(createdAt) + TRACE_TTL_MS).toISOString(), projectId: projectId || null, stage, jobId, attemptNumber, request: { prompt, evidence }, response, failure: { code: errorCode, diagnostic, ...(validationMessage ? { message: validationMessage } : {}), ...(recovery ? { recovery } : {}) } }, 2);
+    await writeJson(path.join(directory, `${id}.json`), { schemaVersion: SCHEMA_VERSION, createdAt, expiresAt: new Date(Date.parse(createdAt) + TRACE_TTL_MS).toISOString(), projectId: projectId || null, stage, jobId, attemptNumber, request: { prompt, evidence }, response, failure: { code: errorCode, diagnostic, issues: safeIssues(validationIssues), ...(validationMessage ? { message: validationMessage } : {}), ...(recovery ? { recovery } : {}) } }, 2);
     this.startTraceCleaner();
     await this.pruneTraces();
     return path.join(directory, `${id}.json`);

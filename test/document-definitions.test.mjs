@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import test from 'node:test';
 const { documentDefinitions } = createRequire(import.meta.url)('../src/document-definitions.js');
 const entry = (data, key) => data.entries.find(item => item.key === key)?.definition;
@@ -108,14 +106,24 @@ The SEC-1 reference is not a source.
   assert.equal(data.sources.filter(item => item.key === 'SEC-1').length, 2);
 });
 
-test('Luchta requirements contain source IDs and glossary terms with their definitions', async t => {
-  const file = path.join(process.env.HOME || '', 'ok-workbench/luchta/high-level-requirements.md');
-  const source = await readFile(file, 'utf8').catch(() => null);
-  if (!source) return t.skip('local example not available');
+test('numbered requirements and glossary definitions use a reproducible fixture', () => {
+  // Keep this independent of private, changing files in the developer's home.
+  const source = `# Requirements
+| ID | Requirement |
+|----|-------------|
+| WC-1 | A work contract defines agent work. |
+| P-12 | One mechanism for all agent work. |
+## 21 Glossary
+| Term | Definition |
+|------|------------|
+| Blue/green deployment | Two identical production environments. |
+| Work contract | The unit of agent work with acceptance criteria. |
+`;
   const data = documentDefinitions(source);
   assert.match(entry(data, 'WC-1'), /work contract/);
   assert.match(entry(data, 'P-12'), /One mechanism for all (?:agent )?work/);
   assert.match(entry(data, 'Blue/green deployment'), /Two identical production environments/);
   assert.match(entry(data, 'Work contract'), /unit of (?:all|agent) work/);
-  assert.ok(data.sources.some(item => item.key === 'WC-1' && item.line === 108));
+  const location = data.sources.find(item => item.key === 'WC-1');
+  assert.match(source.split('\n')[location.line - 1], /WC-1/);
 });
