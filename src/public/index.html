@@ -8,6 +8,22 @@
     <title>OK Workbench</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/app.css">
+    <style>
+      .markdown-view-toolbar,.markdown-edit-toolbar{display:flex;align-items:center;gap:.7rem;flex-wrap:wrap}
+      .markdown-view-toolbar .doc-kicker{flex:1;min-width:0}
+      .markdown-view-toolbar button,.markdown-edit-toolbar button{font:inherit;cursor:pointer;padding:.4rem .75rem;border:1px solid currentColor;border-radius:5px;background:transparent;color:inherit}
+      .markdown-edit-toolbar{margin-bottom:1rem}
+      .markdown-edit-toolbar strong{margin-right:auto;overflow-wrap:anywhere}
+      .markdown-edit-toolbar button:disabled{opacity:.5;cursor:default}
+      .markdown-edit-status{font-size:.86rem;overflow-wrap:anywhere}
+      .markdown-edit-error{color:#b44835}
+      .markdown-edit-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:1rem;min-height:55vh}
+      .markdown-edit-column{display:flex;flex-direction:column;min-width:0;min-height:0}
+      .markdown-edit-column label,.markdown-edit-label{font-weight:600;margin-bottom:.5rem}
+      #markdown-edit-source{box-sizing:border-box;display:block;width:100%;min-height:55vh;resize:vertical;padding:1rem;border:1px solid #8c939b;border-radius:5px;background:transparent;color:inherit;font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;tab-size:2}
+      .markdown-edit-preview{flex:1;min-width:0;overflow:auto;overflow-wrap:anywhere;padding:1rem;border:1px solid #8c939b;border-radius:5px}
+      @media(max-width:1100px){.markdown-edit-layout{grid-template-columns:minmax(0,1fr)}.markdown-edit-preview{min-height:18rem}}
+    </style>
   </head>
   <body>
     <a class="skip-link" href="#document">Skip to main content</a>

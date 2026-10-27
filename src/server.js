@@ -63,6 +63,7 @@ const CODE_TYPES = {
 };
 const NAMED_CODE_TYPES = { Makefile: ['makefile', 'Makefile'], Dockerfile: ['dockerfile', 'Dockerfile'] };
 const MAX_MARKDOWN_PREVIEW_BYTES = 2 * 1024 * 1024;
+const MAX_MARKDOWN_EDIT_BYTES = 768 * 1024; // Keep the complete document within MAX_JSON_BODY.
 const MAX_CODE_PREVIEW_BYTES = 2 * 1024 * 1024;
 const MAX_CLASSIFICATION_BYTES = 8 * 1024;
 const MAX_INDEX_METADATA_BYTES = 256 * 1024;
@@ -88,6 +89,7 @@ const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
 const EXTERNAL_INSPECTIONS = new Map();
 const EXTERNAL_LINK_WRITES = new Map();
+const MARKDOWN_WRITES = new Map();
 const API_KEY_PROVIDERS = {
   anthropic: { label: 'Anthropic', environment: 'ANTHROPIC_API_KEY' },
   openai: { label: 'OpenAI', environment: 'OPENAI_API_KEY' },
@@ -467,6 +469,80 @@ async function projectData(requested) {
   };
 }
 
+function markdownRevision(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+// Read access may traverse approved symlinks. Editing cannot: only ordinary
+// Markdown files wholly inside the workspace may be written by this endpoint.
+async function editableMarkdownTarget(route) {
+  if (typeof route !== 'string' || !route.startsWith('/workspace/')) return null;
+  let parts;
+  try { parts = route.slice('/workspace/'.length).split('/').map(decodeURIComponent); }
+  catch { return null; }
+  if (!parts.length || parts.some(part => !part || part === '.' || part === '..' || part.startsWith('.') ||
+    part === 'node_modules' || part === '__pycache__' || part.includes('/') || part.includes('\\') || part.includes('\0'))) return null;
+  if (path.extname(parts.at(-1)).toLowerCase() !== '.md') return null;
+  const target = path.join(BUNDLE_ROOT, ...parts);
+  if (await isIgnored(target)) return null;
+  let current = BUNDLE_ROOT;
+  try {
+    for (const part of parts) {
+      current = path.join(current, part);
+      const stat = await fs.lstat(current);
+      if (stat.isSymbolicLink()) return null;
+    }
+    if (!(await fs.lstat(target)).isFile()) return null;
+    return await bundlePath(target) === target ? target : null;
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+    throw error;
+  }
+}
+
+async function withMarkdownWrite(target, operation) {
+  const previous = MARKDOWN_WRITES.get(target) || Promise.resolve();
+  let release;
+  const finished = new Promise(resolve => { release = resolve; });
+  const current = previous.then(() => finished);
+  MARKDOWN_WRITES.set(target, current);
+  await previous;
+  try { return await operation(); }
+  finally { release(); if (MARKDOWN_WRITES.get(target) === current) MARKDOWN_WRITES.delete(target); }
+}
+
+async function saveMarkdownDocument(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.path !== 'string' ||
+      typeof body.text !== 'string' || !/^[a-f0-9]{64}$/.test(body.revision || '') ||
+      body.text.includes('\0') || Buffer.byteLength(body.text, 'utf8') > MAX_MARKDOWN_EDIT_BYTES) {
+    throw new Error('Invalid Markdown save request');
+  }
+  const target = await editableMarkdownTarget(body.path);
+  if (!target) throw new Error('Document is not editable');
+  return withMarkdownWrite(target, async () => {
+    if (await editableMarkdownTarget(body.path) !== target) throw new Error('Document is not editable');
+    const original = await fs.readFile(target);
+    if (markdownRevision(original) !== body.revision) {
+      throw Object.assign(new Error('Document changed on disk. Copy your edits before reloading.'), { code: 'STALE_REVISION' });
+    }
+    const updated = Buffer.from(body.text, 'utf8');
+    if (updated.equals(original)) return { path: publicPath(target), revision: body.revision };
+    const mode = (await fs.stat(target)).mode & 0o777;
+    const temporary = path.join(path.dirname(target), `.ok-workbench-${crypto.randomUUID()}.tmp`);
+    try {
+      await fs.writeFile(temporary, updated, { flag: 'wx', mode });
+      await fs.chmod(temporary, mode);
+      // Optimistic conflict check immediately before the atomic replacement.
+      if (await editableMarkdownTarget(body.path) !== target ||
+          markdownRevision(await fs.readFile(target)) !== body.revision) {
+        throw Object.assign(new Error('Document changed on disk. Copy your edits before reloading.'), { code: 'STALE_REVISION' });
+      }
+      await fs.rename(temporary, target);
+    } finally { await fs.rm(temporary, { force: true }); }
+    return { path: publicPath(target), revision: markdownRevision(updated) };
+  });
+}
+
 async function documentData(requested) {
   let resolved = await readableWorkspacePath(requested);
   if (!resolved) throw new Error('Not found');
@@ -496,9 +572,13 @@ async function documentData(requested) {
     const buffer = await readPrefix(target, Math.min(stat.size, limit));
     const text = buffer.toString('utf8');
     const truncated = stat.size > limit;
-    return classification.kind === 'markdown'
-      ? { ...base, title: titleFromMarkdown(text, path.basename(target)), text, definitions: documentDefinitions(text), truncated }
-      : { ...base, title: path.basename(target), text, truncated };
+    if (classification.kind === 'markdown') {
+      const complete = !truncated && stat.size <= MAX_MARKDOWN_EDIT_BYTES && Buffer.from(text, 'utf8').equals(buffer);
+      const editable = complete && !resolved.external && Boolean(await editableMarkdownTarget(displayPath));
+      return { ...base, title: titleFromMarkdown(text, path.basename(target)), text, definitions: documentDefinitions(text),
+        truncated, editable, revision: editable ? markdownRevision(buffer) : null };
+    }
+    return { ...base, title: path.basename(target), text, truncated };
   }
   return { ...base, title: path.basename(target) };
 }
@@ -1360,7 +1440,8 @@ async function handleRequest(req, res) {
       if (target.startsWith(`${source}${path.sep}`) && await isFile(target)) return respond(res, 200, await fs.readFile(target), path.basename(target) === 'LICENSE' ? 'text/plain; charset=utf-8' : MIME[path.extname(target)] || 'application/octet-stream');
     }
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
-    if (url.pathname === '/api/document') return respond(res, 200, JSON.stringify(await documentData(url.searchParams.get('path') || '/workspace')));
+    if (url.pathname === '/api/document' && req.method === 'GET') return json(res, 200, await documentData(url.searchParams.get('path') || '/workspace'));
+    if (url.pathname === '/api/document' && req.method === 'PUT') { assertChatRequest(req); return json(res, 200, await saveMarkdownDocument(await readJson(req))); }
     if (url.pathname === '/api/project-definition' && req.method === 'GET') return json(res, 200, await projectDefinitionData(url.searchParams.get('path'), url.searchParams.get('key')));
     if (url.pathname === '/api/workspace-review' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await workspaceReview.state()); }
     if (url.pathname === '/api/workspace-review/runs' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'force') || (body.force !== undefined && typeof body.force !== 'boolean')) throw Object.assign(new Error('Invalid workspace review request'), { code: 'INVALID_REQUEST' }); const result = await workspaceReview.run('manual', { force: body.force === true }); return json(res, result.reused ? 200 : 202, result); }

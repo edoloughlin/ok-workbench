@@ -58,6 +58,7 @@ const externalLinkUi = {
   close: document.querySelector('#external-link-close'), cancel: document.querySelector('#external-link-cancel'), approve: document.querySelector('#external-link-approve'), error: document.querySelector('#external-link-error')
 };
 let displayedDocument = null;
+let markdownEditor = null;
 let pageLoadSequence = 0;
 let pendingEntryRename = null;
 let mermaidModulePromise = null;
@@ -984,7 +985,94 @@ async function handleWorkspaceReviewAction(event) {
   } catch (caught) { alert(caught.message || 'Could not update the workspace review'); }
 }
 
+function markdownIsDirty() {
+  return Boolean(markdownEditor && markdownEditor.input.value !== markdownEditor.original);
+}
+function discardMarkdownEditor() {
+  if (markdownEditor) clearTimeout(markdownEditor.previewTimer);
+  markdownEditor = null;
+}
+function renderMarkdownEditPreview(editor) {
+  if (markdownEditor !== editor) return;
+  editor.preview.innerHTML = renderMarkdown(editor.input.value, editor.path);
+  void renderMermaidDiagrams(editor.preview);
+}
+function beginMarkdownEdit() {
+  const file = displayedDocument;
+  if (!file || file.kind !== 'markdown' || !file.editable || markdownEditor) return;
+  documentPane.innerHTML = `<div class="markdown-edit-toolbar"><strong>Edit ${escapeHtml(file.path.split('/').pop())}</strong><span class="markdown-edit-status" role="status" aria-live="polite">No changes</span><button type="button" data-markdown-cancel>Cancel</button><button type="button" data-markdown-save disabled>Save</button></div><div class="markdown-edit-layout"><div class="markdown-edit-column"><label for="markdown-edit-source">Markdown source</label><textarea id="markdown-edit-source" spellcheck="false"></textarea></div><div class="markdown-edit-column"><div class="markdown-edit-label">Preview</div><div class="markdown-edit-preview"></div></div></div>`;
+  const editor = { path: file.path, original: file.text, revision: file.revision,
+    input: documentPane.querySelector('#markdown-edit-source'), preview: documentPane.querySelector('.markdown-edit-preview'),
+    status: documentPane.querySelector('.markdown-edit-status'), save: documentPane.querySelector('[data-markdown-save]'),
+    cancel: documentPane.querySelector('[data-markdown-cancel]'), saving: false, previewTimer: null };
+  markdownEditor = editor;
+  editor.input.value = file.text;
+  renderMarkdownEditPreview(editor);
+  editor.input.addEventListener('input', () => {
+    const dirty = markdownIsDirty();
+    editor.save.disabled = !dirty || editor.saving;
+    editor.status.textContent = dirty ? 'Unsaved changes' : 'No changes';
+    editor.status.classList.remove('markdown-edit-error');
+    clearTimeout(editor.previewTimer);
+    editor.previewTimer = setTimeout(() => renderMarkdownEditPreview(editor), 180);
+  });
+  editor.input.focus();
+}
+async function saveMarkdownEdit() {
+  const editor = markdownEditor;
+  if (!editor || editor.saving || !markdownIsDirty()) return;
+  editor.saving = true;
+  editor.save.disabled = true;
+  editor.cancel.disabled = true;
+  editor.input.disabled = true;
+  editor.status.textContent = 'Saving…';
+  try {
+    const response = await chatApi('/api/document', { method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: editor.path, revision: editor.revision, text: editor.input.value }) });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof result.error === 'string' ? result.error : result.error?.message || `Save failed (${response.status})`);
+    discardMarkdownEditor();
+    await loadPage();
+    if (typeof refreshGitStatus === 'function') void refreshGitStatus();
+  } catch (error) {
+    if (markdownEditor === editor) {
+      editor.status.textContent = error.message;
+      editor.status.classList.add('markdown-edit-error');
+      editor.save.disabled = false;
+    }
+  } finally {
+    editor.saving = false;
+    editor.cancel.disabled = false;
+    editor.input.disabled = false;
+  }
+}
+function cancelMarkdownEdit() {
+  if (markdownEditor?.saving || (markdownIsDirty() && !confirm('Discard unsaved Markdown changes?'))) return;
+  discardMarkdownEditor();
+  void loadPage().catch(showError);
+}
+documentPane.addEventListener('click', event => {
+  if (event.target.closest('[data-markdown-edit]')) { beginMarkdownEdit(); return; }
+  if (event.target.closest('[data-markdown-cancel]')) { cancelMarkdownEdit(); return; }
+  if (event.target.closest('[data-markdown-save]')) void saveMarkdownEdit();
+});
+documentPane.addEventListener('keydown', event => {
+  if (markdownEditor && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault(); void saveMarkdownEdit();
+  }
+});
+addEventListener('beforeunload', event => {
+  if (markdownIsDirty()) { event.preventDefault(); event.returnValue = ''; }
+});
 async function loadPage() {
+  if (markdownEditor) {
+    if (markdownEditor.saving || (markdownIsDirty() && !confirm('Discard unsaved Markdown changes?'))) {
+      history.replaceState({}, '', markdownEditor.path);
+      picker.value = markdownEditor.path.split('/').slice(0, 3).join('/');
+      return;
+    }
+    discardMarkdownEditor();
+  }
   const request = ++pageLoadSequence; const route = routePath();
   const isWorkspaceOverview = route === '/workspace' && !location.hash;
   if (!isWorkspaceOverview) stopWorkspaceReviewPolling();
@@ -995,7 +1083,8 @@ async function loadPage() {
     if (!projectResponse.ok || (documentResponse && !documentResponse.ok)) throw new Error('That document could not be found.');
     const data = await projectResponse.json(); const documentData = documentResponse ? await documentResponse.json() : null;
     if (request !== pageLoadSequence) return;
-  displayedDocument = { path: documentData?.path || '/workspace', project: data.project.name, text: documentData?.text || '' };
+  displayedDocument = { path: documentData?.path || '/workspace', project: data.project.name, text: documentData?.text || '',
+    kind: documentData?.kind, editable: documentData?.editable, revision: documentData?.revision };
   clearTimeout(definitionPreviewTimer); definitionPreview.hidden = true; definitionPreviewSequence++; projectDefinitionCache = new Map();
   currentDefinitions = new Map((documentData?.definitions?.entries || []).map(item => [item.key.toLowerCase(), item.definition]));
   currentDefinitionSources = new Map();
@@ -1017,7 +1106,7 @@ async function loadPage() {
   else {
     const contextLabel = data.context.name === data.project.name ? data.project.name : `${data.project.name} / ${data.context.name}`;
     const kicker = `${contextLabel} / ${documentData.name}`;
-    documentPane.innerHTML = documentData.kind === 'markdown' ? `<p class="doc-kicker">${escapeHtml(kicker)}</p>${renderMarkdown(documentData.text, documentData.path, documentData.definitions)}` : renderFile(documentData, kicker);
+    documentPane.innerHTML = documentData.kind === 'markdown' ? `<div class="markdown-view-toolbar"><p class="doc-kicker">${escapeHtml(kicker)}</p>${documentData.editable ? '<button type="button" data-markdown-edit>Edit</button>' : ''}</div>${renderMarkdown(documentData.text, documentData.path, documentData.definitions)}` : renderFile(documentData, kicker);
     void renderMermaidDiagrams(documentPane);
     void renderProjectReviewContext(data.project.name, route === `/workspace/${encodeURIComponent(data.project.name)}`);
   }
@@ -1037,6 +1126,11 @@ function reloadChangedDocument(event) {
   if (!displayedDocument || event.project !== displayedDocument.project || !Array.isArray(event.paths)) return;
   const projectPath = event.project === 'workspace' ? '/workspace' : `/workspace/${encodeURIComponent(event.project)}`;
   const changed = event.paths.some(path => `${projectPath}/${String(path).split('/').map(encodeURIComponent).join('/')}` === displayedDocument.path);
+  if (changed && markdownEditor) {
+    markdownEditor.status.textContent = 'Document changed on disk. Saving may report a conflict.';
+    markdownEditor.status.classList.add('markdown-edit-error');
+    return;
+  }
   if (changed) loadPage().catch(showError);
 }
 
