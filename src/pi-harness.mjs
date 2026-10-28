@@ -247,9 +247,35 @@ function apiKeyFor(provider, env) {
  */
 function credentialPath(stateDir) { return path.join(stateDir, 'pi-agent', 'auth.json'); }
 
+// Share catalog snapshots between short-lived runtimes without reading Pi CLI configuration.
+const catalogEntries = new Map();
+const catalogStore = {
+  async read(id) { const entry = catalogEntries.get(id); return entry && structuredClone(entry); },
+  async write(id, entry) { catalogEntries.set(id, structuredClone(entry)); },
+  async delete(id) { catalogEntries.delete(id); }
+};
+async function createModelRuntime(stateDir, signal) {
+  return ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, modelsStore: catalogStore, signal });
+}
+let catalogRefresh;
+export function refreshPiCatalog({ stateDir, env = process.env }) {
+  if (!catalogRefresh) {
+    catalogRefresh = (async () => {
+      const runtime = await createModelRuntime(stateDir);
+      for (const provider of runtime.getProviders()) {
+        const key = apiKeyFor(provider.id, env);
+        if (key) await runtime.setRuntimeApiKey(provider.id, key);
+      }
+      const result = await runtime.refresh({ allowNetwork: process.env.PI_OFFLINE === undefined, force: true, signal: AbortSignal.timeout(15000) });
+      if (result.aborted || result.errors.size) throw new Error(`Catalog refresh incomplete (${result.errors.size} provider errors${result.aborted ? ', timed out' : ''})`);
+    })().finally(() => { catalogRefresh = undefined; });
+  }
+  return catalogRefresh;
+}
+
 export async function configuredPiProviders({ stateDir, env = process.env } = {}) {
   if (!stateDir) throw new Error('A browser credential directory is required');
-  const runtime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
+  const runtime = await createModelRuntime(stateDir);
   const configured = [];
   for (const provider of runtime.getProviders()) {
     try {
@@ -288,7 +314,7 @@ export async function configuredPiProviders({ stateDir, env = process.env } = {}
  * never receives a credential or token. */
 export async function startPiLogin({ provider, stateDir, onEvent, onPrompt }) {
   if (!stateDir) throw new Error('A browser credential directory is required');
-  const runtime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
+  const runtime = await createModelRuntime(stateDir);
   const controller = new AbortController();
   const complete = runtime.login(provider, 'oauth', {
     signal: controller.signal,
@@ -393,7 +419,7 @@ export function projectToolResult(toolResult, git) {
 
 // Reviews bypass AgentSession so tool submission cannot trigger an agent loop.
 export async function runPiReview({ provider, model: modelId, stateDir, env = process.env, ...request }) {
-  const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false, signal: request.signal });
+  const modelRuntime = await createModelRuntime(stateDir, request.signal);
   const apiKey = apiKeyFor(provider, env);
   if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey);
   const model = modelRuntime.getPhysicalModel(provider, modelId);
@@ -408,7 +434,7 @@ export async function runPiTurn({ provider, model: modelId, effort, maxTokens, m
   const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: !noWorkspaceTools }, retry: { enabled: !noWorkspaceTools, maxRetries: noWorkspaceTools ? 0 : 2 } });
   const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
   const agentDir = path.join(stateDir, 'pi-agent');
-  const modelRuntime = await ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, refreshOnCreate: false });
+  const modelRuntime = await createModelRuntime(stateDir, signal);
   const apiKey = apiKeyFor(provider, env);
   if (apiKey) await modelRuntime.setRuntimeApiKey(provider, apiKey);
   const model = modelRuntime.getModel(provider, modelId); if (!model) throw new Error(`Pi does not recognise ${provider}/${modelId}`);

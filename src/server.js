@@ -949,6 +949,11 @@ async function listThreads(project) {
   } catch (error) { if (error.code === 'ENOENT') { log(`[ok-workbench] chat: no saved thread directory for ${project} (${Date.now() - startedAt}ms)`); return []; } throw error; }
 }
 
+async function refreshPiCatalog() {
+  try { const pi = await import('./pi-harness.mjs'); await pi.refreshPiCatalog({ stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() }); }
+  catch (error) { logError(`Pi model catalog refresh failed: ${error.message}`); }
+}
+
 async function providerCatalog() {
   const { configuredPiProviders, piRuntimeVersion } = await import('./pi-harness.mjs');
   reviewRuntimeVersion = piRuntimeVersion;
@@ -1469,6 +1474,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/chat/session' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { csrf: CHAT_CSRF }); }
     if (url.pathname === '/api/chat/runtime-settings' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { settings: await loadRuntimeSettings() }); }
     if (url.pathname === '/api/chat/runtime-settings' && req.method === 'PUT') { assertChatRequest(req); return json(res, 200, { settings: await saveRuntimeSettings(await readJson(req)) }); }
+    if (url.pathname === '/api/chat/catalog-refresh' && req.method === 'POST') { assertChatRequest(req); await refreshPiCatalog(); return json(res, 200, {}); }
     if (url.pathname === '/api/chat/status' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await chatStatus(url.searchParams.get('provider'))); }
     if (url.pathname === '/api/chat/pi-version' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, await piVersionChecker.check()); }
     if (url.pathname === '/api/chat/tool-secrets' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, { secrets: Object.keys(await toolApprovals.loadToolSecrets(CHAT_STATE_DIR)).sort() }); }
@@ -1663,6 +1669,9 @@ void resolveWorkspaceRoot().then(async root => {
   workspaceReview = new WorkspaceReviewCoordinator({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT, provider: workspaceReviewProvider, timeZone: currentTimeZone(), isChatActive: () => ACTIVE_TURNS.size > 0, isIgnored });
   workspaceReview.start();
   await refreshDirtyMonitor();
+  void refreshPiCatalog();
+  const catalogPoll = setInterval(() => { void refreshPiCatalog(); }, 24 * 60 * 60 * 1000);
+  catalogPoll.unref();
   // Poll the local cache hourly; the checker contacts npm at most once per 24h.
   void piVersionChecker.check().catch(() => {});
   const piVersionPoll = setInterval(() => { void piVersionChecker.check().catch(() => {}); }, 60 * 60 * 1000);

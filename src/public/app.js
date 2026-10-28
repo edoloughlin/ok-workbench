@@ -2031,6 +2031,9 @@ chatUi.diffRevert.addEventListener('click', () => applyDiffAction('revert'));
 chatUi.diffUnstage.addEventListener('click', () => applyDiffAction('unstage'));
 chatUi.diffUndo.addEventListener('click', undoDiffAction);
 
+// Each browser page connection requests a fresh catalog; a failed refresh leaves the bundled catalog usable.
+void chatApi('/api/chat/catalog-refresh', { method: 'POST' }).then(() => loadChatStatus()).catch(() => {});
+
 let resizeState = null;
 chatUi.splitter.addEventListener('pointerdown', event => { if (innerWidth <= 900) return; resizeState = { coordinate: event.clientX }; chatUi.splitter.setPointerCapture(event.pointerId); event.preventDefault(); });
 chatUi.splitter.addEventListener('pointermove', event => {
