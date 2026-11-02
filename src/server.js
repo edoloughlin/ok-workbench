@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+require('./node-version-check.js');
+
 const http = require('node:http');
 const fsNative = require('node:fs');
 const fs = require('node:fs/promises');

@@ -5,6 +5,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
+
+createRequire(import.meta.url)('../node-version-check.js');
 
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const seed = path.join(dist, 'seed', 'workspace');
