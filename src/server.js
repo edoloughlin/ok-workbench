@@ -795,10 +795,16 @@ async function validateChatFiles(files, thread) {
   if (files.length && thread.project === 'workspace' && thread.workspaceMode !== true) throw new Error('Enable explicit workspace mode before adding file context');
   for (const file of files) {
     if (typeof file !== 'string' || file.length > 2048 || !file.startsWith('/workspace/')) throw new Error('Invalid chat file');
-    const lexical = safePath(file);
+    // The UI sends publicPath() routes, which percent-encode each segment
+    // (e.g. a space becomes %20). Decode once before touching the disk; a
+    // literal "%" in a name arrives double-encoded and still resolves.
+    let decoded;
+    try { decoded = decodeURIComponent(file); } catch { throw new Error('Invalid chat file'); }
+    if (decoded.includes('\0')) throw new Error('Invalid chat file');
+    const lexical = safePath(decoded);
     const root = projectRootForId(thread.project);
     if (!lexical || (thread.project !== 'workspace' && !lexical.startsWith(`${root}${path.sep}`))) throw new Error('Chat file is outside this conversation’s scope');
-    const readable = await readableWorkspacePath(file);
+    const readable = await readableWorkspacePath(decoded);
     if (!readable || !(await fs.stat(readable.target)).isFile() || await isIgnored(lexical)) throw new Error('Chat file is unavailable');
   }
   return [...new Set(files)];

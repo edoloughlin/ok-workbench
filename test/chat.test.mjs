@@ -21,6 +21,7 @@ test('chat coordinator streams and persists a compatible-provider turn without r
   await writeFile(path.join(workspace, 'AGENTS.md'), '# Workspace rules\n\nPreserve workspace evidence.\n');
   await mkdir(path.join(workspace, 'alpha'));
   await writeFile(path.join(workspace, 'alpha', 'AGENTS.md'), '# Alpha rules\n\nUse alpha terminology.\n');
+  await writeFile(path.join(workspace, 'alpha', 'encoded name.md'), '# Encoded name\n');
   const legacyThread = { id: 'legacythread', project: 'workspace', provider: 'compatible', model: 'fake-model', effort: '', title: 'Legacy', messages: [{ id: 'legacyassistant', role: 'assistant', content: 'Old reply', createdAt: new Date().toISOString() }], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   await mkdir(state, { recursive: true }); await writeFile(path.join(state, `${legacyThread.id}.json`), JSON.stringify(legacyThread));
   let rejectNextRequest = false; let releaseHeldResponse = null; const providerRequests = [];
@@ -59,6 +60,18 @@ test('chat coordinator streams and persists a compatible-provider turn without r
     assert.match(contextualRequest.messages.at(-1).content, /Pinned files for this conversation: \["\/workspace\/alpha\/AGENTS.md"\]/);
     const unpin = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`, { method: 'PATCH', headers, body: JSON.stringify({ referencedFiles: [] }) });
     assert.equal(unpin.status, 200); assert.deepEqual((await unpin.json()).referencedFiles, []);
+    // The UI sends publicPath() routes with percent-encoded segments; encoded names must still validate.
+    const encodedFile = '/workspace/alpha/encoded%20name.md';
+    const encodedPin = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`, { method: 'PATCH', headers, body: JSON.stringify({ referencedFiles: [encodedFile] }) });
+    assert.equal(encodedPin.status, 200); assert.deepEqual((await encodedPin.json()).referencedFiles, [encodedFile]);
+    const encodedTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Encoded context', currentFile: encodedFile, provider: 'compatible', model: 'fake-model' }) });
+    assert.equal(encodedTurn.status, 200); await encodedTurn.text();
+    const encodedContextRequest = providerRequests.find(request => request.messages?.at(-1)?.content.startsWith('Encoded context\n\n[File context'));
+    assert.ok(encodedContextRequest); assert.ok(encodedContextRequest.messages.at(-1).content.includes('Currently displayed file: "/workspace/alpha/encoded%20name.md"'));
+    const missingTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Missing context', currentFile: '/workspace/alpha/missing%20name.md', provider: 'compatible', model: 'fake-model' }) });
+    assert.equal(missingTurn.status, 400); assert.match((await missingTurn.json()).error, /Chat file is unavailable/);
+    const reUnpin = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${thread.id}`, { method: 'PATCH', headers, body: JSON.stringify({ referencedFiles: [] }) });
+    assert.equal(reUnpin.status, 200); assert.deepEqual((await reUnpin.json()).referencedFiles, []);
     const heldCreated = await fetch(`http://127.0.0.1:${port}/api/chat/threads`, { method: 'POST', headers, body: JSON.stringify({ project: 'workspace', workspaceMode: true, provider: 'compatible', model: 'fake-model' }) }); const heldThread = await heldCreated.json();
     const heldTurn = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${heldThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Hold response', provider: 'compatible', model: 'fake-model' }) }); const heldReader = heldTurn.body.getReader(); const heldFirst = new TextDecoder().decode((await heldReader.read()).value); const heldStarted = heldFirst.split('\n').filter(Boolean).map(line => JSON.parse(line)).find(event => event.type === 'turn.started'); assert.equal(heldStarted.supports_steering, false);
     const overlapping = await fetch(`http://127.0.0.1:${port}/api/chat/threads/${heldThread.id}/turns`, { method: 'POST', headers, body: JSON.stringify({ message: 'Second comment', provider: 'compatible', model: 'fake-model' }) }); assert.equal(overlapping.status, 400); assert.match((await overlapping.json()).error, /active response/);
