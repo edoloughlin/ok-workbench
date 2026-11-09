@@ -95,6 +95,14 @@ export function pythonSandboxArgs({ input, output, packages, install = false, ti
   return { args, command: ['/usr/bin/python3', ...pythonArgs] };
 }
 
+export async function findPrlimit(check = access) {
+  // Restrict discovery to system-owned locations, never a workspace PATH.
+  for (const candidate of ['/usr/bin/prlimit', '/run/current-system/sw/bin/prlimit']) {
+    try { await check(candidate, constants.X_OK); return candidate; } catch { /* Try the next trusted path. */ }
+  }
+  throw new Error('Python requires prlimit at /usr/bin/prlimit or /run/current-system/sw/bin/prlimit');
+}
+
 async function executeSandbox(configuration, { signal, stdin = '' } = {}) {
   signal?.throwIfAborted();
   const { args, command } = pythonSandboxArgs(configuration);
@@ -109,7 +117,7 @@ async function executeSandbox(configuration, { signal, stdin = '' } = {}) {
   }
   args.push(...command);
   return new Promise((resolve, reject) => {
-    const child = spawn('/usr/bin/prlimit', args, { env: {}, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(configuration.prlimit, args, { env: {}, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = Buffer.alloc(0); let stderr = Buffer.alloc(0); let truncated = false; let failure;
     const capture = (current, chunk) => { if (current.length + chunk.length > MAX_OUTPUT) truncated = true; return Buffer.concat([current, chunk.subarray(0, MAX_OUTPUT - current.length)]); };
     child.stdout.on('data', chunk => { stdout = capture(stdout, chunk); });
@@ -203,9 +211,10 @@ export async function runPython(params, options = {}) {
 async function runPythonInvocation(params, { projectRoot, env = process.env, signal } = {}) {
   const request = pythonRequest(params, env);
   if (process.platform !== 'linux') throw new Error('General Python execution currently requires Linux with Bubblewrap; no unsandboxed fallback is available');
-  for (const executable of ['/usr/bin/bwrap', '/usr/bin/prlimit', '/usr/bin/python3']) {
+  for (const executable of ['/usr/bin/bwrap', '/usr/bin/python3']) {
     await access(executable, constants.X_OK).catch(() => { throw new Error(`Python requires ${executable}`); });
   }
+  const prlimit = await findPrlimit();
   signal?.throwIfAborted();
   const scratch = await mkdtemp(path.join(tmpdir(), 'ok-workbench-python-'));
   const input = path.join(scratch, 'input'); const output = path.join(scratch, 'output'); const packages = path.join(scratch, 'packages');
@@ -214,13 +223,13 @@ async function runPythonInvocation(params, { projectRoot, env = process.env, sig
     await stageInputs(projectRoot, request.inputs, input);
     let installation;
     if (request.packages.length) {
-      installation = await executeSandbox({ packages, install: true, timeoutSeconds: 120, pythonArgs: ['-I', '-m', 'pip', '--isolated', '--disable-pip-version-check', 'install', '--index-url', 'https://pypi.org/simple', '--only-binary=:all:', '--no-cache-dir', '--no-compile', '--no-input', '--retries', '1', '--timeout', '15', '--target', '/packages', ...request.packages] }, { signal });
+      installation = await executeSandbox({ prlimit, packages, install: true, timeoutSeconds: 120, pythonArgs: ['-I', '-m', 'pip', '--isolated', '--disable-pip-version-check', 'install', '--index-url', 'https://pypi.org/simple', '--only-binary=:all:', '--no-cache-dir', '--no-compile', '--no-input', '--retries', '1', '--timeout', '15', '--target', '/packages', ...request.packages] }, { signal });
       if (!installation.ok) return { ...installation, phase: 'install', artifacts: [], paths: [], packages: request.packages };
     }
     // -S skips site startup and .pth execution. Append dependencies after the
     // standard library so a wheel cannot shadow launcher imports at startup.
     const bootstrap = `import sys, json\nsys.path.append('/packages')\nsys.argv = ['<python>'] + json.loads(${JSON.stringify(JSON.stringify(request.arguments))})\nexec(compile(${JSON.stringify(request.code)}, '<python>', 'exec'), {'__name__': '__main__'})`;
-    const result = await executeSandbox({ input, output, packages, timeoutSeconds: request.timeoutSeconds, pythonArgs: ['-I', '-S', '-u', '-c', bootstrap] }, { signal, stdin: request.stdin });
+    const result = await executeSandbox({ prlimit, input, output, packages, timeoutSeconds: request.timeoutSeconds, pythonArgs: ['-I', '-S', '-u', '-c', bootstrap] }, { signal, stdin: request.stdin });
     const artifacts = result.ok ? await promoteArtifacts(output, projectRoot, request.artifacts) : [];
     return { ...result, phase: 'execute', artifacts, paths: artifacts.map(file => file.project_path), packages: request.packages };
   } finally { await rm(scratch, { recursive: true, force: true }); }

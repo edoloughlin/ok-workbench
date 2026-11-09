@@ -337,6 +337,14 @@ function toolArguments(argumentsList) {
   if (!Array.isArray(argumentsList) || argumentsList.length > MAX_TOOL_ARGUMENTS || argumentsList.some(value => typeof value !== 'string' || value.length > MAX_TOOL_ARGUMENT_LENGTH || value.includes('\0'))) throw new Error('Tool arguments must be 0–32 short strings');
   return argumentsList;
 }
+async function findPrlimit(access = fs.access) {
+  // Do not search PATH: workspace-controlled environment must not select the
+  // executable that enforces resource limits. These are system-owned paths.
+  for (const candidate of ['/usr/bin/prlimit', '/run/current-system/sw/bin/prlimit']) {
+    try { await access(candidate, constants.X_OK); return candidate; } catch { /* Try the next trusted path. */ }
+  }
+  throw new Error('Workspace tools require prlimit at /usr/bin/prlimit or /run/current-system/sw/bin/prlimit');
+}
 async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
   const [tool, policy] = await Promise.all([workspaceTool(relative), workspaceToolPolicy(relative)]); const args = toolArguments(argumentsList);
   if (process.platform !== 'linux') throw new Error('Workspace tools require Linux resource controls in this build');
@@ -346,8 +354,8 @@ async function runWorkspaceTool({ path: relative, arguments: argumentsList }) {
   const command = tool.runtime === 'python3' ? 'python3' : process.execPath;
   const limits = approved.resourceLimits;
   if (![limits.memoryBytes, limits.cpuSeconds, limits.processCount, limits.openFiles, limits.fileSizeBytes].every(value => Number.isInteger(value) && value > 0)) throw new Error('Invalid Workbench resource policy');
+  const prlimit = await findPrlimit();
   return new Promise((resolve, reject) => {
-    const prlimit = '/usr/bin/prlimit';
     const child = spawn(prlimit, [`--as=${limits.memoryBytes}`, `--cpu=${limits.cpuSeconds}`, `--nproc=${limits.processCount}`, `--nofile=${limits.openFiles}`, `--fsize=${limits.fileSizeBytes}`, '--', command, tool.target, ...args], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: true });
     let stdout = ''; let stderr = ''; let timedOut = false;
     const capture = (current, chunk) => `${current}${chunk}`.slice(0, MAX_TOOL_OUTPUT);
@@ -563,6 +571,6 @@ function startWorker() {
     finally { pending--; if (!pending && inputClosed) keepAlive.unref(); }
   });
 }
-module.exports = { setWorkspaceRoot, listFiles, readFile, readGrantedFile, extractDocument, searchFiles, moveFile, editFile, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
+module.exports = { findPrlimit, setWorkspaceRoot, listFiles, readFile, readGrantedFile, extractDocument, searchFiles, moveFile, editFile, listWorkspaceTools, workspaceToolPolicy, runWorkspaceTool, applyPatch, applyProjectUpdate, createProject, startWorker };
 
 if (require.main === module) startWorker();
