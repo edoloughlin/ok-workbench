@@ -99,6 +99,8 @@ async function withOverview(fn) {
     server = await startServer(workspace, state, serverPort, assetPort);
     browser = await chromium.launch();
     const page = await browser.newPage();
+    // Catalog refresh can wait on external services; these UI tests use the bundled catalog.
+    await page.route('**/api/chat/catalog-refresh', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
     await page.goto(`http://127.0.0.1:${serverPort}/workspace/`, { waitUntil: 'networkidle' });
     await page.waitForSelector('.workspace-overview', { timeout: 5000 });
     await fn(page, { serverPort, state, workspace });
@@ -435,6 +437,7 @@ test('clicking Review now before any review has ever completed shows persistent,
     server = await startServer(workspace, state, serverPort, assetPort);
     browser = await chromium.launch();
     const page = await browser.newPage();
+    await page.route('**/api/chat/catalog-refresh', route => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
     // The real provider is not reachable in this environment; intercept the
     // review API so the test deterministically exercises "a job is running
     // but no review has ever completed" instead of racing a real network
@@ -634,6 +637,8 @@ test('failed overview shows independent assessments with safe expandable prose',
     assert.equal(runs, 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await expand.click(); assert.equal(await expand.getAttribute('aria-expanded'), 'false');
+    // Keep the output-mode assertion independent of the host's installed Pi catalog.
+    await page.route('**/api/chat/status', route => route.fulfill({ json: { defaultProvider: 'fixture', providers: [{ id: 'fixture', label: 'Fixture', authType: 'api_key', models: [{ id: 'fixture-model', label: 'Fixture model', reviewOutput: { resultTool: 'supported', transport: 'result_tool' } }] }] } }));
     await page.evaluate(() => openChatSettings('monitoring'));
     await page.locator('.monitoring-model-summary').waitFor();
     assert.match(await page.locator('.monitoring-model-summary').textContent(), /Structured submission.*evidence checks still apply/);

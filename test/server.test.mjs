@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -95,7 +95,7 @@ test('chat UI exposes the GitHub Copilot device code outside transient status te
   assert.match(script, /data-create-entry="page"/);
   assert.match(script, /data-create-entry="directory"/);
   assert.match(script, /pendingEntryRename/);
-  assert.match(script, /form\.dataset\.saving = 'true'; pendingEntryRename = null; void loadPage\(\)/);
+  assert.match(script, /form\.dataset\.saving = 'true'; pendingEntryRename = null; void refreshEntryTree\(\)/);
   assert.match(script, /class="nav-icon project-icon"/);
   assert.match(script, /function fileIcon\(path\)/);
   assert.match(script, /pptx: \['presentation', 'presentation'\]/);
@@ -202,7 +202,7 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
   await symlink(outside, path.join(workspace, 'escape.md'));
   git('add', '.'); git('commit', '-m', 'baseline');
   const port = 38517;
-  const child = spawn(process.execPath, [path.join(root, 'dist', 'server.js')], { env: { ...process.env, OKF_WORKSPACE_ROOT: workspace, PORT: String(port) } });
+  const child = spawn(process.execPath, [path.join(root, 'dist', 'server.js')], { env: { ...process.env, OKF_WORKSPACE_ROOT: workspace, OK_WORKBENCH_NATIVE_FILE_MANAGER: '0', PORT: String(port) } });
   try {
     await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('server did not start')), 5000); child.stdout?.on('data', () => { clearTimeout(timer); resolve(); }); child.on('error', reject); child.on('exit', code => reject(new Error(`server exited ${code}`))); });
     const document = await fetch(`http://127.0.0.1:${port}/api/document?path=/workspace/index.md`);
@@ -248,6 +248,24 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.match(await readFile(path.join(workspace, 'index.md'), 'utf8'), /\[New project\]\(new-project\/\)/);
     const untitledPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'page', parentPath: '/workspace/new-project' }) });
     assert.equal(untitledPage.status, 201); const untitledPageBody = await untitledPage.json(); assert.equal(untitledPageBody.location, '/workspace/new-project/untitled-page.md'); assert.ok(untitledPageBody.renameToken);
+    const absolutePathRequest = (body, token = csrf) => fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries/absolute-path`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': token }, body: JSON.stringify(body) });
+    const absolutePath = await absolutePathRequest({ path: untitledPageBody.location });
+    assert.equal(absolutePath.status, 200); assert.equal((await absolutePath.json()).absolutePath, await realpath(path.join(workspace, 'new-project', 'untitled-page.md')));
+    assert.equal((await absolutePathRequest({ path: '/workspace/new-project/%2e%2e/linked-project/index.md' })).status, 403);
+    assert.equal((await absolutePathRequest({ path: '/workspace/linked-project/index.md' })).status, 403);
+    await symlink(path.join(workspace, 'linked-project'), path.join(workspace, 'new-project', 'linked'));
+    assert.equal((await absolutePathRequest({ path: '/workspace/new-project/linked/index.md' })).status, 403);
+    assert.equal((await absolutePathRequest({ path: '/workspace/new-project/%2egit/config' })).status, 403);
+    assert.notEqual((await absolutePathRequest({ path: untitledPageBody.location }, 'invalid')).status, 200);
+    assert.equal((await absolutePathRequest({ path: untitledPageBody.location, extra: true })).status, 400);
+    const unusualName = 'space ü, $(literal).md'; await writeFile(path.join(workspace, 'new-project', unusualName), '# Unusual\n');
+    const unusualPath = `/workspace/new-project/${encodeURIComponent(unusualName)}`;
+    const unusualResponse = await absolutePathRequest({ path: unusualPath }); assert.equal(unusualResponse.status, 200); assert.equal((await unusualResponse.json()).absolutePath, await realpath(path.join(workspace, 'new-project', unusualName)));
+    const nativeCapability = await fetch(`http://127.0.0.1:${port}/api/native-file-manager`); assert.equal((await nativeCapability.json()).available, false);
+    const reveal = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries/reveal`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: untitledPageBody.location }) });
+    assert.equal(reveal.status, 503); assert.equal((await reveal.json()).code, 'NATIVE_UNAVAILABLE');
+    const untrusted = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries/absolute-path`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf, origin: 'https://evil.example' }, body: JSON.stringify({ path: untitledPageBody.location }) });
+    assert.notEqual(untrusted.status, 200);
     const renamedPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ path: untitledPageBody.location, name: 'Research notes', renameToken: untitledPageBody.renameToken }) });
     assert.equal(renamedPage.status, 200); assert.equal((await renamedPage.json()).location, '/workspace/new-project/research-notes.md');
     assert.match(await readFile(path.join(workspace, 'new-project', 'research-notes.md'), 'utf8'), /# Research notes/);
@@ -264,5 +282,24 @@ test('server serves an arbitrary bundle, redirects legacy routes, and rejects es
     assert.equal(renamedExistingDirectory.status, 200); assert.equal((await renamedExistingDirectory.json()).location, '/workspace/new-project/source-material');
     const nestedPage = await fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'page', parentPath: '/workspace/new-project/source-material' }) });
     assert.equal(nestedPage.status, 201); assert.equal((await nestedPage.json()).location, '/workspace/new-project/source-material/untitled-page.md');
+    const concurrentCreate = () => fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify({ type: 'page', parentPath: '/workspace/new-project/source-material' }) });
+    const concurrent = await Promise.all([concurrentCreate(), concurrentCreate()]); assert.deepEqual(concurrent.map(response => response.status), [201, 201]);
+    const concurrentLocations = await Promise.all(concurrent.map(response => response.json())); assert.equal(new Set(concurrentLocations.map(item => item.location)).size, 2);
+    const concurrentIndex = await readFile(path.join(workspace, 'new-project', 'source-material', 'index.md'), 'utf8');
+    for (const item of concurrentLocations) assert.ok(concurrentIndex.includes(item.location.split('/').pop()));
+    const deleteEntry = body => fetch(`http://127.0.0.1:${port}/api/projects/new-project/entries`, { method: 'DELETE', headers: { 'content-type': 'application/json', 'x-ok-workbench-csrf': csrf }, body: JSON.stringify(body) });
+    assert.equal((await deleteEntry({ path: '/workspace/new-project', confirmPermanent: true })).status, 403);
+    assert.equal((await deleteEntry({ path: '/workspace/new-project/index.md', confirmPermanent: true })).status, 403);
+    assert.equal((await deleteEntry({ path: '/workspace/new-project/source-material', confirmPermanent: false })).status, 400);
+    const indexBeforeDelete = await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8');
+    await writeFile(path.join(workspace, 'new-project', 'index.md'), `${indexBeforeDelete}\nProse [kept](source-material/).\n\n\`\`\`md\n- [Example](source-material/)\n\`\`\`\n- [Other](source-material-extra/)\n`);
+    const deletedDirectory = await deleteEntry({ path: '/workspace/new-project/source-material', confirmPermanent: true });
+    assert.equal(deletedDirectory.status, 200); assert.equal((await deletedDirectory.json()).parentLocation, '/workspace/new-project');
+    await assert.rejects(readFile(path.join(workspace, 'new-project', 'source-material', 'untitled-page.md')));
+    const indexAfterDelete = await readFile(path.join(workspace, 'new-project', 'index.md'), 'utf8');
+    assert.doesNotMatch(indexAfterDelete, /\[Source material\]\(source-material\/\)/);
+    assert.match(indexAfterDelete, /Prose \[kept\]\(source-material\/\)/);
+    assert.match(indexAfterDelete, /\[Example\]\(source-material\/\)/);
+    assert.match(indexAfterDelete, /\[Other\]\(source-material-extra\/\)/);
   } finally { child.kill(); }
 });

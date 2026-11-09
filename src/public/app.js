@@ -494,6 +494,12 @@ function entryCreationActions(parentPath) {
   return `<span class="entry-creation-actions"><button type="button" data-create-entry="page" data-entry-parent="${parent}" title="Create page" aria-label="Create page">${ENTRY_ACTION_ICONS.page}</button><button type="button" data-create-entry="directory" data-entry-parent="${parent}" title="Create directory" aria-label="Create directory">${ENTRY_ACTION_ICONS.directory}</button></span>`;
 }
 
+function projectNavigationHeading(project) {
+  if (project.name === 'workspace') return '<div class="nav-section-heading"><p class="nav-label">Project pages</p></div>';
+  const target = escapeHtml(project.path);
+  return `<div class="nav-section-heading" data-menu-path="${target}" data-menu-root="true"><p class="nav-label">Project pages</p>${entryCreationActions(project.path)}<button class="tree-menu-trigger" type="button" data-menu-path="${target}" data-menu-root="true" aria-label="Project folder actions" aria-haspopup="menu">⋯</button></div>`;
+}
+
 const CORE_DOCUMENTS = {
   'AGENTS.md': { title: 'Instructions', subtitle: 'System prompt', icon: 'instructions' },
   'log.md': { title: 'Activity', subtitle: 'Operation log', icon: 'activity' },
@@ -504,7 +510,7 @@ const CORE_DOCUMENTS = {
 
 function coreDocumentLink(item) {
   const document = CORE_DOCUMENTS[item.label] || { title: item.label, subtitle: 'Core document', icon: 'document' };
-  return `<a class="core-document ${active(item.path) ? 'active' : ''}" href="${item.path}"><span class="nav-icon core-icon">${NAV_ICONS[document.icon]}</span><span class="core-document-copy"><span class="core-document-title">${escapeHtml(document.title)}</span><span class="core-document-subtitle">${escapeHtml(document.subtitle)}</span></span></a>`;
+  return `<div class="tree-menu-row"><a class="core-document ${active(item.path) ? 'active' : ''}" href="${item.path}" data-menu-path="${escapeHtml(item.path)}"><span class="nav-icon core-icon">${NAV_ICONS[document.icon]}</span><span class="core-document-copy"><span class="core-document-title">${escapeHtml(document.title)}</span><span class="core-document-subtitle">${escapeHtml(document.subtitle)}</span></span></a><button class="tree-menu-trigger" type="button" data-menu-path="${escapeHtml(item.path)}" aria-label="Actions for ${escapeHtml(document.title)}" aria-haspopup="menu">⋯</button></div>`;
 }
 
 function projectLink(item) {
@@ -530,18 +536,19 @@ function fileIcon(path) {
 function treeNode(item) {
   if (item.type === 'file') {
     if (pendingEntryRename?.path === item.path) return `<form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}">${fileIcon(item.path)}<input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Page name"><span class="tree-inline-extension" aria-hidden="true">.md</span></form>`;
-    const renamable = item.path.split('/').pop() !== 'index.md';
-    return `<a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}" ${renamable ? 'data-entry-type="page"' : ''}>${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a>`;
+    const renamable = /\.md$/i.test(item.path) && item.path.split('/').pop() !== 'index.md';
+    return `<div class="tree-menu-row"><a class="nav-link tree-link tree-page ${active(item.path) ? 'active' : ''}" href="${item.path}" data-menu-path="${escapeHtml(item.path)}" ${renamable ? 'data-entry-type="page"' : ''}>${fileIcon(item.path)}<span>${escapeHtml(item.label)}</span></a><button class="tree-menu-trigger" type="button" data-menu-path="${escapeHtml(item.path)}" aria-label="Actions for ${escapeHtml(item.label)}" aria-haspopup="menu">⋯</button></div>`;
   }
   if (item.type === 'external-link') {
     const status = item.status === 'approved' ? 'External · read only' : item.status === 'changed' ? 'External link changed' : item.status === 'missing' ? 'External link missing' : 'External link · enable';
-    if (item.status === 'approved') return `<a class="nav-link tree-link tree-page external-link-approved ${active(item.path) ? 'active' : ''}" href="${item.path}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></a>`;
-    return `<button class="external-link-request tree-link tree-page" type="button" data-external-link="${escapeHtml(item.linkPath)}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></button>`;
+    const trigger = `<button class="tree-menu-trigger" type="button" data-menu-path="${escapeHtml(item.path)}" data-menu-restricted="true" aria-label="Actions for ${escapeHtml(item.label)}" aria-haspopup="menu">⋯</button>`;
+    if (item.status === 'approved') return `<div class="tree-menu-row"><a class="nav-link tree-link tree-page external-link-approved ${active(item.path) ? 'active' : ''}" href="${item.path}" data-menu-path="${escapeHtml(item.path)}" data-menu-restricted="true"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></a>${trigger}</div>`;
+    return `<div class="tree-menu-row"><button class="external-link-request tree-link tree-page" type="button" data-external-link="${escapeHtml(item.linkPath)}" data-menu-path="${escapeHtml(item.path)}" data-menu-restricted="true"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>${status}</small></span></button>${trigger}</div>`;
   }
-  if (item.type === 'internal-link') return `<a class="nav-link tree-link tree-page" href="${item.path}"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>Linked inside workspace</small></span></a>`;
+  if (item.type === 'internal-link') return `<div class="tree-menu-row"><a class="nav-link tree-link tree-page" href="${item.path}" data-menu-path="${escapeHtml(item.path)}" data-menu-restricted="true"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)} <small>Linked inside workspace</small></span></a><button class="tree-menu-trigger" type="button" data-menu-path="${escapeHtml(item.path)}" data-menu-restricted="true" aria-label="Actions for ${escapeHtml(item.label)}" aria-haspopup="menu">⋯</button></div>`;
   if (pendingEntryRename?.path === item.path) return `<div class="tree-inline-directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}"><input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Directory name"></form></div>`;
   const containsPendingEntry = pendingEntryRename?.path.startsWith(`${item.path}/`);
-  return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-entry-type="directory"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)}</span></a>${entryCreationActions(item.path)}</summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
+  return `<details class="tree-directory" ${containsCurrent(item.path) || containsPendingEntry ? 'open' : ''}><summary><a class="tree-directory-link ${active(item.path) ? 'active' : ''}" href="${item.path}" data-menu-path="${escapeHtml(item.path)}" data-menu-directory="true" ${item.indexed ? 'data-entry-type="directory"' : ''}><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${escapeHtml(item.label)}</span></a>${item.indexed ? entryCreationActions(item.path) : ''}<button class="tree-menu-trigger" type="button" data-menu-path="${escapeHtml(item.path)}" aria-label="Actions for ${escapeHtml(item.label)}" aria-haspopup="menu">⋯</button></summary><div class="tree-children">${item.children.length ? item.children.map(treeNode).join('') : '<span class="tree-empty">Empty</span>'}</div></details>`;
 }
 
 function formatBytes(bytes) {
@@ -1065,6 +1072,8 @@ addEventListener('beforeunload', event => {
   if (markdownIsDirty()) { event.preventDefault(); event.returnValue = ''; }
 });
 async function loadPage() {
+  const expandedEntries = new Set([...nav.querySelectorAll('.tree-directory[open] > summary a[data-menu-path]')].map(anchor => anchor.dataset.menuPath));
+  closeEntryMenu();
   if (markdownEditor) {
     if (markdownEditor.saving || (markdownIsDirty() && !confirm('Discard unsaved Markdown changes?'))) {
       history.replaceState({}, '', markdownEditor.path);
@@ -1096,10 +1105,11 @@ async function loadPage() {
   picker.innerHTML = data.projects.map(item => `<option value="${item.path}" ${item.path === data.project.path ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('');
   const navigation = data.catalog.length
     ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>`
-    : `<div class="nav-section-heading"><p class="nav-label">Project pages</p>${data.project.name === 'workspace' ? '' : entryCreationActions(data.project.path)}</div><div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
+    : `${projectNavigationHeading(data.project)}<div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
   nav.innerHTML = isWorkspaceOverview ? workspaceOverviewNav(data) : `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
   for (const summary of nav.querySelectorAll('.tree-directory > summary')) {
-    summary.setAttribute('aria-label', summary.querySelector('a').textContent.trim());
+    const anchor = summary.querySelector('a'); summary.setAttribute('aria-label', anchor.textContent.trim());
+    if (expandedEntries.has(anchor.dataset.menuPath)) summary.parentElement.open = true;
   }
   if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
   if (isWorkspaceOverview) { renderWorkspaceOverview(await loadWorkspaceReview()); }
@@ -1150,34 +1160,196 @@ documentPane.addEventListener('click', event => { void handleWorkspaceReviewActi
 documentPane.addEventListener('keydown', event => { const tab = event.target.closest('[data-review-tab]'); if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return; const tabs = [...documentPane.querySelectorAll('[data-review-tab]')]; const current = tabs.indexOf(tab); const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; event.preventDefault(); sessionStorage.setItem('ok-workbench-workspace-tab', tabs[next].dataset.reviewTab); renderWorkspaceOverview(workspaceReviewState); requestAnimationFrame(() => documentPane.querySelector(`[data-review-tab="${tabs[next].dataset.reviewTab}"]`)?.focus()); });
 documentPane.addEventListener('keydown', handleTableInteraction);
 picker.addEventListener('change', () => { history.pushState({}, '', `${picker.value}/`); loadPage().catch(showError); });
+async function refreshEntryTree() {
+  const currentRoute = routePath(); const project = displayedDocument?.project;
+  const expanded = new Set([...nav.querySelectorAll('.tree-directory[open] > summary a[data-menu-path]')].map(anchor => anchor.dataset.menuPath));
+  const response = await fetch(`/api/project?path=${encodeURIComponent(currentRoute)}`);
+  if (!response.ok) throw new Error('Could not refresh navigation');
+  const data = await response.json();
+  if (currentRoute !== routePath() || project !== displayedDocument?.project) return;
+  const navigation = data.catalog.length ? `<p class="nav-label">Projects</p><div class="project-list">${data.catalog.map(projectLink).join('')}</div>` : `${projectNavigationHeading(data.project)}<div class="project-tree">${data.tree.map(treeNode).join('')}</div>`;
+  nav.innerHTML = `<div class="breadcrumbs" aria-label="Current directory">${data.context.breadcrumbs.map((item, index) => `<a href="${item.path}" ${index === data.context.breadcrumbs.length - 1 ? 'aria-current="location"' : ''}>${escapeHtml(item.label)}</a>`).join('<span>/</span>')}</div><p class="nav-label">Core documents</p><div class="core-documents">${data.common.map(coreDocumentLink).join('')}</div><hr class="nav-rule">${navigation}`;
+  for (const summary of nav.querySelectorAll('.tree-directory > summary')) {
+    const anchor = summary.querySelector('a'); summary.setAttribute('aria-label', anchor.textContent.trim());
+    if (expanded.has(anchor.dataset.menuPath)) summary.parentElement.open = true;
+  }
+  if (pendingEntryRename) requestAnimationFrame(() => { const input = nav.querySelector('.tree-inline-rename input'); input?.focus(); input?.select(); });
+}
 async function createProjectEntry(button) {
   button.disabled = true;
+  const project = displayedDocument?.project; const state = { path: button.dataset.entryParent };
+  if (entryMutationAffectsEditor(state, 'new-page') && !await prepareEntryMutation()) { button.disabled = false; return; }
+  if (project !== displayedDocument?.project) { button.disabled = false; return; }
   try {
-    const response = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: button.dataset.createEntry, parentPath: button.dataset.entryParent }) });
+    const response = await chatApi(`/api/projects/${encodeURIComponent(project)}/entries`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: button.dataset.createEntry, parentPath: button.dataset.entryParent }) });
     const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not create item');
-    pendingEntryRename = { path: data.location, type: data.type, renameToken: data.renameToken }; await loadPage(); refreshGitStatus();
+    if (project !== displayedDocument?.project) return;
+    pendingEntryRename = { path: data.location, type: data.type, renameToken: data.renameToken }; await refreshEntryTree(); refreshGitStatus();
   } catch (error) { button.disabled = false; alert(error.message || 'Could not create item'); }
 }
 async function beginEntryRename(anchor) {
-  pendingEntryRename = { path: anchor.getAttribute('href'), type: anchor.dataset.entryType }; await loadPage();
+  pendingEntryRename = { path: anchor.getAttribute('href'), type: anchor.dataset.entryType }; await refreshEntryTree();
 }
 async function commitEntryRename(form) {
   if (form.dataset.saving === 'true') return; const input = form.querySelector('input'); const name = input.value.trim();
-  if (!name) { pendingEntryRename = null; await loadPage(); return; }
+  if (!name) { pendingEntryRename = null; await refreshEntryTree(); return; }
   form.dataset.saving = 'true'; input.disabled = true;
+  const project = displayedDocument?.project;
+  const state = { path: form.dataset.entryPath }; const affected = entryMutationAffectsEditor(state, 'rename');
+  if (affected && !await prepareEntryMutation()) { form.dataset.saving = 'false'; input.disabled = false; return; }
+  const lockedEditor = affected ? markdownEditor : null; if (lockedEditor) lockedEditor.input.disabled = true;
   try {
-    const response = await chatApi(`/api/projects/${encodeURIComponent(displayedDocument.project)}/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: form.dataset.entryPath, name, renameToken: pendingEntryRename?.renameToken }) });
+    const response = await chatApi(`/api/projects/${encodeURIComponent(project)}/entries`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: form.dataset.entryPath, name, renameToken: pendingEntryRename?.renameToken }) });
     const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Could not rename item');
-    pendingEntryRename = null; await loadPage(); refreshGitStatus();
+    if (project !== displayedDocument?.project) return;
+    const oldPath = form.dataset.entryPath; const current = routePath(); const decodedOldPath = decodeURIComponent(oldPath);
+    const affectsRoute = current === decodedOldPath || current.startsWith(`${decodedOldPath}/`);
+    if (affectsRoute) history.replaceState({}, '', `${data.location}${current.slice(decodedOldPath.length)}`);
+    pendingEntryRename = null; if (affectsRoute) await loadPage(); else await refreshEntryTree(); refreshGitStatus();
   } catch (error) { form.dataset.saving = 'false'; input.disabled = false; alert(error.message || 'Could not rename item'); input.focus(); input.select(); }
+  finally { if (lockedEditor && markdownEditor === lockedEditor) lockedEditor.input.disabled = false; }
 }
+const entryMenu = document.createElement('div');
+entryMenu.className = 'entry-context-menu'; entryMenu.hidden = true; entryMenu.setAttribute('role', 'menu'); entryMenu.setAttribute('aria-label', 'File actions'); document.body.append(entryMenu);
+let entryMenuState = null;
+const pendingEntryDeletions = new Set();
+function closeEntryMenu(restore = false) {
+  const trigger = entryMenuState?.trigger; trigger?.setAttribute('aria-expanded', 'false'); entryMenuState = null; entryMenu.hidden = true; entryMenu.replaceChildren();
+  if (restore && trigger?.isConnected) trigger.focus();
+}
+async function openEntryMenu(trigger, x, y) {
+  const targetPath = trigger.dataset.menuPath; const project = displayedDocument?.project;
+  if (!targetPath || !project || project === 'workspace') return;
+  closeEntryMenu(); const state = { trigger, path: targetPath, project }; entryMenuState = state; trigger.setAttribute('aria-expanded', 'true');
+  const response = await chatApi('/api/native-file-manager').catch(() => null);
+  const capability = response?.ok ? await response.json().catch(() => null) : null;
+  if (entryMenuState !== state) return;
+  const anchor = nav.querySelector(`a[data-menu-path="${CSS.escape(targetPath)}"]`);
+  const isDirectory = trigger.dataset.menuRoot === 'true' || anchor?.dataset.menuDirectory === 'true';
+  const restricted = trigger.dataset.menuRestricted === 'true' || anchor?.dataset.menuRestricted === 'true';
+  const actions = restricted ? [['relative', 'Copy relative path']] : [
+    ...(isDirectory && (trigger.dataset.menuRoot === 'true' || anchor?.dataset.entryType === 'directory') ? [['new-page', 'New page'], ['new-directory', 'New folder']] : []),
+    ...(anchor?.dataset.entryType ? [['rename', 'Rename']] : []),
+    ['relative', 'Copy relative path'], ['absolute', 'Copy absolute path'], ['reveal', isDirectory ? capability?.directoryLabel : capability?.fileLabel],
+    ...(anchor?.dataset.entryType ? [['delete', 'Delete…']] : [])
+  ];
+  state.isDirectory = isDirectory;
+  entryMenu.replaceChildren();
+  for (const [action, label] of actions) {
+    const button = document.createElement('button'); button.type = 'button'; button.role = 'menuitem'; button.dataset.action = action; button.textContent = label || 'Open in file manager';
+    if (action === 'reveal' && !capability?.available) { button.disabled = true; button.setAttribute('aria-disabled', 'true'); button.title = capability?.reason || 'File manager unavailable'; button.setAttribute('aria-label', `${button.textContent}: ${button.title}`); }
+    if (action === 'delete' && pendingEntryDeletions.has(`${project}\0${targetPath}`)) { button.disabled = true; button.setAttribute('aria-disabled', 'true'); button.title = 'Deletion is already in progress'; }
+    if (action === 'absolute' || action === 'reveal') button.setAttribute('aria-describedby', 'entry-menu-server-help');
+    entryMenu.append(button);
+  }
+  if (!restricted) { const help = document.createElement('p'); help.id = 'entry-menu-server-help'; help.className = 'entry-menu-help'; help.textContent = 'Paths and file manager are on the computer running ok-workbench.'; entryMenu.append(help); }
+  entryMenu.hidden = false; entryMenu.style.left = '0px'; entryMenu.style.top = '0px';
+  const rect = entryMenu.getBoundingClientRect(); entryMenu.style.left = `${Math.max(0, Math.min(x, innerWidth - rect.width))}px`; entryMenu.style.top = `${Math.max(0, Math.min(y, innerHeight - rect.height))}px`;
+  entryMenu.querySelector('button:not(:disabled)')?.focus();
+}
+nav.addEventListener('contextmenu', event => {
+  let trigger = event.target.closest('[data-menu-path]'); if (!trigger) return;
+  if (trigger.dataset.menuRoot === 'true' && !trigger.matches('button')) trigger = trigger.querySelector('.tree-menu-trigger') || trigger;
+  event.preventDefault(); event.stopPropagation(); void openEntryMenu(trigger, event.clientX, event.clientY);
+});
+nav.addEventListener('keydown', event => {
+  if (!(event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey)) return;
+  const trigger = event.target.closest('[data-menu-path]'); if (!trigger) return;
+  event.preventDefault(); const rect = trigger.getBoundingClientRect(); void openEntryMenu(trigger, rect.left, rect.bottom);
+});
+entryMenu.addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); closeEntryMenu(true); return; }
+  if (event.key === 'Tab') { closeEntryMenu(); return; }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault(); const items = [...entryMenu.querySelectorAll('button:not(:disabled)')]; const current = items.indexOf(document.activeElement);
+  const index = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length; items[index]?.focus();
+});
+function entryMutationAffectsEditor(state, action) {
+  if (!markdownEditor) return false;
+  const editorPath = markdownEditor.path;
+  const parent = action.startsWith('new-') ? state.path : state.path.slice(0, state.path.lastIndexOf('/'));
+  return editorPath === `${parent}/index.md` || (!action.startsWith('new-') && (editorPath === state.path || editorPath.startsWith(`${state.path}/`)));
+}
+async function prepareEntryMutation() {
+  if (markdownEditor?.saving) { alert('Wait for the current save to finish.'); return false; }
+  if (!markdownIsDirty()) return true;
+  const choice = await new Promise(resolve => {
+    const dialog = document.createElement('dialog'); dialog.className = 'entry-delete-dialog';
+    const heading = document.createElement('h2'); heading.textContent = 'Unsaved Markdown changes';
+    const text = document.createElement('p'); text.textContent = 'Save or discard your changes before changing project entries.';
+    const form = document.createElement('form'); form.method = 'dialog';
+    for (const [value, label] of [['cancel', 'Cancel'], ['discard', 'Discard'], ['save', 'Save']]) { const button = document.createElement('button'); button.value = value; button.textContent = label; form.append(button); }
+    dialog.append(heading, text, form); document.body.append(dialog);
+    dialog.addEventListener('close', () => { const value = dialog.returnValue; dialog.remove(); resolve(value); }, { once: true });
+    dialog.showModal(); form.firstChild.focus();
+  });
+  if (choice === 'save') { await saveMarkdownEdit(); return !markdownEditor; }
+  if (choice === 'discard') { discardMarkdownEditor(); await loadPage(); return true; }
+  return false;
+}
+function confirmEntryDeletion(state) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog'); dialog.className = 'entry-delete-dialog';
+    const title = document.createElement('h2'); title.textContent = 'Permanently delete item?';
+    const text = document.createElement('p'); text.textContent = `${decodeURIComponent(state.path.split('/').slice(3).join('/')) || '.'} will be permanently deleted.${state.isDirectory ? ' This folder and all its contents will be deleted.' : ''}${markdownIsDirty() && (markdownEditor.path === state.path || markdownEditor.path.startsWith(`${state.path}/`)) ? ' This includes the document with unsaved changes.' : ''}`;
+    const form = document.createElement('form'); form.method = 'dialog';
+    const cancel = document.createElement('button'); cancel.value = 'cancel'; cancel.textContent = 'Cancel';
+    const confirm = document.createElement('button'); confirm.value = 'delete'; confirm.textContent = 'Delete permanently'; confirm.className = 'entry-delete-confirm';
+    form.append(cancel, confirm); dialog.append(title, text, form); document.body.append(dialog);
+    dialog.addEventListener('close', () => { const accepted = dialog.returnValue === 'delete'; dialog.remove(); resolve(accepted); }, { once: true });
+    dialog.showModal(); cancel.focus();
+  });
+}
+entryMenu.addEventListener('click', async event => {
+  const action = event.target.closest('button')?.dataset.action; const state = entryMenuState; if (!action || !state) return;
+  closeEntryMenu(true);
+  try {
+    if (action === 'delete') {
+      if (!await confirmEntryDeletion(state)) return;
+      if (entryMutationAffectsEditor(state, action) && !await prepareEntryMutation()) return;
+      if (state.project !== displayedDocument?.project) throw new Error('The active project changed');
+      const deletionKey = `${state.project}\0${state.path}`; if (pendingEntryDeletions.has(deletionKey)) return; pendingEntryDeletions.add(deletionKey);
+      const lockedEditor = entryMutationAffectsEditor(state, action) ? markdownEditor : null; if (lockedEditor) lockedEditor.input.disabled = true;
+      try {
+        const result = await chatApi(`/api/projects/${encodeURIComponent(state.project)}/entries`, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: state.path, confirmPermanent: true }) });
+        const data = await result.json(); if (!result.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'Delete failed');
+        if (state.project !== displayedDocument?.project) return;
+        const current = routePath(); const decodedPath = decodeURIComponent(state.path); const affectsRoute = current === decodedPath || current.startsWith(`${decodedPath}/`);
+        if (affectsRoute) { history.replaceState({}, '', data.parentLocation); await loadPage(); }
+        else await refreshEntryTree();
+        refreshGitStatus();
+        const parentControl = nav.querySelector(`[data-menu-path="${CSS.escape(data.parentLocation)}"]`); parentControl?.focus();
+      } finally { pendingEntryDeletions.delete(deletionKey); if (lockedEditor && markdownEditor === lockedEditor) lockedEditor.input.disabled = false; }
+    } else if (action === 'rename' || action.startsWith('new-')) {
+      if (entryMutationAffectsEditor(state, action) && !await prepareEntryMutation()) return;
+      if (state.project !== displayedDocument?.project) throw new Error('The active project changed');
+      if (action === 'rename') {
+        const anchor = nav.querySelector(`a[data-menu-path="${CSS.escape(state.path)}"]`);
+        if (!anchor) throw new Error('The item is no longer available');
+        await beginEntryRename(anchor);
+      } else {
+        await createProjectEntry({ disabled: false, dataset: { createEntry: action === 'new-page' ? 'page' : 'directory', entryParent: state.path } });
+      }
+    } else if (action === 'relative') {
+      const relative = state.path.split('/').slice(3).map(decodeURIComponent).join('/') || '.'; await navigator.clipboard.writeText(relative);
+    } else {
+      const result = await chatApi(`/api/projects/${encodeURIComponent(state.project)}/entries/${action === 'absolute' ? 'absolute-path' : 'reveal'}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: state.path }) });
+      const data = await result.json(); if (!result.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'Action failed');
+      if (action === 'absolute') await navigator.clipboard.writeText(data.absolutePath);
+    }
+  } catch (error) { alert(error.message || 'Could not complete file action'); }
+});
+document.addEventListener('pointerdown', event => { if (entryMenuState && !entryMenu.contains(event.target)) closeEntryMenu(); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && entryMenuState && entryMenu.hidden) closeEntryMenu(true); });
+addEventListener('resize', () => closeEntryMenu());
+addEventListener('scroll', () => closeEntryMenu(), true);
 nav.addEventListener('click', event => {
+  const menuTrigger = event.target.closest('.tree-menu-trigger[data-menu-path]');
+  if (menuTrigger) { event.preventDefault(); event.stopPropagation(); const rect = menuTrigger.getBoundingClientRect(); void openEntryMenu(menuTrigger, rect.left, rect.bottom); return; }
   const external = event.target.closest('[data-external-link]');
   if (external) { event.preventDefault(); void inspectExternalLink(external.dataset.externalLink).catch(showError); return; }
   const button = event.target.closest('[data-create-entry]');
   if (button) { event.preventDefault(); event.stopPropagation(); void createProjectEntry(button); return; }
-  const entry = event.target.closest('[data-entry-type].active');
-  if (entry) { event.preventDefault(); event.stopPropagation(); void beginEntryRename(entry); }
 });
 
 function closeExternalLinkDialog() { externalLinkUi.dialog.close(); }
@@ -1202,8 +1374,8 @@ async function approveExternalLink(event) {
   finally { externalLinkUi.approve.disabled = false; }
 }
 nav.addEventListener('submit', event => { const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); void commitEntryRename(form); });
-nav.addEventListener('keydown', event => { if (event.key !== 'Escape') return; const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });
-nav.addEventListener('focusout', event => { const form = event.target.closest('.tree-inline-rename'); if (!form || form.dataset.saving === 'true' || event.relatedTarget && form.contains(event.relatedTarget)) return; form.dataset.saving = 'true'; pendingEntryRename = null; void loadPage(); });
+nav.addEventListener('keydown', event => { if (event.key !== 'Escape') return; const form = event.target.closest('.tree-inline-rename'); if (!form) return; event.preventDefault(); form.dataset.saving = 'true'; pendingEntryRename = null; void refreshEntryTree(); });
+nav.addEventListener('focusout', event => { const form = event.target.closest('.tree-inline-rename'); if (!form || form.dataset.saving === 'true' || event.relatedTarget && form.contains(event.relatedTarget)) return; form.dataset.saving = 'true'; pendingEntryRename = null; void refreshEntryTree(); });
 function suggestedProjectId(title) { return title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 64); }
 function closeCreateProject() { createProjectUi.dialog.close(); }
 function openCreateProject() {

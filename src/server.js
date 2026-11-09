@@ -15,6 +15,9 @@ const externalLinks = require('./external-links.js');
 const { withCurrentDateTime, currentTimeZone } = require('./time-context.js');
 const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired } = require('./workspace-review.js');
 const { createPiVersionChecker } = require('./pi-version-check.js');
+const { createNativeFileManager } = require('./native-file-manager.js');
+const { stageDeletion } = require('./entry-deletion.js');
+const nativeFileManager = createNativeFileManager();
 const { createCapabilityResolver } = require('./workspace-review-output.js');
 const reviewOutputCapabilities = createCapabilityResolver();
 // Enable known Pi protocol families independently of authentication type.
@@ -92,6 +95,13 @@ const AUTH_FLOWS = new Map();
 const EXTERNAL_INSPECTIONS = new Map();
 const EXTERNAL_LINK_WRITES = new Map();
 const MARKDOWN_WRITES = new Map();
+const PROJECT_ENTRY_WRITES = new Map();
+async function withProjectEntryWrite(project, work) {
+  const previous = PROJECT_ENTRY_WRITES.get(project) || Promise.resolve(); let release;
+  const done = new Promise(resolve => { release = resolve; });
+  const tail = previous.then(() => done); PROJECT_ENTRY_WRITES.set(project, tail); await previous;
+  try { return await work(); } finally { release(); if (PROJECT_ENTRY_WRITES.get(project) === tail) PROJECT_ENTRY_WRITES.delete(project); }
+}
 const API_KEY_PROVIDERS = {
   anthropic: { label: 'Anthropic', environment: 'ANTHROPIC_API_KEY' },
   openai: { label: 'OpenAI', environment: 'OPENAI_API_KEY' },
@@ -354,6 +364,7 @@ async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, 
     if (entry.isDirectory()) {
       candidates.push({
         type: 'directory',
+        indexed: await fs.lstat(path.join(fullPath, 'index.md')).then(info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1, () => false),
         label: navigationLabel(exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name, 'directory'),
         path: route,
         children: await navigationTree(fullPath, { depth: depth + 1, projectRoot, externalGrants })
@@ -514,6 +525,11 @@ async function withMarkdownWrite(target, operation) {
 }
 
 async function saveMarkdownDocument(body) {
+  const match = typeof body?.path === 'string' && body.path.match(/^\/workspace\/([^/]+)\//);
+  let project = null; try { if (match) project = decodeURIComponent(match[1]); } catch { /* validation below rejects the path */ }
+  return project ? withProjectEntryWrite(project, () => saveMarkdownDocumentUnlocked(body)) : saveMarkdownDocumentUnlocked(body);
+}
+async function saveMarkdownDocumentUnlocked(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.path !== 'string' ||
       typeof body.text !== 'string' || !/^[a-f0-9]{64}$/.test(body.revision || '') ||
       body.text.includes('\0') || Buffer.byteLength(body.text, 'utf8') > MAX_MARKDOWN_EDIT_BYTES) {
@@ -705,12 +721,50 @@ function retitleEntryDocument(content, title) {
   return content.replace(/^title:.*$/m, `title: ${JSON.stringify(title)}`).replace(/^#\s+.*$/m, `# ${title}`);
 }
 function escapedRegex(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+async function entryAction(work) {
+  try { return await work(); }
+  catch (error) {
+    if (error?.code && ['INVALID_REQUEST', 'NOT_FOUND', 'ENTRY_FORBIDDEN', 'ENTRY_NOT_FOUND', 'ENTRY_CONFLICT', 'RECOVERY_REQUIRED', 'NATIVE_UNAVAILABLE', 'NATIVE_LAUNCH_FAILED'].includes(error.code)) throw error;
+    if (error instanceof URIError || error.message === 'Invalid JSON request body') throw Object.assign(new Error('Invalid entry request'), { code: 'INVALID_REQUEST' });
+    logError('[ok-workbench] entry operation failed', error);
+    throw Object.assign(new Error('Could not complete the entry operation'), { code: 'ENTRY_OPERATION_FAILED', status: 500 });
+  }
+}
+async function validatedEntryAbsolutePath(project, body) {
+  const invalid = message => Object.assign(new Error(message), { code: 'INVALID_REQUEST' });
+  const forbidden = message => Object.assign(new Error(message), { code: 'ENTRY_FORBIDDEN', status: 403 });
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.path !== 'string') throw invalid('A single path is required');
+  if (project === 'workspace' || project.startsWith('.')) throw forbidden('Select a project');
+  const root = projectRootForId(project);
+  const rootInfo = await fs.lstat(root).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) throw Object.assign(new Error('Project not found'), { code: 'NOT_FOUND' });
+  const prefix = `/workspace/${encodeURIComponent(project)}`;
+  if (body.path !== prefix && !body.path.startsWith(`${prefix}/`)) throw forbidden('Item is outside the selected project');
+  const suffix = body.path.slice(prefix.length).replace(/^\//, '');
+  let parts;
+  try { parts = suffix ? suffix.split('/').map(decodeURIComponent) : []; } catch { throw invalid('Invalid path encoding'); }
+  if (parts.some(part => !part || part === '.' || part === '..' || /[\\/\0]/.test(part) || part.startsWith('.'))) throw forbidden('This path is not available');
+  const canonicalRoot = await fs.realpath(root);
+  let target = root;
+  for (const part of parts) {
+    target = path.join(target, part);
+    const info = await fs.lstat(target).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw Object.assign(new Error('Item not found'), { code: 'ENTRY_NOT_FOUND', status: 404 }); throw error; });
+    if (info.isSymbolicLink()) throw forbidden('Symbolic links are not supported');
+  }
+  const canonical = await fs.realpath(target);
+  if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`)) throw forbidden('Item is outside the selected project');
+  const info = await fs.stat(canonical);
+  if (!info.isFile() && !info.isDirectory()) throw forbidden('Unsupported item');
+  return canonical;
+}
+
 async function projectEntryParent(project, requestedPath) {
   if (project === 'workspace') throw new Error('Select a project before creating pages');
   const root = await fs.realpath(projectRootForId(project));
-  const unresolved = safePath(String(requestedPath || '')); const parent = unresolved && await bundlePath(unresolved);
-  if (!parent || !(await isDirectory(parent)) || (parent !== root && !parent.startsWith(`${root}${path.sep}`))) throw new Error('Destination is outside the selected project');
-  const index = path.join(parent, 'index.md'); if (!(await exists(index))) throw new Error('Destination directory has no index.md');
+  const parent = await validatedEntryAbsolutePath(project, { path: requestedPath });
+  if (!(await isDirectory(parent)) || (parent !== root && !parent.startsWith(`${root}${path.sep}`))) throw new Error('Destination is outside the selected project');
+  const index = path.join(parent, 'index.md'); const indexInfo = await fs.lstat(index).catch(() => null);
+  if (!indexInfo?.isFile() || indexInfo.isSymbolicLink() || indexInfo.nlink !== 1) throw new Error('Destination directory has no regular index.md');
   return { root, parent, index };
 }
 async function createProjectEntry(project, body) {
@@ -737,17 +791,19 @@ async function renameProjectEntry(project, body) {
   let saved = body.renameToken ? ENTRY_RENAMES.get(body.renameToken) : null;
   if (body.renameToken && (!saved || saved.project !== project || saved.location !== body.path || saved.expiresAt < Date.now())) throw new Error('This item can no longer be renamed inline');
   const title = entryTitle(body.name); const slug = entrySlug(title); const root = await fs.realpath(projectRootForId(project));
-  const unresolved = safePath(String(saved?.location || body.path || '')); const target = unresolved && await bundlePath(unresolved);
-  if (!target || (target !== root && !target.startsWith(`${root}${path.sep}`))) throw new Error('Item is outside the selected project');
+  const target = await validatedEntryAbsolutePath(project, { path: saved?.location || body.path });
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error('Item is outside the selected project');
   if (!saved) {
     const stat = await fs.stat(target); const type = stat.isDirectory() ? 'directory' : 'page';
-    if ((type === 'directory' && target === root) || (type === 'page' && (path.extname(target).toLowerCase() !== '.md' || path.basename(target) === 'index.md'))) throw new Error('This project item cannot be renamed');
+    if ((type === 'directory' && target === root) || (type === 'page' && (path.extname(target).toLowerCase() !== '.md' || path.basename(target) === 'index.md' || (path.dirname(target) === root && COMMON_FILES.includes(path.basename(target)))))) throw new Error('This project item cannot be renamed');
     saved = { project, location: publicPath(target), type };
   }
   const parent = path.dirname(target); const parentIndex = path.join(parent, 'index.md'); const oldName = path.basename(target); const extension = saved.type === 'page' ? '.md' : '';
   const newName = `${slug}${extension}`; const renamed = path.join(parent, newName);
   if (renamed !== target && await exists(renamed)) throw new Error(`An item named ${newName} already exists`);
-  const documentPath = saved.type === 'directory' ? path.join(target, 'index.md') : target; const originalDocument = await fs.readFile(documentPath, 'utf8'); const originalParent = await fs.readFile(parentIndex, 'utf8');
+  const documentPath = saved.type === 'directory' ? path.join(target, 'index.md') : target;
+  for (const file of [documentPath, parentIndex]) { const info = await fs.lstat(file); if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new Error('Entry index is not a regular file'); }
+  const originalDocument = await fs.readFile(documentPath, 'utf8'); const originalParent = await fs.readFile(parentIndex, 'utf8');
   const oldLink = saved.type === 'directory' ? `${oldName}/` : oldName; const newLink = saved.type === 'directory' ? `${newName}/` : newName;
   const linkPattern = new RegExp(`\\[[^\\]\\n]*\\]\\(${escapedRegex(oldLink)}\\)`);
   let moved = false;
@@ -763,6 +819,59 @@ async function renameProjectEntry(project, body) {
   }
   if (body.renameToken) ENTRY_RENAMES.delete(body.renameToken);
   return { type: saved.type, title, location: publicPath(renamed), path: path.relative(root, renamed).split(path.sep).join('/') };
+}
+
+function removeEntryNavigationLinks(content, targetName, directory) {
+  const expected = directory ? new Set([targetName, `${targetName}/`]) : new Set([targetName]);
+  let fence = null;
+  return content.split(/(?<=\n)/).filter(line => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (marker) {
+      if (!fence) fence = { char: marker[1][0], length: marker[1].length };
+      else if (marker[1][0] === fence.char && marker[1].length >= fence.length && /^\s*$/.test(line.slice(marker[0].length))) fence = null;
+      return true;
+    }
+    if (fence) return true;
+    const match = line.match(/^ {0,3}[-*+][ \t]+\[[^\]\n]*\]\((<[^>\r\n]+>|[^\s)]+)(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'))?\)[ \t]*(?:\r?\n)?$/);
+    if (!match) return true;
+    const href = match[1].startsWith('<') ? match[1].slice(1, -1) : match[1];
+    let destination; try { destination = decodeURIComponent(href.replace(/^\.\//, '')); } catch { return true; }
+    return !expected.has(destination);
+  }).join('');
+}
+async function deleteProjectEntry(project, body) {
+  const fail = (message, code = 'ENTRY_FORBIDDEN', status = 403) => Object.assign(new Error(message), { code, status });
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).sort().join(',') !== 'confirmPermanent,path' || body.confirmPermanent !== true || typeof body.path !== 'string') throw fail('Confirm permanent deletion and provide a path', 'INVALID_REQUEST', 400);
+  const target = await validatedEntryAbsolutePath(project, { path: body.path });
+  const root = await fs.realpath(projectRootForId(project));
+  const info = await fs.lstat(target); const directory = info.isDirectory();
+  if (target === root || (!directory && (!info.isFile() || path.extname(target).toLowerCase() !== '.md' || path.basename(target) === 'index.md' || (path.dirname(target) === root && COMMON_FILES.includes(path.basename(target)))))) throw fail('This item cannot be deleted');
+  if (directory) { const indexInfo = await fs.lstat(path.join(target, 'index.md')).catch(() => null); if (!indexInfo?.isFile() || indexInfo.isSymbolicLink() || indexInfo.nlink !== 1) throw fail('Only indexed directories can be deleted'); }
+  const parent = path.dirname(target); const parentIndex = path.join(parent, 'index.md');
+  const indexInfo = await fs.lstat(parentIndex); if (!indexInfo.isFile() || indexInfo.isSymbolicLink() || indexInfo.nlink !== 1) throw fail('Parent index is not a regular file');
+  // Never delete a nested Git repository or the application recovery directory.
+  async function checkContents(dir) {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      if (entry.name === '.git' || entry.name === '.ok-workbench-recovery') throw fail('Directory contains protected application or Git data');
+      if (entry.isDirectory()) await checkContents(path.join(dir, entry.name));
+    }
+  }
+  if (directory) await checkContents(target);
+  const recovery = path.join(root, '.ok-workbench-recovery');
+  await fs.mkdir(recovery, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  const recoveryInfo = await fs.lstat(recovery); if (!recoveryInfo.isDirectory() || recoveryInfo.isSymbolicLink()) throw fail('Recovery directory is unsafe');
+  const id = crypto.randomUUID(); const recordDir = path.join(recovery, id); const staged = path.join(recordDir, 'entry');
+  await fs.mkdir(recordDir, { mode: 0o700 });
+  const metadata = { originalPath: path.relative(root, target), parentIndex: path.relative(root, parentIndex), createdAt: new Date().toISOString() };
+  try { await fs.writeFile(path.join(recordDir, 'recovery.json'), JSON.stringify(metadata, null, 2), { flag: 'wx', mode: 0o600 }); }
+  catch (error) { await fs.rm(recordDir, { recursive: true, force: true }); throw error; }
+  const original = await fs.readFile(parentIndex, 'utf8');
+  const updated = removeEntryNavigationLinks(original, path.basename(target), directory);
+  const temporary = path.join(parent, `.ok-workbench-${id}.tmp`);
+  await stageDeletion({ target, parentIndex, recordDir, staged, temporary, original, updated, mode: indexInfo.mode & 0o777,
+    revalidate: async () => { if (await validatedEntryAbsolutePath(project, { path: body.path }) !== target) throw fail('Item changed during deletion', 'ENTRY_CONFLICT', 409); },
+    log: (message, details) => logError(`[ok-workbench] ${message}`, details) });
+  return { deletedPath: body.path, parentLocation: publicPath(parent) };
 }
 
 async function explicitProjectContext(message, primaryProject) {
@@ -1473,9 +1582,21 @@ async function handleRequest(req, res) {
     if (url.pathname === '/api/workspace-review/reports' && req.method === 'POST') { assertChatRequest(req); const body = await readJson(req); if (typeof body.projectId !== 'string') throw Object.assign(new Error('A project ID is required'), { code: 'INVALID_REQUEST' }); return json(res, 202, await workspaceReview.runReport(body.projectId)); }
     if (url.pathname === '/api/workspace-review/reports' && req.method === 'GET') { assertChatRequest(req); const projectId = url.searchParams.get('projectId'); if (!projectId) throw Object.assign(new Error('A project ID is required'), { code: 'INVALID_REQUEST' }); const catalog = await projectData('/workspace'); if (!catalog.projects.some(item => item.name === projectId && item.name !== 'workspace')) throw Object.assign(new Error('Project not found'), { code: 'NOT_FOUND' }); return json(res, 200, await workspaceReview.reportStatus(projectId)); }
     if (url.pathname === '/api/projects' && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createWorkspaceProject(await readJson(req))); }
+    if (url.pathname === '/api/native-file-manager' && req.method === 'GET') { assertChatRequest(req); return json(res, 200, nativeFileManager.capability()); }
+    const revealEntryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries\/reveal$/);
+    if (revealEntryMatch && req.method === 'POST') {
+      assertChatRequest(req); const data = await entryAction(async () => { const body = await readJson(req);
+        const target = await validatedEntryAbsolutePath(decodeURIComponent(revealEntryMatch[1]), body);
+        const result = await nativeFileManager.reveal(target, (await fs.stat(target)).isDirectory());
+        return { path: body.path, ...result }; });
+      return json(res, 200, data);
+    }
+    const absoluteEntryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries\/absolute-path$/);
+    if (absoluteEntryMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 200, await entryAction(async () => ({ absolutePath: await validatedEntryAbsolutePath(decodeURIComponent(absoluteEntryMatch[1]), await readJson(req)) }))); }
     const entryMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/entries$/);
-    if (entryMatch && req.method === 'POST') { assertChatRequest(req); return json(res, 201, await createProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
-    if (entryMatch && req.method === 'PATCH') { assertChatRequest(req); return json(res, 200, await renameProjectEntry(decodeURIComponent(entryMatch[1]), await readJson(req))); }
+    if (entryMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(entryMatch[1]); const body = await readJson(req); return json(res, 201, await withProjectEntryWrite(project, () => createProjectEntry(project, body))); }
+    if (entryMatch && req.method === 'PATCH') { assertChatRequest(req); const project = decodeURIComponent(entryMatch[1]); const body = await readJson(req); return json(res, 200, await withProjectEntryWrite(project, () => renameProjectEntry(project, body))); }
+    if (entryMatch && req.method === 'DELETE') { assertChatRequest(req); return json(res, 200, await entryAction(async () => { const project = decodeURIComponent(entryMatch[1]); const body = await readJson(req); return withProjectEntryWrite(project, () => deleteProjectEntry(project, body)); })); }
     const dirtyMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/dirty$/);
     if (dirtyMatch && req.method === 'GET') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, storedDirtyState(project)); }
     if (dirtyMatch && req.method === 'POST') { assertChatRequest(req); const project = decodeURIComponent(dirtyMatch[1]); if (!(await isDirectory(projectRootForId(project)))) throw new Error('Project not found'); return json(res, 200, await markDirtyProjectProcessed(project)); }
@@ -1631,6 +1752,7 @@ async function handleRequest(req, res) {
     if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
   } catch (error) {
+    if (['ENTRY_FORBIDDEN', 'ENTRY_NOT_FOUND', 'ENTRY_CONFLICT', 'RECOVERY_REQUIRED', 'ENTRY_OPERATION_FAILED', 'NATIVE_UNAVAILABLE', 'NATIVE_LAUNCH_FAILED'].includes(error?.code)) return json(res, error.status || 400, { error: error.message, code: error.code });
     if (error?.code && ['INVALID_REQUEST', 'STALE_REVISION', 'NOT_FOUND', 'NOT_CONFIGURED', 'MODEL_UNSUITABLE', 'INVALID_REVIEW', 'INPUT_TOO_LARGE', 'SUPERSEDED', 'PROVIDER_UNAVAILABLE', 'REVIEW_TIMEOUT', 'STORAGE_ERROR'].includes(error.code)) {
       const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'STALE_REVISION' || error.code === 'NOT_CONFIGURED' || error.code === 'MODEL_UNSUITABLE' ? 409 : error.code === 'PROVIDER_UNAVAILABLE' || error.code === 'REVIEW_TIMEOUT' ? 503 : 400;
       return json(res, status, { error: error.message, code: error.code });

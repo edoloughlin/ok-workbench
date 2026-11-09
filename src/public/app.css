@@ -170,6 +170,24 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .tree-children { margin-left: 12px; border-left: 1px solid var(--rule); padding-left: 4px; }
 .tree-children .nav-link { padding-left: 8px; }
 .tree-page { display: flex; align-items: center; gap: 7px; }
+.tree-menu-row { display: flex; align-items: center; min-width: 0; }
+.tree-menu-row > a, .tree-menu-row > .external-link-request { flex: 1; min-width: 0; }
+.tree-menu-trigger { flex: none; border: 0; border-radius: 5px; padding: 3px 7px; color: var(--ink); background: transparent; font: inherit; cursor: pointer; }
+.tree-menu-trigger:hover, .tree-menu-trigger:focus-visible { background: var(--nav-hover); outline: 2px solid var(--accent); }
+.entry-context-menu[hidden] { display: none; }
+.entry-context-menu { position: fixed; z-index: 1000; min-width: min(190px, calc(100vw - 10px)); max-width: calc(100vw - 10px); max-height: calc(100vh - 10px); overflow: auto; padding: 5px; border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--paper); box-shadow: 0 8px 28px #0003; }
+.entry-context-menu button { display: block; width: 100%; border: 0; border-radius: 5px; padding: 7px 10px; color: var(--ink); background: transparent; font: 500 12px var(--font-ui); text-align: left; cursor: pointer; }
+.entry-context-menu button:hover, .entry-context-menu button:focus-visible { background: var(--nav-hover); outline: 2px solid var(--accent); outline-offset: -2px; }
+.entry-context-menu button:disabled { opacity: .5; cursor: not-allowed; }
+.entry-menu-help { max-width: 230px; margin: 4px 8px 6px; color: var(--ink); opacity: .65; font-size: 11px; line-height: 1.35; }
+.entry-delete-dialog { max-width: min(420px, calc(100vw - 48px)); padding: 24px; border: 1px solid var(--rule-strong); border-radius: 10px; color: var(--ink); background: var(--paper); box-shadow: 0 18px 60px #0005; }
+.entry-delete-dialog::backdrop { background: #0008; }
+.entry-delete-dialog h2 { margin: 0 0 10px; font-size: 18px; }
+.entry-delete-dialog p { overflow-wrap: anywhere; }
+.entry-delete-dialog form { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.entry-delete-dialog button { padding: 7px 12px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: inherit; cursor: pointer; }
+.entry-delete-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.entry-delete-dialog .entry-delete-confirm { color: white; border-color: #a73431; background: #a73431; }
 .page-icon { width: 17px; height: 17px; color: var(--accent); }
 .file-icon-shell { color: var(--green); }
 .file-icon-config { color: #ff9500; }

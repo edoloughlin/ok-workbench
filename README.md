@@ -68,6 +68,10 @@ The project assistant can search the public web when it needs current or externa
 
 Projects can selectively approve a symlink to an external file or directory. Approval grants browser and model read access only through that project-relative alias. Each chat turn receives a fresh private snapshot; writes, tool execution, Python inputs, workspace-mode chats, and nested symlinks remain unavailable. Revoke approval from the project's external-links section to stop future reads.
 
+The project navigation menu can copy paths and open items in the file manager on the computer running the server. Set `OK_WORKBENCH_NATIVE_FILE_MANAGER=0` to disable native file-manager integration, especially for remote or headless deployments. The menu's delete action permanently deletes the selected page or folder and its contents; it does not use the system trash.
+
+If deletion reports that recovery is required, stop modifying the affected project and check the server log for the recovery directory. Each retained `.ok-workbench-recovery/<id>/recovery.json` records the original project-relative path; `entry` contains the staged item. After checking that the original path is unoccupied, restore `entry` there and inspect the parent `index.md` before removing the recovery record. A cleanup warning after a committed deletion instead indicates that staged remnants may remain; inspect them before removing the record. These records are not automatically removed at startup.
+
 ## Workspace tools
 
 For general Python calculations, file processing, and image conversion, you can enable the isolated `run_python` tool on Linux. It uses your local Python interpreter and can install allowlisted dependencies into temporary directories. See [Python setup, usage, and security limits](docs/PYTHON.md).
