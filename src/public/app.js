@@ -2050,6 +2050,52 @@ async function enableWorkspaceMode(initiator) {
   await loadChatThreads();
   return true;
 }
+// Confirmation controls are transient and never render destination markup.
+const webFetchPrompts = new Map();
+function displayFetchText(value) {
+  return String(value).replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+}
+function removeWebFetchPrompt(id) {
+  const prompt = webFetchPrompts.get(id);
+  if (!prompt) return;
+  webFetchPrompts.delete(id);
+  const hadFocus = prompt.element.contains(document.activeElement) || (prompt.restoreFocus && document.activeElement === document.body);
+  prompt.element.remove();
+  if (hadFocus && prompt.previousFocus?.isConnected) prompt.previousFocus.focus();
+}
+function showWebFetchPrompt(turn, event) {
+  if (!event.request_id || webFetchPrompts.has(event.request_id)) return;
+  const panel = document.createElement('section'); panel.className = 'web-fetch-confirmation';
+  panel.setAttribute('role', 'region'); panel.setAttribute('aria-label', 'Web fetch confirmation');
+  const heading = document.createElement('h2'); heading.textContent = event.hop ? 'Confirm redirect fetch' : 'Confirm web fetch';
+  const host = document.createElement('p');
+  try { host.textContent = `Destination hostname: ${displayFetchText(new URL(event.url).hostname)}`; } catch { return; }
+  const redirect = document.createElement('p');
+  if (event.hop) redirect.textContent = `Redirect from ${displayFetchText(event.previous_origin || 'unknown origin')} to the exact URL below.`;
+  const warning = document.createElement('p'); warning.textContent = 'Allowing sends this URL to its destination and may disclose hostname data through DNS or cause side effects. Paths and queries can contain private information. Fetched content and complete citation URLs enter model context and can persist in chat results.';
+  const label = document.createElement('label'); label.textContent = 'Exact URL (selectable, not a link)';
+  const url = document.createElement('textarea'); url.readOnly = true; url.rows = 4; url.value = displayFetchText(event.url); url.setAttribute('aria-label', 'Exact URL to fetch'); label.append(url);
+  const status = document.createElement('p'); status.setAttribute('role', 'status'); status.textContent = 'Waiting for your decision. Deny is the safe default.';
+  const deny = document.createElement('button'); deny.type = 'button'; deny.textContent = 'Deny';
+  const allow = document.createElement('button'); allow.type = 'button'; allow.textContent = 'Allow this fetch';
+  const decide = async decision => {
+    const prompt = webFetchPrompts.get(event.request_id);
+    if (prompt) prompt.restoreFocus = panel.contains(document.activeElement);
+    deny.disabled = true; allow.disabled = true; status.textContent = 'Submitting decision…';
+    try {
+      const response = await chatApi(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns/${encodeURIComponent(turn.id)}/web-fetch-confirmations/${encodeURIComponent(event.request_id)}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-ok-workbench-browser': turn.browserId }, body: JSON.stringify({ decision }) });
+      if (!response.ok) throw new Error('Decision could not be submitted; the fetch will not proceed without approval.');
+      removeWebFetchPrompt(event.request_id);
+    } catch (error) { status.textContent = error.message; deny.disabled = false; allow.disabled = false; }
+  };
+  deny.addEventListener('click', () => void decide('deny')); allow.addEventListener('click', () => void decide('allow'));
+  panel.append(heading, host, redirect, warning, label, status, deny, allow);
+  const previousFocus = document.activeElement; document.body.append(panel);
+  webFetchPrompts.set(event.request_id, { element: panel, previousFocus, turn });
+  const announcement = document.getElementById('web-fetch-announcements');
+  if (announcement) announcement.textContent = event.hop ? 'A redirect fetch is waiting for your decision.' : 'A web fetch is waiting for your decision.';
+  deny.focus();
+}
 async function streamChatTurn(message, { model = chatUi.model.value, initiator = 'user' } = {}) {
   if (currentChatTurn()) { setChatStatus('Cancel or steer the active response first.'); return false; }
   if (!(await enableWorkspaceMode(initiator))) return false;
@@ -2057,18 +2103,20 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
   if (!chatThreadId) await createChatThread({ force: true });
   const currentFile = currentChatFile();
   const selectedModel = chatModels.find(item => item.id === model);
-  const turn = { abort: new AbortController(), id: null, clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, supportsSteering: selectedModel?.supportsSteering === true, steeringReady: false, steeringSubmitting: false, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
+  const turn = { abort: new AbortController(), id: null, browserId: crypto.randomUUID().replaceAll('-', '') + crypto.randomUUID().replaceAll('-', ''), clientId: crypto.randomUUID(), projectId: chatProjectId, projectTitle: chatUi.project.textContent || chatProjectId, threadId: chatThreadId, unread: false, promptPreview: message.slice(0, 120), model, effort: chatUi.effort.value, initiator, supportsSteering: selectedModel?.supportsSteering === true, steeringReady: false, steeringSubmitting: false, status: 'working', startedAt: Date.now(), lastEventAt: Date.now(), lastActivityLabel: 'Working', assistantText: '', thinkingText: '', activities: [], error: null };
   activeChatTurns.add(turn); syncChatTurnControls(); setChatStatus('Thinking…');
   const isVisible = () => activeChatTurns.has(turn) && chatProjectId === turn.projectId && chatThreadId === turn.threadId;
   if (isVisible()) renderActiveTurn(turn); let projectCreated = false; let completed = false;
   try {
-    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf }, body: JSON.stringify({ message, currentFile, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
+    const requestTurn = () => fetch(`/api/chat/threads/${encodeURIComponent(turn.threadId)}/turns`, { method: 'POST', signal: turn.abort.signal, headers: { 'content-type': 'application/json', accept: 'application/x-ndjson', 'x-ok-workbench-csrf': chatCsrf, 'x-ok-workbench-browser': turn.browserId }, body: JSON.stringify({ message, currentFile, initiator, provider: chatUi.provider.value, model, effort: chatUi.effort.value, titleProvider: chatSettings.titleProvider, titleModel: chatSettings.titleModel, titleEffort: chatSettings.titleEffort }) });
     let response = await requestTurn();
     if (await invalidChatToken(response)) { await refreshChatCsrf(); response = await requestTurn(); }
     if (!response.ok || !response.body) throw new Error((await response.json().catch(() => ({}))).error || 'Could not start chat turn');
     if (initiator !== 'system') { chatThreadHasUserChat = true; updateNewThreadAvailability(); }
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffered = '';
     for (;;) { const { value, done } = await reader.read(); if (done) break; buffered += decoder.decode(value, { stream: true }); const lines = buffered.split('\n'); buffered = lines.pop(); for (const line of lines) { if (!line) continue; const event = JSON.parse(line); turn.lastEventAt = Date.now(); if (event.type === 'turn.started') { turn.id = event.turn_id || null; turn.supportsSteering = event.supports_steering === true; syncChatTurnControls(); }
+      else if (event.type === 'web_fetch.confirmation_required') { showWebFetchPrompt(turn, event); }
+      else if (event.type === 'web_fetch.confirmation_resolved') { removeWebFetchPrompt(event.request_id); }
       else if (event.type === 'turn.steering') { turn.steeringReady = event.available === true; syncChatTurnControls(); }
       else if (event.type === 'message.delta') { turn.assistantText += event.delta || ''; turn.thinkingText = ''; turn.lastActivityLabel = 'Writing response'; if (currentChatCollapsed() && !turn.unread) { turn.unread = true; chatUnread++; applyChatLayout(); } }
       else if (event.type === 'turn.thinking') { turn.thinkingText += event.delta || ''; turn.lastActivityLabel = 'Model is thinking'; }
@@ -2083,7 +2131,7 @@ async function streamChatTurn(message, { model = chatUi.model.value, initiator =
     turn.status = 'completed'; turn.thinkingText = ''; turn.completedAt = Date.now(); if (isVisible()) renderActiveTurn(turn);
     if (isVisible()) { setChatStatus('Ready'); if (projectCreated) await loadPage(); else await loadChatThreads(); }
   } catch (error) { turn.status = error.name === 'AbortError' ? 'cancelled' : 'failed'; turn.error = error.name === 'AbortError' ? 'Stopped.' : error.message; if (isVisible()) { if (turn.status === 'failed') renderFailedChatTurn(turn); else renderActiveTurn(turn); setChatStatus(error.name === 'AbortError' ? 'Stopped' : 'Error'); } }
-  finally { const visible = isVisible(); activeChatTurns.delete(turn); recentTurns.set(turn.clientId, turn); while (recentTurns.size > 20) recentTurns.delete(recentTurns.keys().next().value); if (completed && !visible) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
+  finally { for (const [id, prompt] of webFetchPrompts) if (prompt.turn === turn) removeWebFetchPrompt(id); const visible = isVisible(); activeChatTurns.delete(turn); recentTurns.set(turn.clientId, turn); while (recentTurns.size > 20) recentTurns.delete(recentTurns.keys().next().value); if (completed && !visible) addTurnNotification(turn); if (visible) { syncChatTurnControls(); if (completed) { setChatStatus('Ready'); void refreshDirtyStatus(); } } }
   return completed;
 }
 setInterval(() => { for (const turn of activeTurnsFor()) renderTurnStatusLine(turn); }, 1_000);

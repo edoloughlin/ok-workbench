@@ -74,6 +74,8 @@ If deletion reports that recovery is required, stop modifying the affected proje
 
 ## Workspace tools
 
+The assistant can use `web_fetch` to read a specific public HTTP or HTTPS URL. You must approve each exact URL in the browser before DNS lookup, including every redirect. The tool returns bounded, untrusted source text from HTML, plain text, Markdown, or JSON; it does not run JavaScript or download files. Responses are limited to 2 MiB and extracted text to 40,000 characters. Paths, query strings, and fetched content can enter model context and persist in chat results. Do not approve URLs containing secrets.
+
 For general Python calculations, file processing, and image conversion, you can enable the isolated `run_python` tool on Linux. It uses your local Python interpreter and can install allowlisted dependencies into temporary directories. See [Python setup, usage, and security limits](docs/PYTHON.md).
 
 The assistant can discover executable Python 3 and Node.js scripts placed directly in `tools/` or `<project>/tools/`. Each tool needs a standard shebang such as `#!/usr/bin/env python3` or `#!/usr/bin/env node`. Tools run without a shell, with each supplied argument kept separate, a 30-second default limit, and captured output.

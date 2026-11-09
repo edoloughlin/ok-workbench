@@ -90,6 +90,8 @@ const DIFF_TOKENS = new Map();
 const GIT_RECOVERY = new Map();
 const ENTRY_RENAMES = new Map();
 const ACTIVE_TURNS = new Map();
+// Loaded once per process; decisions are never persisted across restarts.
+const webFetchConfirmations = import('./web-fetch-confirmations.mjs').then(({ WebFetchConfirmations }) => new WebFetchConfirmations());
 const THREAD_WRITES = new Map();
 const AUTH_FLOWS = new Map();
 const EXTERNAL_INSPECTIONS = new Map();
@@ -1178,7 +1180,7 @@ function projectAssistantSystemPrompt(agentInstructions = '', workspaceMode = fa
   const scope = workspaceMode ? 'The user deliberately enabled workspace-wide mode for this turn.' : 'Filesystem paths are relative to the selected project; the model cannot widen that authority.';
   return `You are a project-scoped coding assistant. ${scope} Explicitly issued read grants are one-turn and read-only. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
@@ -1188,7 +1190,7 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, maxTokens, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, maxTokens, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -1655,6 +1657,17 @@ async function handleRequest(req, res) {
       return json(res, 200, { referencedFiles: thread.referencedFiles });
     }
     if (threadMatch && req.method === 'DELETE') { assertChatRequest(req); await fs.unlink(threadFile(threadMatch[1])); return respond(res, 204, ''); }
+    const confirmationMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/web-fetch-confirmations\/([A-Za-z0-9_-]+)$/);
+    if (confirmationMatch && req.method === 'POST') {
+      assertChatRequest(req);
+      const body = await readJson(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || !['allow', 'deny'].includes(body.decision)) return json(res, 400, { error: 'Invalid confirmation decision' });
+      const browser = req.headers['x-ok-workbench-browser'];
+      if (typeof browser !== 'string' || !/^[A-Za-z0-9_-]{32,128}$/.test(browser)) return respond(res, 404, '');
+      const registry = await webFetchConfirmations;
+      const status = registry.decide({ id: confirmationMatch[3], browser, threadId: confirmationMatch[1], turnId: confirmationMatch[2], decision: body.decision });
+      return respond(res, status, '');
+    }
     const steerMatch = url.pathname.match(/^\/api\/chat\/threads\/([A-Za-z0-9_-]+)\/turns\/([A-Za-z0-9_-]+)\/steer$/);
     if (steerMatch && req.method === 'POST') {
       assertChatRequest(req); const body = await readJson(req); const message = String(body.message || '').trim();
@@ -1695,6 +1708,17 @@ async function handleRequest(req, res) {
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
       let reply = ''; let pendingSteeringBoundary = false; const startedAt = Date.now(); req.on('aborted', () => abort.abort());
+      res.on('close', () => { if (!res.writableEnded) abort.abort(); });
+      const browser = req.headers['x-ok-workbench-browser'];
+      const confirmWebFetch = typeof browser === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(browser)
+        ? async (toolCallId, request) => {
+          if (abort.signal.aborted || res.destroyed || res.writableEnded || ACTIVE_TURNS.get(turnId) !== active) throw new Error('Confirmation unavailable');
+          const registry = await webFetchConfirmations;
+          return registry.request({ ...request, browser, threadId: thread.id, turnId, toolCallId, emit: (type, payload) => {
+            if (res.destroyed || res.writableEnded || abort.signal.aborted) throw new Error('Stream unavailable');
+            writeEvent(type, payload);
+          } });
+        } : undefined;
         if (turnDiagnostics()) log('[ok-workbench] turn-start', { provider, model, effort, turnId, threadId: thread.id, project: thread.project, messageLength: message.length });
       let outcome = 'failed';
       try {
@@ -1704,7 +1728,7 @@ async function handleRequest(req, res) {
         const grants = await explicitProjectContext(message, thread.project); const externalReadGrants = thread.workspaceMode === true ? [] : await externalProjectGrants(thread.project); const turnMessages = thread.messages.map(item => ({ ...item, content: item.content + (item.fileContext || '') }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context and one-turn read grants]\n${grants.map(grant => `[${grant.id}] @${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ id: grant.id, project: grant.project, path: grant.path })) }); }
         const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, externalReadGrants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
+        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, externalReadGrants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), confirmWebFetch, signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;

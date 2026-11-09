@@ -820,3 +820,9 @@ body { margin: 0; color: var(--ink); background: var(--paper); font-family: var(
 .todo-popover footer button { padding: 5px 11px; border: 1px solid var(--rule-strong); border-radius: 6px; color: var(--ink); background: var(--paper); font: 500 12px var(--font-ui); cursor: pointer; }
 .todo-popover footer #todo-apply { border-color: var(--accent); color: white; background: var(--accent); font-weight: 600; }
 @media (max-width: 420px) { .todo-popover .todo-llm-row { grid-template-columns: 1fr; } }
+
+.web-fetch-confirmation { position: fixed; z-index: 10000; right: 1rem; bottom: 1rem; width: min(36rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); overflow: auto; padding: 1rem; border: 2px solid var(--rule-strong); border-radius: 8px; background: var(--paper); color: var(--ink); box-shadow: 0 6px 24px #0005; font: 14px var(--font-ui); }
+.web-fetch-confirmation h2 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.web-fetch-confirmation label { display: block; font-weight: 600; }
+.web-fetch-confirmation textarea { display: block; box-sizing: border-box; width: 100%; margin-top: .3rem; resize: vertical; white-space: pre; overflow: auto; font: 13px monospace; }
+.web-fetch-confirmation button { margin: .4rem .5rem 0 0; padding: .5rem .8rem; cursor: pointer; }
