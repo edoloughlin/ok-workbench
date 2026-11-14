@@ -1,0 +1,72 @@
+[
+  {
+    "file": "api/openai-codex-responses.js",
+    "sha256": "13d02ecedbe4594b7c73bc3b9180e04f2a5e68e42aedfba9a366d5c082be8d57",
+    "replacements": [
+      {
+        "before": "import { clampThinkingLevel } from \"../models.js\";",
+        "after": "import { createInferenceObserver } from \"../workbench-inference-hooks.js\";\nimport { clampThinkingLevel } from \"../models.js\";"
+      },
+      {
+        "before": "    const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);",
+        "after": "    const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);\n    const inference = createInferenceObserver(options, model);"
+      },
+      {
+        "before": "}, httpTimeoutMs, websocketConnectTimeoutMs, cacheSessionId, accountId, grammarToolInputProperties, options);",
+        "after": "}, httpTimeoutMs, websocketConnectTimeoutMs, cacheSessionId, accountId, grammarToolInputProperties, options, inference);"
+      },
+      {
+        "before": "                        assertSuccessfulOutput(output);\n                        stream.push({",
+        "after": "                        assertSuccessfulOutput(output);\n                        await inference.finish(\"completed\");\n                        stream.push({"
+      },
+      {
+        "before": "                    catch (error) {\n                        const aborted = options?.signal?.aborted;",
+        "after": "                    catch (error) {\n                        if (error?.usageAccountingFailure) throw error;\n                        await inference.fail(error);\n                        const aborted = options?.signal?.aborted;"
+      },
+      {
+        "before": "                        response = await (options?.fetch ?? globalThis.fetch)",
+        "after": "                        await inference.start(\"sse\");\n                        response = await (options?.fetch ?? globalThis.fetch)"
+      },
+      {
+        "before": "                    if (attempt < maxRetries && isRetryableError(response.status, errorText)) {",
+        "after": "                    if (attempt < maxRetries && isRetryableError(response.status, errorText)) {\n                        await inference.finish(\"failed\");"
+      },
+      {
+        "before": "                catch (error) {\n                    if (error instanceof Error) {",
+        "after": "                catch (error) {\n                    if (error?.usageAccountingFailure) throw error;\n                    await inference.fail(error);\n                    if (error instanceof Error) {"
+      },
+      {
+        "before": "            await processStream(response, output, stream, model, grammarToolInputProperties, options);",
+        "after": "            await processStream(response, output, stream, model, grammarToolInputProperties, options, inference);"
+      },
+      {
+        "before": "            assertSuccessfulOutput(output);\n            stream.push({ type: \"done\"",
+        "after": "            assertSuccessfulOutput(output);\n            await inference.finish(\"completed\");\n            stream.push({ type: \"done\""
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason = options?.signal?.aborted ? \"aborted\" : \"error\";",
+        "after": "        catch (error) {\n            if (!error?.usageAccountingFailure) {\n                try { await inference.fail(error); } catch (accountingError) { error = accountingError; }\n            }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason = options?.signal?.aborted ? \"aborted\" : \"error\";"
+      },
+      {
+        "before": "async function processStream(response, output, stream, model, grammarToolInputProperties, options) {\n    await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent)",
+        "after": "async function processStream(response, output, stream, model, grammarToolInputProperties, options, inference) {\n    await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent, inference)"
+      },
+      {
+        "before": "async function* mapCodexEvents(events, output, model, onProviderStreamEvent) {\n    for await (const event of events) {",
+        "after": "async function* mapCodexEvents(events, output, model, onProviderStreamEvent, inference) {\n    for await (const event of events) {\n        if (event.response?.usage) await inference.usage(event.response.usage, \"openai-responses\");"
+      },
+      {
+        "before": "async function processWebSocketStream(url, body, headers, output, stream, model, onStart, idleTimeoutMs, websocketConnectTimeoutMs, cacheSessionId, accountId, grammarToolInputProperties, options) {",
+        "after": "async function processWebSocketStream(url, body, headers, output, stream, model, onStart, idleTimeoutMs, websocketConnectTimeoutMs, cacheSessionId, accountId, grammarToolInputProperties, options, inference) {"
+      },
+      {
+        "before": "        socket.send(JSON.stringify({ type: \"response.create\", ...requestBody }));",
+        "after": "        await inference.start(\"websocket\");\n        socket.send(JSON.stringify({ type: \"response.create\", ...requestBody }));"
+      },
+      {
+        "before": "mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), output, model, options?.onProviderStreamEvent)",
+        "after": "mapCodexEvents(parseWebSocket(socket, options?.signal, idleTimeoutMs), output, model, options?.onProviderStreamEvent, inference)"
+      }
+    ]
+  }
+]

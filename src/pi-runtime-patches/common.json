@@ -1,0 +1,32 @@
+[
+  {
+    "file": "api/simple-options.js",
+    "sha256": "ff234becff46a6c25c1e437c86d72fbe7aeb4e107266d1bf6951622d223b0ae0",
+    "replacements": [
+      {
+        "before": "        onPayload: options?.onPayload,",
+        "after": "        onInferenceAttempt: options?.onInferenceAttempt,\n        onPayload: options?.onPayload,"
+      }
+    ]
+  },
+  {
+    "file": "utils/provider-retry.js",
+    "sha256": "46da2f14c0f5d58164a44c1b2837d8ab7674ded3ae4c732d02ae62c87b39b939",
+    "replacements": [
+      {
+        "before": "        catch (error) {\n            if (options.signal?.aborted)",
+        "after": "        catch (error) {\n            if (error?.usageAccountingFailure) throw error;\n            if (options.signal?.aborted)"
+      }
+    ]
+  },
+  {
+    "file": "types.d.ts",
+    "sha256": "e2944a9e1c37851e6d089556ac955ea4b253eb57a14098b53272e91fe8e84a87",
+    "replacements": [
+      {
+        "before": "export interface ProviderRequestOptions<TModel = Model<Api>> {",
+        "after": "export interface InferenceAttemptMetadata {\n    requestId: string;\n    provider: string;\n    model: string;\n    api: string;\n    transport: string;\n    attempt: number;\n    retryOfRequestId: string | null;\n}\nexport interface InferenceAttemptObserver {\n    requestId?: string;\n    onUsage?: (snapshot: { usage: unknown; format: string }) => void | Promise<void>;\n    onFinish?: (outcome: { status: \"completed\" | \"failed\" | \"aborted\" }) => void | Promise<void>;\n}\nexport interface ProviderRequestOptions<TModel = Model<Api>> {\n    /** Awaited before each physical inference attempt; excludes credentials and request content. */\n    onInferenceAttempt?: (metadata: InferenceAttemptMetadata) => InferenceAttemptObserver | void | Promise<InferenceAttemptObserver | void>;"
+      }
+    ]
+  }
+]

@@ -10,6 +10,10 @@ Core capabilities are document browsing, project-scoped chat, reviewable Git dif
 
 The [external directory navigation specification](EXTERNAL-DIRECTORY-NAVIGATION-SPEC.md) defines a bounded change that renders approved external directory links as browsable, read-only navigation subtrees without changing approval or model-access scope.
 
+## Proposed usage reporting
+
+The [model and token usage reporting specification](USAGE-REPORTING-SPEC.md) defines durable usage accounting, a global reporting view, time-based and project/model/review breakdowns, and implementation acceptance criteria for 6.1-terra. This is an implementation handoff, not shipped functionality.
+
 ## Proposed workspace overview
 
 The [workspace overview specification](WORKSPACE-OVERVIEW-SPEC.md) defines a read-only AI review of priorities, urgent actions, and emerging project drift. Explore the [interactive mockup](mockups/workspace-overview.html). These are implementation handoff artifacts, not shipped functionality. The [review reliability decision record](WORKSPACE-REVIEW-RELIABILITY.md) captures observed failure evidence, the envelope fixes to apply first, and the gated two-stage review direction.

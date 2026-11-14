@@ -12,14 +12,19 @@ import { fetchWebPage, createWebFetchBudget } from './web-fetch.mjs';
 import { validateWebUrl } from './web-fetch-network.mjs';
 import toolApprovals from './tool-approvals.js';
 import externalLinks from './external-links.js';
-import {
+import runtimePatch from './pi-runtime-patch.js';
+// Install before importing Pi: eager dependency modules must not cache their
+// unpatched options when the application starts after npm --ignore-scripts.
+const runtimePatchReady = runtimePatch.applyPiRuntimePatches();
+await runtimePatchReady;
+const {
   createAgentSession,
   DefaultResourceLoader,
   defineTool,
   ModelRuntime,
   SessionManager,
   SettingsManager,
-} from '@earendil-works/pi-coding-agent';
+} = await import('@earendil-works/pi-coding-agent');
 
 // Resolve through ESM exports so this also works when npm hoists dependencies.
 export const piRuntimeVersion = JSON.parse(await readFile(new URL('../package.json', import.meta.resolve('@earendil-works/pi-ai')), 'utf8')).version;
@@ -51,7 +56,7 @@ export function sandboxBackend(platform = process.platform) {
   return null;
 }
 
-export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, grants, readGrants = {}, externalReadGrants = {}, workspaceMode = false, platform, toolEnvironment = {}, executionPolicy = null }) {
+export function sandboxChildEnvironment({ workspace, template, temporaryDirectory, grants, readGrants = {}, externalReadGrants = {}, workspaceMode = false, platform, toolEnvironment = {}, executionPolicy = null, privatePaths = [] }) {
   const sandboxRoot = platform === 'linux' ? '/workspace' : workspace;
   const sandboxTemplate = platform === 'linux' ? '/ok-workbench-template' : template;
   const sandboxGrants = platform === 'linux' ? '/grants' : grants;
@@ -68,6 +73,7 @@ export function sandboxChildEnvironment({ workspace, template, temporaryDirector
   // Avoid CoreFoundation falling back to ~/.CFUserTextEncoding. The worker has
   // no reason to read a user-home file just to determine a text encoding.
   if (platform === 'darwin') environment.__CF_USER_TEXT_ENCODING = `0x${process.getuid().toString(16)}:0:0`;
+  if (privatePaths.length) environment.OK_WORKBENCH_PRIVATE_PATHS = JSON.stringify(privatePaths);
   return { ...toolEnvironment, ...environment };
 }
 
@@ -78,12 +84,13 @@ function nodeRuntimeRoot(nodeBinary) {
   return nodeBinary.startsWith('/usr/bin/') ? path.dirname(nodeBinary) : path.dirname(path.dirname(nodeBinary));
 }
 
-export function macosSandboxArgs({ workspace, template, temporaryDirectory, grants, nodeBinary, workerSource }) {
+export function macosSandboxArgs({ workspace, template, temporaryDirectory, grants, nodeBinary, workerSource, privateUsageRoot }) {
   const runtime = nodeRuntimeRoot(nodeBinary);
   return [
     '-D', `WORKSPACE=${workspace}`, '-D', `TEMPLATE=${template}`,
     '-D', `PRIVATE_TMP=${temporaryDirectory}`, '-D', `GRANTS=${grants}`, '-D', `NODE_BINARY=${nodeBinary}`,
     '-D', `NODE_RUNTIME=${runtime}`, '-f', MACOS_SANDBOX_PROFILE,
+    '-D', `PRIVATE_USAGE=${privateUsageRoot || '/__ok_workbench_no_usage_state__'}`,
     nodeBinary, '--input-type=commonjs', '--eval', workerSource,
   ];
 }
@@ -207,18 +214,27 @@ export class TurnWorker {
   close() { this.closedByCaller = true; this.child.kill('SIGTERM'); this.failAll(new Error('Sandbox worker closed')); }
 }
 
-export async function createTurnWorker(projectRoot, { platform = process.platform, toolEnvironment = {}, executionPolicy = null, readGrants = [], externalReadGrants = [], workspaceMode = false } = {}) {
+export async function createTurnWorker(projectRoot, { platform = process.platform, toolEnvironment = {}, executionPolicy = null, readGrants = [], externalReadGrants = [], workspaceMode = false, privateRoots = [] } = {}) {
   const spawnStartedAt = turnDiagnostics() ? Date.now() : 0;
   const backend = sandboxBackend(platform); const command = await sandboxCommand(platform);
   if (!backend || !command) return null;
   let configuration;
   try { configuration = await workerConfiguration(projectRoot, platform, readGrants, externalReadGrants); }
   catch (error) { throw new Error(`Sandbox worker setup failed: ${error.message}`); }
+  configuration.privatePaths = [];
+  for (const privateRoot of privateRoots) {
+    const canonical = await realpath(privateRoot).catch(() => path.resolve(privateRoot));
+    const relative = path.relative(configuration.workspace, canonical);
+    if (!relative) throw new Error('Application state cannot be a tool workspace');
+    if (!relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) && await exists(canonical)) { configuration.privatePaths.push(relative.split(path.sep).join('/')); configuration.privateUsageRoot = canonical; }
+  }
   let args;
   if (backend === 'bubblewrap') {
     // The worker source is evaluated so the sandbox never mounts the package
     // installation or seed bundle. Its only user-data mount is /workspace.
     args = ['--unshare-all', '--new-session', '--die-with-parent', '--clearenv', '--setenv', 'PATH', '/usr/bin:/bin', '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'OK_WORKSPACE_ROOT', '/workspace', '--setenv', 'OKF_WORKSPACE_ROOT', '/workspace', '--setenv', 'OK_WORKBENCH_PROJECT_TEMPLATE', '/ok-workbench-template', '--setenv', 'OK_WORKBENCH_WORKSPACE_MODE', workspaceMode ? '1' : '0', '--setenv', 'OK_WORKBENCH_READ_GRANTS', JSON.stringify(Object.fromEntries(Object.keys(configuration.readGrants).map(id => [id, `/grants/${id}`]))), '--setenv', 'OK_WORKBENCH_EXTERNAL_READ_GRANTS', JSON.stringify(Object.fromEntries(Object.entries(configuration.externalReadGrants).map(([alias, grant]) => [alias, { ...grant, snapshotPath: `/grants/external/${grant.id}` }]))), ...(executionPolicy ? ['--setenv', 'OK_WORKBENCH_TOOL_EXECUTION_POLICY', JSON.stringify(executionPolicy)] : []), '--tmpfs', '/', '--dir', '/workspace', '--bind', configuration.workspace, '/workspace', '--dir', '/grants', '--ro-bind', configuration.grants, '/grants', '--ro-bind', configuration.template, '/ok-workbench-template', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', '/workspace'];
+    for (const relative of configuration.privatePaths) args.push('--tmpfs', `/workspace/${relative}`);
+    if (configuration.privatePaths.length) args.push('--setenv', 'OK_WORKBENCH_PRIVATE_PATHS', JSON.stringify(configuration.privatePaths));
     for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (await exists(systemPath)) args.push('--ro-bind', systemPath, systemPath);
     if (!configuration.nodeBinary.startsWith('/usr/') && !configuration.nodeBinary.startsWith('/bin/')) args.push('--ro-bind', configuration.nodeBinary, configuration.nodeBinary);
     for (const [name, value] of Object.entries(toolEnvironment)) args.push('--setenv', name, value);
@@ -257,6 +273,7 @@ const catalogStore = {
   async delete(id) { catalogEntries.delete(id); }
 };
 async function createModelRuntime(stateDir, signal) {
+  await runtimePatchReady;
   return ModelRuntime.create({ authPath: credentialPath(stateDir), modelsPath: null, modelsStore: catalogStore, signal });
 }
 let catalogRefresh;
@@ -430,10 +447,10 @@ export async function runPiReview({ provider, model: modelId, stateDir, env = pr
   return collectReviewSubmission({ runtime: modelRuntime, model, ...request });
 }
 
-export async function runPiTurn({ provider, model: modelId, effort, maxTokens, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, noWorkspaceTools = false }) {
+export async function runPiTurn({ provider, model: modelId, effort, maxTokens, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, stateDir, env = process.env, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, onInferenceAttempt, noWorkspaceTools = false }) {
   if (!modelId) throw new Error(`Set a model for ${provider}`);
   const capabilities = await createTurnCapabilities({ workspaceRoot, projectRoot, readGrants, externalReadGrants, workspaceMode, noWorkspaceTools });
-  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: !noWorkspaceTools }, retry: { enabled: !noWorkspaceTools, maxRetries: noWorkspaceTools ? 0 : 2 } });
+  const worker = noWorkspaceTools ? null : await createTurnWorker(capabilities.selectedProject.root, { readGrants: capabilities.extraReadGrants, externalReadGrants: capabilities.externalReadGrants, workspaceMode: capabilities.workspaceMode, privateRoots: [path.join(stateDir, 'usage')] }); const settingsManager = SettingsManager.inMemory({ compaction: { enabled: !noWorkspaceTools }, retry: { enabled: !noWorkspaceTools, maxRetries: noWorkspaceTools ? 0 : 2 } });
   const workspaceInstructions = systemPrompt ? '' : (agentInstructions ?? await workspaceAgentInstructions(workspaceRoot, projectRoot));
   const agentDir = path.join(stateDir, 'pi-agent');
   const modelRuntime = await createModelRuntime(stateDir, signal);
@@ -505,7 +522,7 @@ export async function runPiTurn({ provider, model: modelId, effort, maxTokens, m
       policy = await toolApprovals.inspectTool(capabilities.selectedProject.root, params.path);
       const approval = await toolApprovals.resolveToolApproval(stateDir, capabilities.selectedProject.root, policy);
       const toolEnvironment = approval.environment;
-      runner = await createTurnWorker(capabilities.selectedProject.root, { toolEnvironment, executionPolicy: approval.executionPolicy, workspaceMode: capabilities.workspaceMode });
+      runner = await createTurnWorker(capabilities.selectedProject.root, { toolEnvironment, executionPolicy: approval.executionPolicy, workspaceMode: capabilities.workspaceMode, privateRoots: [path.join(stateDir, 'usage')] });
       if (!runner) throw new Error('A supported sandbox is required before workspace tools can run');
       const result = await runner.call(name, params);
       if (result.stderr) logError('[ok-workbench] workspace tool stderr', { path: result.path, exitCode: result.exitCode, signal: result.signal, stderr: result.stderr, manifestPath: policy.manifestPath, manifest: policy.manifest, providedEnvironment: Object.keys(toolEnvironment) });
@@ -581,10 +598,16 @@ export async function runPiTurn({ provider, model: modelId, effort, maxTokens, m
     } })] : [])
   ];
   const { session } = await createAgentSession({ cwd: projectRoot, agentDir, model, modelRuntime, settingsManager, resourceLoader: loader, sessionManager: SessionManager.inMemory(projectRoot), thinkingLevel: effort || undefined, noTools: 'builtin', tools: tools.map(tool => tool.name), customTools: tools });
+  const inferenceState = { subtask: null, retry: false };
+  const accounting = installAgentInferenceObserver(session.agent, onInferenceAttempt, () => { void session.abort().catch(() => {}); }, () => inferenceState);
   if (noWorkspaceTools && Number.isFinite(maxTokens) && maxTokens > 0) clampAgentOutputTokens(session.agent, maxTokens, model.maxTokens, onStatus);
   let lastStatus;
   const reportStatus = state => { if (state !== lastStatus) { lastStatus = state; onStatus?.({ state }); } };
   const unsubscribe = session.subscribe(event => {
+    if (event.type === 'compaction_start') inferenceState.subtask = 'compaction';
+    if (event.type === 'compaction_end') { inferenceState.subtask = null; inferenceState.retry = false; }
+    if (['auto_retry_start', 'summarization_retry_attempt_start'].includes(event.type)) inferenceState.retry = true;
+    if (['auto_retry_end', 'summarization_retry_finished'].includes(event.type)) inferenceState.retry = false;
     const assistantType = event.assistantMessageEvent?.type;
     if (turnDiagnostics()) log('[ok-workbench] pi-session-event', { type: event.type, assistantMessageEventType: assistantType });
     if (event.type === 'message_start' && event.message?.role === 'assistant') onResponseStart?.();
@@ -603,12 +626,48 @@ export async function runPiTurn({ provider, model: modelId, effort, maxTokens, m
   onSteerReady?.(message => session.steer(message));
   try {
     await session.prompt(historyPrompt(messages));
+    if (accounting.failure) throw accounting.failure;
     if (noWorkspaceTools) {
       const lastAssistant = session.messages.findLast(message => message.role === 'assistant');
       if (lastAssistant?.stopReason === 'length') throw new Error('The selected model stopped before completing the review response (output limit)');
       if (lastAssistant?.stopReason === 'error') throw new Error(lastAssistant.errorMessage || 'The selected model failed during the review');
     }
   } finally { signal?.removeEventListener('abort', abort); unsubscribe(); session.dispose(); worker?.close(); }
+}
+
+// Pi passes this stream function to generation, tool continuations, and
+// compaction. Provider adapters see the physical model after runtime routing.
+export function installAgentInferenceObserver(agent, onInferenceAttempt, onFailure = () => {}, getState = () => ({})) {
+  const accounting = { failure: null };
+  if (typeof onInferenceAttempt !== 'function') return accounting;
+  const stream = agent?.streamFunction;
+  if (typeof stream !== 'function') throw new Error('Pi inference stream hook is unavailable');
+  const protect = callback => async value => {
+    if (accounting.failure) throw accounting.failure;
+    try { return await callback?.(value); }
+    catch (cause) {
+      accounting.failure = Object.assign(new Error('Usage accounting is unavailable', { cause }), { code: 'USAGE_STORE_UNAVAILABLE', usageAccountingFailure: true });
+      onFailure(accounting.failure);
+      throw accounting.failure;
+    }
+  };
+  const hook = protect(async metadata => {
+    const observer = await onInferenceAttempt(metadata);
+    return { requestId: observer?.requestId, onUsage: protect(observer?.onUsage), onFinish: protect(observer?.onFinish) };
+  });
+  let lastRequestId = null; let lastAttempt = 0;
+  agent.streamFunction = (model, context, options) => {
+    if (accounting.failure) throw accounting.failure;
+    const state = getState();
+    const subtask = state.subtask || (context.messages?.at(-1)?.role === 'toolResult' ? 'tool_continuation' : 'generation');
+    const retryBase = state.retry ? lastAttempt : 0; const retryOf = state.retry ? lastRequestId : null;
+    const scopedHook = async metadata => {
+      const selected = { ...metadata, subtask, attempt: retryBase + metadata.attempt, retryOfRequestId: metadata.retryOfRequestId || retryOf };
+      const observer = await hook(selected); lastRequestId = observer?.requestId || metadata.requestId; lastAttempt = selected.attempt; return observer;
+    };
+    return stream(model, context, { ...options, onInferenceAttempt: scopedHook });
+  };
+  return accounting;
 }
 
 // Pi's provider adapter accepts generation options as its third stream argument.

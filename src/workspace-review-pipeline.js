@@ -181,6 +181,14 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     return reserved;
   }
 
+  const usageAttempts = new Map();
+  const usageAttemptNumbers = new Map();
+  const usageKey = (stage, projectId) => `${stage}:${projectId || ''}`;
+  const markValidation = async (stage, projectId, outcome) => {
+    const requestId = usageAttempts.get(usageKey(stage, projectId));
+    if (requestId) await coordinator.usageStore?.validationRequest(requestId, outcome);
+  };
+
   async function rawCall(stage, projectId, prompt, input, selection = stage === 'project' ? assessmentModel : synthesisModel, forceText = false) {
     throwIfAborted();
     const limit = stage === 'synthesis' ? SYNTHESIS_INPUT_LIMIT : PROJECT_INPUT_LIMIT;
@@ -191,7 +199,7 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     console.log(`[${timestamp}] [ok-workbench] workspace review ${stage} ${projectId || 'workspace'} requesting model; promptBytes=${Buffer.byteLength(prompt)}, evidenceBytes=${Buffer.byteLength(JSON.stringify(input))}, inputBytes=${bytes(prompt, input)}`);
     await updateJob({ phase: stage === 'synthesis' ? 'synthesizing' : 'assessing', currentProjectId: projectId || null, progress: { ...progress } });
     let response; const requestStarted = Date.now();
-    try { response = await coordinator.provider({ ...selection, prompt, evidence: input, timeout: stage === 'synthesis' ? (settings.synthesisTimeoutMinutes ?? 5) * 60_000 : REVIEW_TIMEOUT_MS, signal: jobSignal, trigger, stage, projectId: projectId || null, attemptNumber, forceText, maxTokens: stage === 'synthesis' ? 16384 : 4096 }); }
+    try { response = await coordinator.provider({ ...selection, prompt, evidence: input, timeout: stage === 'synthesis' ? (settings.synthesisTimeoutMinutes ?? 5) * 60_000 : REVIEW_TIMEOUT_MS, signal: jobSignal, trigger, stage, projectId: projectId || null, attemptNumber, usageContext: Object.freeze({ operationId: id, projectId: projectId || null, projectLabel: projectId || null, activity: stage === 'project' ? 'project_review' : 'workspace_review', subtask: 'generation', trigger: trigger === 'automatic' ? 'automatic' : 'user', validationOutcome: 'pending', attempt: (usageAttemptNumbers.get(usageKey(stage, projectId)) || 0) + 1, retryOfRequestId: usageAttempts.get(usageKey(stage, projectId)) || null, onRequest: requestId => { usageAttempts.set(usageKey(stage, projectId), requestId); usageAttemptNumbers.set(usageKey(stage, projectId), (usageAttemptNumbers.get(usageKey(stage, projectId)) || 0) + 1); } }), forceText, maxTokens: stage === 'synthesis' ? 16384 : 4096 }); }
     catch (error) {
       if (signal.aborted) error.code = 'SUPERSEDED';
       else if (jobSignal.aborted) error.code = 'REVIEW_TIMEOUT';
@@ -225,10 +233,11 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
 
   async function requestValidated(stage, projectId, prompt, input, validate) {
     prompt = `${prompt}\n${contractPrompt(stage)}`; const stageStarted = Date.now();
-    const accept = (result, correction, recoveryReason = null) => { const validated = validate(result.raw); return { value: validated.value, correction, selection: result.selection, output: { ...result.provenance, requestCount: correction ? 2 : 1, durationMs: Math.max(0, Date.now() - stageStarted), recoveryReason, warnings: validated.warnings } }; };
+    const accept = async (result, correction, recoveryReason = null) => { const validated = validate(result.raw); await markValidation(stage, projectId, 'accepted'); return { value: validated.value, correction, selection: result.selection, output: { ...result.provenance, requestCount: correction ? 2 : 1, durationMs: Math.max(0, Date.now() - stageStarted), recoveryReason, warnings: validated.warnings } }; };
     let first;
-    try { first = await rawCall(stage, projectId, prompt, input); return first.deferred ? first : accept(first, false); }
+    try { first = await rawCall(stage, projectId, prompt, input); return first.deferred ? first : await accept(first, false); }
     catch (firstError) {
+      await markValidation(stage, projectId, ['INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED'].includes(firstError.code) ? 'rejected' : 'not_applicable');
       if (!['INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED'].includes(firstError.code)) throw firstError;
       if (first && !firstError.traceWritten) { await saveFailureTrace({ stage, projectId, attemptNumber: first.attemptNumber, prompt: first.traceRequest.prompt, input: first.traceRequest.input, response: first.response, error: firstError }); firstError.traceWritten = true; }
       const hybridRetry = stage === 'project' && settings.assessmentModel;
@@ -241,8 +250,8 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
       if (bytes(correctionPrompt, correctionInput) > limit) throw firstError;
       const second = await rawCall(stage, projectId, correctionPrompt, correctionInput, synthesisModel, firstError.code === 'OUTPUT_TOOL_UNSUPPORTED' || firstError.outputCategory === 'OUTPUT_SUBMISSION_MISSING');
       if (second.deferred) throw firstError;
-      try { const category = ['OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_SUBMISSION_MISSING', 'OUTPUT_SUBMISSION_AMBIGUOUS', 'OUTPUT_INVALID_JSON'].includes(firstError.outputCategory || firstError.code) ? firstError.outputCategory || firstError.code : validationDiagnostic(firstError) || 'validation'; return accept(second, true, category); }
-      catch (error) { if (error.code === 'INVALID_REVIEW') { error.validationDiagnostic = validationDiagnostic(error); error.detail ||= coordinator.responseShape(second.response); await saveFailureTrace({ stage, projectId, attemptNumber: second.attemptNumber, prompt: second.traceRequest.prompt, input: second.traceRequest.input, response: second.response, error }); } throw error; }
+      try { const category = ['OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_SUBMISSION_MISSING', 'OUTPUT_SUBMISSION_AMBIGUOUS', 'OUTPUT_INVALID_JSON'].includes(firstError.outputCategory || firstError.code) ? firstError.outputCategory || firstError.code : validationDiagnostic(firstError) || 'validation'; return await accept(second, true, category); }
+      catch (error) { await markValidation(stage, projectId, error.code === 'INVALID_REVIEW' ? 'rejected' : 'not_applicable'); if (error.code === 'INVALID_REVIEW') { error.validationDiagnostic = validationDiagnostic(error); error.detail ||= coordinator.responseShape(second.response); await saveFailureTrace({ stage, projectId, attemptNumber: second.attemptNumber, prompt: second.traceRequest.prompt, input: second.traceRequest.input, response: second.response, error }); } throw error; }
     }
   }
 
@@ -296,6 +305,7 @@ async function performWorkspaceReviewPipeline(coordinator, { id, trigger, settin
     const maySynthesize = force || dirty.length > 0 || !previous?.pipeline?.synthesisKey;
     const stageSlots = Number.isFinite(remaining) ? Math.max(0, remaining - (maySynthesize ? 1 : 0)) : Number.POSITIVE_INFINITY;
     const runnable = dueProjects.slice(0, stageSlots); const runnableIds = new Set(runnable.map(item => item.project.id));
+    if (coordinator.usageStore) await coordinator.usageStore.updateOperation(id, { reuse: selected.filter(entry => !entry.dirty).map(entry => ({ stage: 'project', projectId: entry.project.id, outcome: 'cached' })) });
     progress.reused = selected.length - dirty.length; progress.deferred = dirty.length - runnable.length + omitted.length;
     progress.plannedMaxCalls = Math.min(remaining, runnable.length * 2 + (maySynthesize ? 2 : 0));
     await updateJob({ phase: 'assessing', progress: { ...progress } });

@@ -17,6 +17,12 @@ const { WorkspaceReviewCoordinator, reviewModelTier, reviewContextTokensRequired
 const { createPiVersionChecker } = require('./pi-version-check.js');
 const { createNativeFileManager } = require('./native-file-manager.js');
 const { stageDeletion } = require('./entry-deletion.js');
+const { UsageStore } = require('./usage-store.js');
+const { createUsageCapture } = require('./usage-capture.js');
+const { createUsageReporter } = require('./usage-reporting.js');
+let usageStore;
+let usageReporter;
+let usageModelInventory = null;
 const nativeFileManager = createNativeFileManager();
 const { createCapabilityResolver } = require('./workspace-review-output.js');
 const reviewOutputCapabilities = createCapabilityResolver();
@@ -130,7 +136,7 @@ function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function logError(...args) { console.error(`[${new Date().toISOString()}]`, ...args); }
 
 function respond(res, status, body, type = 'application/json; charset=utf-8') {
-  res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
+  res.writeHead(status, { 'content-type': type, 'cache-control': res.getHeader('cache-control') || 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' });
   res.end(body);
 }
 
@@ -169,10 +175,15 @@ async function resolveWorkspaceRoot() {
   return path.join(os.homedir(), 'workspace');
 }
 
+function privateUsagePath(file) {
+  const roots = [path.join(CHAT_STATE_DIR, 'usage'), privateUsageRoot].filter(Boolean);
+  return roots.some(root => file === root || file.startsWith(`${root}${path.sep}`));
+}
+let privateUsageRoot;
 function safePath(routePath) {
   const relative = routePath.replace(/^\/(?:workspace|agents)\/?/, '');
   const target = path.resolve(BUNDLE_ROOT, relative || '.');
-  return target === BUNDLE_ROOT || target.startsWith(`${BUNDLE_ROOT}${path.sep}`) ? target : null;
+  return !privateUsagePath(target) && (target === BUNDLE_ROOT || target.startsWith(`${BUNDLE_ROOT}${path.sep}`)) ? target : null;
 }
 
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
@@ -186,7 +197,7 @@ async function readWorkspaceTextPrefix(file, limit = MAX_INDEX_METADATA_BYTES) {
 async function bundlePath(target) {
   try {
     const [root, resolved] = await Promise.all([fs.realpath(BUNDLE_ROOT), fs.realpath(target)]);
-    return resolved === root || resolved.startsWith(`${root}${path.sep}`) ? resolved : null;
+    return !privateUsagePath(resolved) && (resolved === root || resolved.startsWith(`${root}${path.sep}`)) ? resolved : null;
   } catch { return null; }
 }
 
@@ -269,6 +280,7 @@ async function ignoreRules() {
 }
 
 async function isIgnored(file) {
+  if (privateUsagePath(path.resolve(file))) return true;
   const relative = path.relative(BUNDLE_ROOT, file).split(path.sep).join('/');
   let ignored = false;
   for (const rule of await ignoreRules()) if (rule.regex.test(relative)) ignored = !rule.negated;
@@ -1108,7 +1120,9 @@ async function providerCatalog() {
   // The compatibility adapter is not a Pi provider, so retain its explicit
   // environment-based configuration alongside Pi's discovered catalog.
   if (process.env.LLM_COMPATIBLE_API_KEY && process.env.LLM_COMPATIBLE_BASE_URL) configured.push({ id: 'compatible', label: process.env.LLM_COMPATIBLE_LABEL || 'Compatible API', authType: 'api_key', models: process.env.LLM_COMPATIBLE_MODEL ? [{ id: process.env.LLM_COMPATIBLE_MODEL, label: process.env.LLM_COMPATIBLE_MODEL, supportsSteering: false }] : [] });
-  return configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id), reviewOutput: effectiveReviewOutput(reviewOutputSelection(provider.id, model.id, model.reviewEndpoint)) })) }));
+  const catalog = configured.map(provider => ({ ...provider, models: provider.models.map(model => ({ ...model, supportsSteering: providerUsesPi(provider.id) && model.supportsSteering === true, reviewTier: reviewModelTier(provider.id, model.id), reviewOutput: effectiveReviewOutput(reviewOutputSelection(provider.id, model.id, model.reviewEndpoint)) })) }));
+  usageModelInventory = catalog.flatMap(item => item.models.map(model => ({ provider: item.id, model: model.id })));
+  return catalog;
 }
 function providerUsesPi(provider) {
   const direct = process.env.OK_WORKBENCH_DIRECT_PROVIDER === '1' || process.env.OKF_WORKBENCH_DIRECT_PROVIDER === '1';
@@ -1208,17 +1222,19 @@ function projectAssistantSystemPrompt(agentInstructions = '', workspaceMode = fa
   const scope = workspaceMode ? 'The user deliberately enabled workspace-wide mode for this turn.' : 'Filesystem paths are relative to the selected project; the model cannot widen that authority.';
   return `You are a project-scoped coding assistant. ${scope} Explicitly issued read grants are one-turn and read-only. Use only supplied context and do not claim access to files you have not been given. When linking workspace files in a response, use workspace-relative Markdown paths such as [status](project/status.md).${agentInstructions}`;
 }
-async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, maxTokens, noWorkspaceTools = false }) {
+async function providerStream({ provider, model, effort, messages, projectRoot, workspaceRoot = projectRoot, readGrants = [], externalReadGrants = [], workspaceMode = false, signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, maxTokens, usageContext, noWorkspaceTools = false }) {
   const configuration = (await providerCatalog()).find(item => item.id === provider);
   if (!configuration) throw new Error(`Provider ${provider || 'selection'} is not configured`);
   const selectedModel = model || configuration.models[0]?.id;
   if (!selectedModel) throw new Error(`Choose a model for ${configuration.label}`);
+  if (!usageContext?.operationId) throw Object.assign(new Error('Inference attribution is unavailable'), { code: 'USAGE_STORE_UNAVAILABLE' });
+  const onInferenceAttempt = createUsageCapture({ store: usageStore, context: { ...usageContext, requestedProvider: provider, requestedModel: selectedModel } });
   // Pi owns all providers it discovers, including the subscription-only
   // openai-codex provider. The direct HTTP adapter below is only an opt-in
   // shortcut for Anthropic/OpenAI API keys; compatible is its own adapter.
   if (providerUsesPi(provider)) {
     const { runPiTurn } = await import('./pi-harness.mjs');
-    return runPiTurn({ provider, model: selectedModel, effort, maxTokens, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, noWorkspaceTools });
+    return runPiTurn({ provider, model: selectedModel, effort, maxTokens, messages, projectRoot, workspaceRoot, readGrants, externalReadGrants, workspaceMode, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment(), signal, onDelta, onThinking, onTool, onStatus, onResponseStart, onSteerReady, beforeCreateProject, confirmWebFetch, systemPrompt, agentInstructions, onInferenceAttempt, noWorkspaceTools });
   }
   let endpoint; let headers; let body;
   if (provider === 'anthropic') {
@@ -1231,6 +1247,11 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
     headers = { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` };
     body = { model: selectedModel, max_tokens: maxTokens || 4096, stream: true, messages: [{ role: 'system', content: withCurrentDateTime(systemPrompt || projectAssistantSystemPrompt(agentInstructions, workspaceMode)) }, ...messages.map(item => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.content }))] };
   }
+  if (provider !== 'anthropic') body.stream_options = { include_usage: true };
+  signal?.throwIfAborted();
+  const observer = await onInferenceAttempt({ requestId: crypto.randomUUID(), provider, model: selectedModel, api: provider === 'anthropic' ? 'anthropic-messages' : 'openai-completions', transport: 'http', attempt: 1, retryOfRequestId: null });
+  let providerUsage = {};
+  try {
   const response = await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) {
     const payload = await response.text().catch(() => ''); let detail = '';
@@ -1250,18 +1271,22 @@ async function providerStream({ provider, model, effort, messages, projectRoot, 
       if (!data) continue;
       try {
         const item = JSON.parse(data);
+        const usage = provider === 'anthropic' ? (item.message?.usage || item.usage) : item.usage;
+        if (usage) { providerUsage = { ...providerUsage, ...usage }; await observer.onUsage({ usage: providerUsage, format: provider === 'anthropic' ? 'anthropic' : 'openai-completions' }); }
         if (eventName === 'message_stop' || item.choices?.[0]?.finish_reason === 'stop') streamComplete = true;
         const delta = provider === 'anthropic' ? (eventName === 'content_block_delta' ? item.delta?.text : '') : item.choices?.[0]?.delta?.content;
         if (provider === 'anthropic' ? item.delta?.stop_reason === 'max_tokens' : item.choices?.[0]?.finish_reason === 'length') outputLimitReached = true;
         if (delta) onDelta(delta);
-      } catch { /* ignore malformed provider event */ }
+      } catch (error) { if (error.code === 'USAGE_STORE_UNAVAILABLE' || error.usageAccountingFailure) throw error; /* ignore malformed provider event */ }
     }
   }
   if (!streamComplete && noWorkspaceTools) throw Object.assign(new Error('Review stream ended without completion'), { code: 'OUTPUT_TRUNCATED' });
   if (outputLimitReached && noWorkspaceTools) throw Object.assign(new Error('The selected model stopped before completing the review response (output limit)'), { code: 'OUTPUT_TRUNCATED' });
+  await observer.onFinish({ status: 'completed' });
+  } catch (error) { await observer.onFinish({ status: signal?.aborted || error.name === 'AbortError' ? 'aborted' : 'failed' }); throw error; }
 }
 
-async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal, maxTokens, stage, forceText = false }) {
+async function workspaceReviewProvider({ provider, model, effort, prompt, evidence, timeout, signal, maxTokens, stage, usageContext, forceText = false }) {
   let output = ''; let outputTooLarge = false; const abort = new AbortController();
   const forwardAbort = () => abort.abort(); signal?.addEventListener('abort', forwardAbort, { once: true });
   if (signal?.aborted) abort.abort();
@@ -1274,16 +1299,16 @@ async function workspaceReviewProvider({ provider, model, effort, prompt, eviden
       const descriptor = (await providerCatalog()).find(item => item.id === provider)?.models.find(item => item.id === model);
       const selection = reviewOutputSelection(provider, model, descriptor?.reviewEndpoint);
       const { transport } = effectiveReviewOutput(selection, forceText);
-      try { return await runPiReview({ provider, model, effort, prompt, evidence, stage, transport, timeout, maxTokens: maxTokens || 16384, signal: abort.signal, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() }); }
+      try { return await runPiReview({ provider, model, effort, prompt, evidence, stage, transport, timeout, onInferenceAttempt: createUsageCapture({ store: usageStore, context: { ...usageContext, requestedProvider: provider, requestedModel: model } }), maxTokens: maxTokens || 16384, signal: abort.signal, stateDir: CHAT_STATE_DIR, env: await effectiveProviderEnvironment() }); }
       catch (error) { if (error.code === 'OUTPUT_TOOL_UNSUPPORTED') reviewOutputCapabilities.markUnsupported(selection); throw error; }
     }
-    await providerStream({ provider, model, effort, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: Math.min(maxTokens || 16384, 16384), messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; if (stage && Buffer.byteLength(output) > (stage === 'project' ? 16 * 1024 : 64 * 1024)) { outputTooLarge = true; abort.abort(); } } });
+    await providerStream({ provider, model, effort, usageContext, projectRoot: BUNDLE_ROOT, workspaceRoot: BUNDLE_ROOT, workspaceMode: false, readGrants: [], externalReadGrants: [], noWorkspaceTools: true, signal: abort.signal, systemPrompt: prompt, maxTokens: Math.min(maxTokens || 16384, 16384), messages: [{ role: 'user', content: JSON.stringify(evidence) }], onDelta: delta => { output += delta; if (stage && Buffer.byteLength(output) > (stage === 'project' ? 16 * 1024 : 64 * 1024)) { outputTooLarge = true; abort.abort(); } } });
     return stage ? { version: 1, transport: 'json_text', text: output, finishReason: 'complete', responseBytes: Buffer.byteLength(output), requestCount: 1, outputLimitEnforced: true } : output;
   } catch (error) {
     if (outputTooLarge) throw Object.assign(new Error('Review response exceeds byte limit'), { code: 'RESPONSE_TOO_LARGE' });
     if (signal?.aborted) throw Object.assign(new Error('The review was superseded'), { code: 'SUPERSEDED' });
     if (abort.signal.aborted || error.code === 'REVIEW_TIMEOUT') throw Object.assign(new Error(`The review exceeded its ${(timeout || 120_000) / 1000}-second limit`), { code: 'REVIEW_TIMEOUT' });
-    if (['INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_TRUNCATED', 'RESPONSE_TOO_LARGE', 'SUPERSEDED'].includes(error.code)) throw error;
+    if (['USAGE_STORE_UNAVAILABLE', 'USAGE_LEDGER_CORRUPT', 'INVALID_REVIEW', 'OUTPUT_TOOL_UNSUPPORTED', 'OUTPUT_TRUNCATED', 'RESPONSE_TOO_LARGE', 'SUPERSEDED'].includes(error.code)) throw error;
     throw Object.assign(new Error(error?.message || 'The selected provider is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', forwardAbort); }
 }
@@ -1344,13 +1369,14 @@ function fallbackThreadTitle(message) {
   const title = cleanThreadTitle(firstLine).replace(/[.!?]+$/, '').trim();
   return title.length > 72 ? `${title.slice(0, 69).replace(/\s+\S*$/, '')}…` : title;
 }
-async function generateThreadTitle({ provider, model, effort, projectRoot, prompt }) {
+async function generateThreadTitle({ provider, model, effort, projectRoot, prompt, usageContext }) {
   let output = '';
   await providerStream({
     provider,
     model,
     effort,
     projectRoot,
+    usageContext: { ...usageContext, activity: 'system', subtask: 'other' },
     messages: [{ role: 'user', content: prompt }],
     onDelta: delta => { output += delta; },
     noWorkspaceTools: true,
@@ -1591,6 +1617,23 @@ async function handleRequest(req, res) {
       const target = path.resolve(source, decodeURIComponent(url.pathname.slice('/vendor/mermaid/'.length)));
       if (target.startsWith(`${source}${path.sep}`) && await isFile(target)) return respond(res, 200, await fs.readFile(target), path.basename(target) === 'LICENSE' ? 'text/plain; charset=utf-8' : MIME[path.extname(target)] || 'application/octet-stream');
     }
+    if (url.pathname.startsWith('/api/usage/')) {
+      res.setHeader('cache-control', 'private, no-store');
+      assertChatRequest(req);
+      if ((req.headers.origin && !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(req.headers.origin)) || req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { code: 'UNTRUSTED_ORIGIN', error: 'Untrusted request origin' });
+      res.setHeader('cache-control', 'private, no-store');
+      if (req.method !== 'GET') return json(res, 405, { code: 'METHOD_NOT_ALLOWED', error: 'Usage reporting is read-only' });
+      if (url.pathname === '/api/usage/report') return json(res, 200, await usageReporter.report(url.searchParams));
+      if (url.pathname === '/api/usage/export') {
+        const chunks = await usageReporter.exportRows(url.searchParams);
+        res.writeHead(200, { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="usage.csv"' });
+        for await (const chunk of chunks) { if (res.destroyed) break; if (!res.write(chunk)) await new Promise(resolve => { const done = () => { res.off('drain', done); res.off('close', done); resolve(); }; res.once('drain', done); res.once('close', done); }); }
+        return res.end();
+      }
+      const operation = url.pathname.match(/^\/api\/usage\/operations\/([A-Za-z0-9_-]{1,256})$/);
+      if (operation) return json(res, 200, await usageReporter.operation(operation[1], url.searchParams));
+      return json(res, 404, { code: 'USAGE_NOT_FOUND', error: 'Usage not found' });
+    }
     if (url.pathname === '/api/project') return respond(res, 200, JSON.stringify(await projectData(url.searchParams.get('path'))));
     if (url.pathname === '/api/document' && req.method === 'GET') return json(res, 200, await documentData(url.searchParams.get('path') || '/workspace'));
     if (url.pathname === '/api/document' && req.method === 'PUT') { assertChatRequest(req); return json(res, 200, await saveMarkdownDocument(await readJson(req))); }
@@ -1708,6 +1751,8 @@ async function handleRequest(req, res) {
         if (ACTIVE_TURNS.get(steerMatch[2]) !== active) throw new Error('Active turn not found');
         const current = await loadThread(active.threadId);
         const fileContext = await chatFileContext(body, current);
+        const operation = (await usageStore.snapshot()).operations.find(item => item.operationId === steerMatch[2]);
+        await usageStore.updateOperation(steerMatch[2], { promptSubmissions: [...(operation?.promptSubmissions || []), { id: crypto.randomUUID(), acceptedAt: new Date().toISOString() }] });
         await active.steer(message + fileContext);
         current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator: 'user', steering: true, targetTurnId: steerMatch[2], content: message, fileContext, createdAt: new Date().toISOString() }); await saveThread(current);
       });
@@ -1730,8 +1775,10 @@ async function handleRequest(req, res) {
         const current = await loadThread(turnMatch[1]); const provider = body.provider || current.provider; const model = body.model || current.model; const effort = body.effort || current.effort;
         const fileContext = await chatFileContext(body, current);
         const initiator = body.initiator === 'system' ? 'system' : 'user';
-        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, fileContext, createdAt: new Date().toISOString() }); await saveThread(current);
-        active = { threadId: current.id, project: current.project, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); if (current.project !== 'workspace') void workspaceReview?.recordActivity(current.project, 'chat').catch(() => {}); return current;
+        const usageContext = Object.freeze({ operationId: turnId, projectId: current.project === 'workspace' ? null : current.project, projectLabel: current.project === 'workspace' ? null : current.project, activity: 'chat', subtask: 'generation', trigger: initiator });
+        await usageStore.startOperation({ ...usageContext, promptSubmissions: [{ id: crypto.randomUUID(), acceptedAt: new Date().toISOString() }] });
+        current.provider = provider; current.model = model; current.effort = effort || ''; current.titleProvider = body.titleProvider || current.titleProvider || provider; current.titleModel = body.titleModel || current.titleModel || model; current.titleEffort = body.titleEffort || current.titleEffort || ''; current.messages.push({ id: crypto.randomUUID(), role: 'user', initiator, content: message, fileContext, createdAt: new Date().toISOString() }); try { await saveThread(current); } catch (error) { await usageStore.updateOperation(turnId, { status: 'failed', completedAt: new Date().toISOString() }); throw error; }
+        active = { threadId: current.id, project: current.project, usageContext, abort, supportsSteering: providerUsesPi(provider), steer: null }; ACTIVE_TURNS.set(turnId, active); if (current.project !== 'workspace') void workspaceReview?.recordActivity(current.project, 'chat').catch(() => {}); return current;
       }); const provider = thread.provider; const model = thread.model; const effort = thread.effort;
       res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
       const writeEvent = turnWriter(res, thread.id, turnId); writeEvent('turn.started', { supports_steering: active.supportsSteering });
@@ -1752,11 +1799,11 @@ async function handleRequest(req, res) {
       try {
         const selectedProjectRoot = projectRootForId(thread.project);
         if (thread.project === 'workspace' && thread.workspaceMode !== true) throw new Error('This workspace chat was not created with explicit workspace mode. Start a new workspace-wide chat to continue.');
-        const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: selectedProjectRoot, prompt: message }).catch(() => '') : null;
+        const titlePromise = thread.messages.length === 1 ? generateThreadTitle({ provider: thread.titleProvider, model: thread.titleModel, effort: thread.titleEffort, projectRoot: selectedProjectRoot, prompt: message, usageContext: active.usageContext }).catch(error => { if (error.code === 'USAGE_STORE_UNAVAILABLE') abort.abort(); return ''; }) : null;
         const grants = await explicitProjectContext(message, thread.project); const externalReadGrants = thread.workspaceMode === true ? [] : await externalProjectGrants(thread.project); const turnMessages = thread.messages.map(item => ({ ...item, content: item.content + (item.fileContext || '') }));
         if (grants.length) { turnMessages[turnMessages.length - 1].content += `\n\n[Explicit cross-project context and one-turn read grants]\n${grants.map(grant => `[${grant.id}] @${grant.project}/${grant.path}\n${grant.content}`).join('\n\n')}`; writeEvent('scope.granted', { grants: grants.map(grant => ({ id: grant.id, project: grant.project, path: grant.path })) }); }
         const agentInstructions = await workspaceAgentInstructions(BUNDLE_ROOT, selectedProjectRoot);
-        await providerStream({ provider, model, effort, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, externalReadGrants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), confirmWebFetch, signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
+        await providerStream({ provider, model, effort, usageContext: active.usageContext, messages: turnMessages, projectRoot: selectedProjectRoot, workspaceRoot: BUNDLE_ROOT, readGrants: grants, externalReadGrants, workspaceMode: thread.workspaceMode === true, agentInstructions, beforeCreateProject: () => ensureWorkspaceGit(BUNDLE_ROOT), confirmWebFetch, signal: abort.signal, onDelta: delta => { reply += delta; writeEvent('message.delta', { delta }); }, onThinking: delta => writeEvent('turn.thinking', { delta }), onStatus: status => writeEvent('turn.status', { state: status.state }), onResponseStart: () => { if (pendingSteeringBoundary) { if (reply) { const delta = reply.endsWith('\n\n') ? '' : reply.endsWith('\n') ? '\n' : '\n\n'; reply += delta; if (delta) writeEvent('message.delta', { delta }); } pendingSteeringBoundary = false; } }, onSteerReady: steer => { active.steer = async steering => { pendingSteeringBoundary = true; try { await steer(steering); } catch (error) { pendingSteeringBoundary = false; throw error; } }; writeEvent('turn.steering', { available: true }); }, onTool: tool => {
           const diagnostic = { turnId, project: thread.project, phase: tool.phase, tool: tool.name };
           if (tool.error) diagnostic.error = tool.error;
           if (tool.result?.id) diagnostic.projectId = tool.result.id;
@@ -1785,7 +1832,7 @@ async function handleRequest(req, res) {
         }
         writeEvent('turn.failed', { error: errorMessage });
       }
-      finally { ACTIVE_TURNS.delete(turnId); if (turnDiagnostics()) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
+      finally { try { await usageStore.updateOperation(turnId, { status: outcome === 'cancelled' ? 'aborted' : outcome, completedAt: new Date().toISOString() }); } catch { writeEvent('turn.failed', { error: 'Usage accounting is unavailable' }); } ACTIVE_TURNS.delete(turnId); if (turnDiagnostics()) log('[ok-workbench] turn-end', { turnId, outcome, durationMs: Date.now() - startedAt, replyLength: reply.length }); }
       return res.end();
     }
     const gitStatusMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/git\/status$/);
@@ -1801,9 +1848,14 @@ async function handleRequest(req, res) {
     if (url.pathname.startsWith('/agents')) {
       res.writeHead(308, { location: url.pathname.replace(/^\/agents/, '/workspace') }); return res.end();
     }
-    if (url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
+    if (url.pathname === '/usage' || url.pathname === '/usage/' || url.pathname === '/' || url.pathname === '/workspace' || url.pathname.startsWith('/workspace/')) return respond(res, 200, (await fs.readFile(path.join(__dirname, 'public/index.html'), 'utf8')).replace('__CHAT_CSRF__', CHAT_CSRF).replace('__ASSET_ORIGIN__', ASSET_ORIGIN), 'text/html; charset=utf-8');
     return respond(res, 404, 'Not found', 'text/plain');
   } catch (error) {
+    if (['INVALID_USAGE_QUERY', 'USAGE_NOT_FOUND', 'USAGE_SNAPSHOT_EXPIRED', 'USAGE_STORE_UNAVAILABLE', 'USAGE_LEDGER_CORRUPT'].includes(error?.code)) {
+      res.setHeader('cache-control', 'private, no-store');
+      if (res.headersSent) return res.destroy();
+      return json(res, error.status || (error.code === 'INVALID_USAGE_QUERY' ? 400 : error.code === 'USAGE_NOT_FOUND' ? 404 : error.code === 'USAGE_SNAPSHOT_EXPIRED' ? 409 : 503), { code: error.code, error: error.message });
+    }
     if (['ENTRY_FORBIDDEN', 'ENTRY_NOT_FOUND', 'ENTRY_CONFLICT', 'RECOVERY_REQUIRED', 'ENTRY_OPERATION_FAILED', 'NATIVE_UNAVAILABLE', 'NATIVE_LAUNCH_FAILED'].includes(error?.code)) return json(res, error.status || 400, { error: error.message, code: error.code });
     if (error?.code && ['INVALID_REQUEST', 'STALE_REVISION', 'NOT_FOUND', 'NOT_CONFIGURED', 'MODEL_UNSUITABLE', 'INVALID_REVIEW', 'INPUT_TOO_LARGE', 'SUPERSEDED', 'PROVIDER_UNAVAILABLE', 'REVIEW_TIMEOUT', 'STORAGE_ERROR'].includes(error.code)) {
       const status = error.code === 'NOT_FOUND' ? 404 : error.code === 'STALE_REVISION' || error.code === 'NOT_CONFIGURED' || error.code === 'MODEL_UNSUITABLE' ? 409 : error.code === 'PROVIDER_UNAVAILABLE' || error.code === 'REVIEW_TIMEOUT' ? 503 : 400;
@@ -1848,7 +1900,11 @@ function listen(serverInstance, host, port) {
 void resolveWorkspaceRoot().then(async root => {
   BUNDLE_ROOT = await fs.realpath(root);
   await loadRuntimeSettings();
-  workspaceReview = new WorkspaceReviewCoordinator({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT, provider: workspaceReviewProvider, timeZone: currentTimeZone(), isChatActive: () => ACTIVE_TURNS.size > 0, isIgnored });
+  usageStore = new UsageStore({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT });
+  await usageStore.init();
+  privateUsageRoot = await fs.realpath(path.join(CHAT_STATE_DIR, 'usage'));
+  usageReporter = createUsageReporter({ readLedger: () => usageStore.snapshot(), readAvailability: async () => ({ projects: (await fs.readdir(BUNDLE_ROOT, { withFileTypes: true })).filter(entry => entry.isDirectory() && !entry.isSymbolicLink()).map(entry => entry.name), models: usageModelInventory }) });
+  workspaceReview = new WorkspaceReviewCoordinator({ stateDir: CHAT_STATE_DIR, workspaceRoot: BUNDLE_ROOT, provider: workspaceReviewProvider, usageStore, timeZone: currentTimeZone(), isChatActive: () => ACTIVE_TURNS.size > 0, isIgnored });
   workspaceReview.start();
   await refreshDirtyMonitor();
   void refreshPiCatalog();

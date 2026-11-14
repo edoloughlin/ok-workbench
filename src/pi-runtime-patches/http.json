@@ -1,0 +1,202 @@
+[
+  {
+    "file": "api/openai-completions.js",
+    "sha256": "df81627c173163d0b918692f4a3b87e22cbdb5883b809e4d70d6152d1e68d948",
+    "replacements": [
+      {
+        "before": "import { retryProviderRequest } from \"../utils/provider-retry.js\";",
+        "after": "import { retryProviderRequest } from \"../utils/provider-retry.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n",
+        "after": "        const inferenceObserver = createInferenceObserver(options, model);\n        try {\n"
+      },
+      {
+        "before": "retryProviderRequest(() => client.chat.completions.create(params, requestOptions).withResponse(), {",
+        "after": "retryProviderRequest(async () => {\n                await inferenceObserver.start(\"http\");\n                try { return await client.chat.completions.create(params, requestOptions).withResponse(); }\n                catch (error) { await inferenceObserver.fail(error); throw error; }\n            }, {"
+      },
+      {
+        "before": "                if (chunk.usage) {\n                    output.usage",
+        "after": "                if (chunk.usage) {\n                    await inferenceObserver.usage(chunk.usage, \"openai-completions\");\n                    output.usage"
+      },
+      {
+        "before": "                if (!chunk.usage && choice.usage) {\n                    output.usage",
+        "after": "                if (!chunk.usage && choice.usage) {\n                    await inferenceObserver.usage(choice.usage, \"openai-completions\");\n                    output.usage"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inferenceObserver.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            for (const block of output.content)",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            for (const block of output.content)"
+      }
+    ]
+  },
+  {
+    "file": "api/openai-responses.js",
+    "sha256": "904b218cb90ab1d2a3ba98ef1f2791660484e8444d358601d33156949b121b2b",
+    "replacements": [
+      {
+        "before": "import { retryProviderRequest } from \"../utils/provider-retry.js\";",
+        "after": "import { retryProviderRequest } from \"../utils/provider-retry.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n",
+        "after": "        const inferenceObserver = createInferenceObserver(options, model);\n        try {\n"
+      },
+      {
+        "before": "retryProviderRequest(() => client.responses.create(params, requestOptions).withResponse(), {",
+        "after": "retryProviderRequest(async () => {\n                await inferenceObserver.start(\"http\");\n                try { return await client.responses.create(params, requestOptions).withResponse(); }\n                catch (error) { await inferenceObserver.fail(error); throw error; }\n            }, {"
+      },
+      {
+        "before": "                onProviderStreamEvent: options?.onProviderStreamEvent,",
+        "after": "                onProviderStreamEvent: async (event, eventModel) => {\n                    if (event?.response?.usage) await inferenceObserver.usage(event.response.usage, \"openai-responses\");\n                    await options?.onProviderStreamEvent?.(event, eventModel);\n                },"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inferenceObserver.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason =",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason ="
+      }
+    ]
+  },
+  {
+    "file": "api/azure-openai-responses.js",
+    "sha256": "dd20dfb25c84f53e1d1fd361857b0686a118709eabe93c20a1ba24756f60147a",
+    "replacements": [
+      {
+        "before": "import { retryProviderRequest } from \"../utils/provider-retry.js\";",
+        "after": "import { retryProviderRequest } from \"../utils/provider-retry.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n",
+        "after": "        const inferenceObserver = createInferenceObserver(options, model);\n        try {\n"
+      },
+      {
+        "before": "retryProviderRequest(() => client.responses.create(params, requestOptions).withResponse(), {",
+        "after": "retryProviderRequest(async () => {\n                await inferenceObserver.start(\"http\");\n                try { return await client.responses.create(params, requestOptions).withResponse(); }\n                catch (error) { await inferenceObserver.fail(error); throw error; }\n            }, {"
+      },
+      {
+        "before": "                onProviderStreamEvent: options?.onProviderStreamEvent,",
+        "after": "                onProviderStreamEvent: async (event, eventModel) => {\n                    if (event?.response?.usage) await inferenceObserver.usage(event.response.usage, \"openai-responses\");\n                    await options?.onProviderStreamEvent?.(event, eventModel);\n                },"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inferenceObserver.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason =",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason ="
+      }
+    ]
+  },
+  {
+    "file": "api/anthropic-messages.js",
+    "sha256": "992daf485e2d479ac1df3886019946d0bf512ef6517ec730ce4c7315f9472ecc",
+    "replacements": [
+      {
+        "before": "import { retryProviderRequest } from \"../utils/provider-retry.js\";",
+        "after": "import { retryProviderRequest } from \"../utils/provider-retry.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n            let client;\n            let isOAuth;\n            let usageModel = model;",
+        "after": "        const inferenceObserver = createInferenceObserver(options, model);\n        let inferenceUsage = {};\n        try {\n            let client;\n            let isOAuth;\n            let usageModel = model;"
+      },
+      {
+        "before": "retryProviderRequest(() => client.beta.messages.create(params, requestOptions).asResponse(), {",
+        "after": "retryProviderRequest(async () => {\n                await inferenceObserver.start(\"http\");\n                try { return await client.beta.messages.create(params, requestOptions).asResponse(); }\n                catch (error) { await inferenceObserver.fail(error); throw error; }\n            }, {"
+      },
+      {
+        "before": "                    if (options?.signal?.aborted ||\n                        disablePreferredStrictTools ||",
+        "after": "                    if (error?.usageAccountingFailure || options?.signal?.aborted ||\n                        disablePreferredStrictTools ||"
+      },
+      {
+        "before": "                    // Capture initial token usage from message_start event",
+        "after": "                    inferenceUsage = { ...event.message.usage };\n                    await inferenceObserver.usage(inferenceUsage, \"anthropic\");\n                    // Capture initial token usage from message_start event"
+      },
+      {
+        "before": "                    if (event.usage) {\n                        if (event.usage.input_tokens != null)",
+        "after": "                    if (event.usage) {\n                        inferenceUsage = { ...inferenceUsage, ...event.usage };\n                        await inferenceObserver.usage(inferenceUsage, \"anthropic\");\n                        if (event.usage.input_tokens != null)"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inferenceObserver.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason =",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason ="
+      }
+    ]
+  },
+  {
+    "file": "api/mistral-conversations.js",
+    "sha256": "27f9cd4a233dfbb2cf8e6a0a4a7342fa486ad9181817ea1416c5b012f3f623c4",
+    "replacements": [
+      {
+        "before": "import { AssistantMessageEventStream } from \"../utils/event-stream.js\";",
+        "after": "import { AssistantMessageEventStream } from \"../utils/event-stream.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        const output = createOutput(model);\n        try {",
+        "after": "        const output = createOutput(model);\n        const inferenceObserver = createInferenceObserver(options, model);\n        try {"
+      },
+      {
+        "before": "            const mistralStream = await requestMistralStream(model, payload, apiKey, options);",
+        "after": "            const mistralStream = await requestMistralStream(model, payload, apiKey, options, inferenceObserver);"
+      },
+      {
+        "before": "async function requestMistralStream(model, payload, apiKey, options) {",
+        "after": "async function requestMistralStream(model, payload, apiKey, options, inferenceObserver) {"
+      },
+      {
+        "before": "        response = await (options?.fetch ?? globalThis.fetch)(url, {",
+        "after": "        await inferenceObserver.start(\"http\");\n        response = await (options?.fetch ?? globalThis.fetch)(url, {"
+      },
+      {
+        "before": "            await consumeChatStream(model, output, stream, mistralStream, options?.onProviderStreamEvent);",
+        "after": "            await consumeChatStream(model, output, stream, mistralStream, async (chunk, eventModel) => {\n                if (chunk?.usage) await inferenceObserver.usage(chunk.usage, \"mistral\");\n                await options?.onProviderStreamEvent?.(chunk, eventModel);\n            });"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inferenceObserver.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason =",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason ="
+      }
+    ]
+  },
+  {
+    "file": "api/pi-messages.js",
+    "sha256": "762c1f0ed385f88fa7005ac7ef80595aa92d6c280158eb80f02199c94f876a38",
+    "replacements": [
+      {
+        "before": "import { AssistantMessageEventStream } from \"../utils/event-stream.js\";",
+        "after": "import { AssistantMessageEventStream } from \"../utils/event-stream.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "    const convertEvent = createEventConverter(model);",
+        "after": "    const convertEvent = createEventConverter(model);\n    const inferenceObserver = createInferenceObserver(options, model);"
+      },
+      {
+        "before": "            const response = await (options?.fetch ?? globalThis.fetch)(url, {",
+        "after": "            await inferenceObserver.start(\"http\");\n            const response = await (options?.fetch ?? globalThis.fetch)(url, {"
+      },
+      {
+        "before": "                const event = convertEvent(piEvent);",
+        "after": "                if (piEvent.usage) await inferenceObserver.usage(piEvent.usage, \"pi-messages\");\n                const event = convertEvent(piEvent);"
+      },
+      {
+        "before": "                eventStream.push(event);\n                if (event.type === \"done\" || event.type === \"error\") {",
+        "after": "                if (event.type === \"done\" || event.type === \"error\") {\n                    await inferenceObserver.finish(event.type === \"done\" ? \"completed\" : (event.reason === \"aborted\" ? \"aborted\" : \"failed\"));\n                }\n                eventStream.push(event);\n                if (event.type === \"done\" || event.type === \"error\") {"
+      },
+      {
+        "before": "        catch (error) {\n            eventStream.push(createErrorEvent(model, error, options?.signal?.aborted ?? false));",
+        "after": "        catch (error) {\n            try { await inferenceObserver.fail(error); } catch (accountingError) { error = accountingError; }\n            const errorEvent = createErrorEvent(model, error, options?.signal?.aborted ?? false);\n            if (error?.usageAccountingFailure) errorEvent.error.usageAccountingFailure = true;\n            eventStream.push(errorEvent);"
+      }
+    ]
+  }
+]

@@ -13,19 +13,21 @@
     "seed/",
     "README.md",
     "LICENSE",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "scripts/patch-pi-runtime.mjs"
   ],
   "scripts": {
-    "build": "npm run docs:sync && node scripts/build.mjs",
+    "build": "node scripts/patch-pi-runtime.mjs && npm run docs:sync && node scripts/build.mjs",
     "docs:sync": "node scripts/sync-doc-templates.mjs",
     "start": "node dist/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node scripts/patch-pi-runtime.mjs && node --watch src/server.js",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:web-fetch": "npm run build && node --test test/web-fetch*.test.mjs test/pi-harness-web-fetch.test.mjs",
     "test:stress": "node --test test/*.stress.mjs",
     "test:e2e": "npm run build && node --test test/e2e/*.e2e.mjs",
     "pack": "npm pack --dry-run",
-    "prepublishOnly": "npm run build && npm test && npm run test:stress && npm run pack"
+    "prepublishOnly": "npm run build && npm test && npm run test:stress && npm run pack",
+    "postinstall": "node scripts/patch-pi-runtime.mjs"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -45,8 +47,8 @@
   },
   "homepage": "https://edoloughlin.github.io/ok-workbench/",
   "dependencies": {
-    "@earendil-works/pi-ai": "^1.5.0",
-    "@earendil-works/pi-coding-agent": "^1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
     "ipaddr.js": "^2.5.0",
     "mermaid": "11.17.0",
     "parse5": "^8.1.1",

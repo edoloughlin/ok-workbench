@@ -25,25 +25,29 @@ async function toolsUnsupported(response) {
 
 // One low-level model request, not an agent loop. Tools are declarations only:
 // there is nothing to execute and no tool-result continuation to schedule.
-export async function collectReviewSubmission({ runtime, model, stage, prompt, evidence, transport = 'json_text', maxTokens = stage === 'project' ? 4096 : 16384, effort, signal, timeout = 120_000, fetchImpl = globalThis.fetch }) {
+export async function collectReviewSubmission({ runtime, model, stage, prompt, evidence, transport = 'json_text', maxTokens = stage === 'project' ? 4096 : 16384, effort, signal, timeout = 120_000, fetchImpl = globalThis.fetch, onInferenceAttempt }) {
   const controller = new AbortController();
   const requestSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]);
   const checkAbort = () => { if (requestSignal.aborted) throw failure('Review canceled or timed out', signal?.aborted ? 'SUPERSEDED' : 'REVIEW_TIMEOUT'); };
   try {
     checkAbort();
     const limit = stage === 'project' ? 16 * 1024 : 64 * 1024;
-    let payloadCount = 0; let requestCount = 0; let observedBytes = 0; let unsupported = false;
+    let payloadCount = 0; let requestCount = 0; let physicalRequests = 0; let observedBytes = 0; let unsupported = false;
     const tool = output.toolDefinition(stage);
     const systemPrompt = transport === 'result_tool' ? `${prompt}\nSubmission channel: call ${tool.name} exactly once with the complete result instead of printing JSON. Do not call any other tool. No follow-up message is needed.` : prompt;
     const stream = runtime.streamSimple(model, { systemPrompt, messages: [{ role: 'user', content: JSON.stringify(evidence), timestamp: Date.now() }], ...(transport === 'result_tool' ? { tools: [tool] } : {}) }, {
       signal: requestSignal, timeoutMs: timeout, maxRetries: 0, maxRetryDelayMs: 1, transport: 'sse', maxTokens: Math.min(maxTokens, model.maxTokens || maxTokens), ...(effort && effort !== 'off' ? { reasoning: effort } : {}),
+      async onInferenceAttempt(metadata) {
+        if (++physicalRequests > 1) throw failure('Unexpected additional review request', 'PROVIDER_UNAVAILABLE', 'OUTPUT_REQUEST_COUNT');
+        return onInferenceAttempt?.(metadata);
+      },
       onPayload() { if (++payloadCount > 1) throw failure('Unexpected additional review payload', 'PROVIDER_UNAVAILABLE', 'OUTPUT_REQUEST_COUNT'); },
-      async fetch(input, init) {
+      ...(!['google-generative-ai', 'google-vertex', 'bedrock-converse-stream'].includes(model.api) ? { async fetch(input, init) {
         if (++requestCount > 1) throw failure('Unexpected additional review request', 'PROVIDER_UNAVAILABLE', 'OUTPUT_REQUEST_COUNT');
         const response = await fetchImpl(input, { ...init, redirect: 'error' });
         if (transport === 'result_tool' && !response.ok) unsupported = await toolsUnsupported(response);
         return response;
-      }
+      } } : {}),
     });
     for await (const event of stream) {
       checkAbort();
@@ -51,6 +55,7 @@ export async function collectReviewSubmission({ runtime, model, stage, prompt, e
       if (observedBytes > limit) throw failure('Review response exceeds byte limit', 'RESPONSE_TOO_LARGE');
     }
     const message = await stream.result();
+    if (message.usageAccountingFailure) throw Object.assign(new Error('Usage accounting is unavailable'), { code: 'USAGE_STORE_UNAVAILABLE', usageAccountingFailure: true });
     checkAbort();
     if (message.stopReason === 'aborted') throw failure('Provider aborted review', 'PROVIDER_UNAVAILABLE');
     if (message.stopReason === 'length') throw failure('Incomplete review response', 'OUTPUT_TRUNCATED', 'OUTPUT_TRUNCATED');

@@ -1,0 +1,111 @@
+[
+  {
+    "file": "api/google-generative-ai.js",
+    "sha256": "44beb6dfb5a9f8ce35eee4121473af2fc23456b12e5992b94d98c57f68d3a867",
+    "replacements": [
+      {
+        "before": "import { buildBaseOptions } from \"./simple-options.js\";",
+        "after": "import { buildBaseOptions } from \"./simple-options.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n            if (options?.fetch",
+        "after": "        const inference = createInferenceObserver(options, model);\n        try {\n            if (options?.fetch"
+      },
+      {
+        "before": "            let params = buildParams(model, normalizedContext, options);",
+        "after": "            client.apiClient.workbenchInferenceObserver = inference;\n            let params = buildParams(model, normalizedContext, options);"
+      },
+      {
+        "before": "                if (chunk.usageMetadata) {",
+        "after": "                if (chunk.usageMetadata) {\n                    await inference.usage(chunk.usageMetadata, \"google\");"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inference.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason",
+        "after": "        catch (error) {\n            try { await inference.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason"
+      }
+    ]
+  },
+  {
+    "file": "api/google-vertex.js",
+    "sha256": "90288ba15a1c4a2d9ca1f6956bcbe329de3e70dfdbd7377cca1ba2d578ed8880",
+    "replacements": [
+      {
+        "before": "import { buildBaseOptions } from \"./simple-options.js\";",
+        "after": "import { buildBaseOptions } from \"./simple-options.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        try {\n            if (options?.fetch",
+        "after": "        const inference = createInferenceObserver(options, model);\n        try {\n            if (options?.fetch"
+      },
+      {
+        "before": "            let params = buildParams(model, normalizedContext, options);",
+        "after": "            client.apiClient.workbenchInferenceObserver = inference;\n            let params = buildParams(model, normalizedContext, options);"
+      },
+      {
+        "before": "                if (chunk.usageMetadata) {",
+        "after": "                if (chunk.usageMetadata) {\n                    await inference.usage(chunk.usageMetadata, \"google\");"
+      },
+      {
+        "before": "            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            await inference.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            output.stopReason",
+        "after": "        catch (error) {\n            try { await inference.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            output.stopReason"
+      }
+    ]
+  },
+  {
+    "file": "dist/node/index.mjs",
+    "sha256": "a5775355f9271057cd1e089dd2bce71c5996a88d49da9cd0ed6f183e5905cdb8",
+    "replacements": [
+      {
+        "before": "            try {\n                response = await fetch(url, Object.assign(Object.assign({}, requestInit), { signal: attempt.signal }));\n            }\n            catch (e) {\n                attempt.dispose();\n                throw e;\n            }",
+        "after": "            try {\n                await this.workbenchInferenceObserver?.start(\"http\");\n                response = await fetch(url, Object.assign(Object.assign({}, requestInit), { signal: attempt.signal }));\n                if (!response.ok) await this.workbenchInferenceObserver?.finish(\"failed\");\n            }\n            catch (e) {\n                attempt.dispose();\n                await this.workbenchInferenceObserver?.fail(e);\n                throw e;\n            }"
+      },
+      {
+        "before": "                if (abortSignal === null || abortSignal === void 0 ? void 0 : abortSignal.aborted) {\n                    throw (_a = info.error) !== null && _a !== void 0 ? _a : info;",
+        "after": "                if (info.error?.usageAccountingFailure || (abortSignal === null || abortSignal === void 0 ? void 0 : abortSignal.aborted)) {\n                    throw (_a = info.error) !== null && _a !== void 0 ? _a : info;"
+      }
+    ],
+    "package": "@google/genai"
+  },
+  {
+    "file": "api/bedrock-converse-stream.js",
+    "sha256": "3f908ff6e6c67fac3681199140ac0117bbd465f2a8f736acc3a4466d5227a213",
+    "replacements": [
+      {
+        "before": "import { calculateCost } from \"../models.js\";",
+        "after": "import { calculateCost } from \"../models.js\";\nimport { createInferenceObserver } from \"../workbench-inference-hooks.js\";"
+      },
+      {
+        "before": "        let responseRequestId;\n        try {",
+        "after": "        let responseRequestId;\n        const inference = createInferenceObserver(options, model);\n        try {"
+      },
+      {
+        "before": "            const client = new BedrockRuntimeClient(config);",
+        "after": "            const client = new BedrockRuntimeClient(config);\n            const requestHandler = client.config.requestHandler;\n            const originalHandle = requestHandler.handle.bind(requestHandler);\n            requestHandler.handle = async (...args) => {\n                await inference.start(\"http\");\n                try {\n                    const result = await originalHandle(...args);\n                    if (result.response.statusCode >= 400) await inference.finish(\"failed\");\n                    return result;\n                }\n                catch (error) {\n                    await inference.fail(error);\n                    throw error;\n                }\n            };"
+      },
+      {
+        "before": "                    if (options.signal?.aborted ||\n                        disablePreferredStrictTools ||",
+        "after": "                    if (error?.usageAccountingFailure || options.signal?.aborted ||\n                        disablePreferredStrictTools ||"
+      },
+      {
+        "before": "                else if (item.metadata) {\n                    handleMetadata(item.metadata, model, output);",
+        "after": "                else if (item.metadata) {\n                    if (item.metadata.usage) await inference.usage(item.metadata.usage, \"bedrock\");\n                    handleMetadata(item.metadata, model, output);"
+      },
+      {
+        "before": "            flushOpenBlocks(openBlocks, output);\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });",
+        "after": "            flushOpenBlocks(openBlocks, output);\n            await inference.finish(\"completed\");\n            stream.push({ type: \"done\", reason: output.stopReason, message: output });"
+      },
+      {
+        "before": "        catch (error) {\n            flushOpenBlocks(openBlocks, output);",
+        "after": "        catch (error) {\n            try { await inference.fail(error); } catch (accountingError) { error = accountingError; }\n            if (error?.usageAccountingFailure) output.usageAccountingFailure = true;\n            flushOpenBlocks(openBlocks, output);"
+      }
+    ]
+  }
+]

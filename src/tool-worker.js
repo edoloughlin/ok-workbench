@@ -28,6 +28,8 @@ const DEFAULT_TOOL_TIMEOUT_SECONDS = 30;
 const MAX_TOOL_MANIFEST = 16 * 1024;
 const CONTENT_HASH_LENGTH = 12;
 const ALWAYS_DENIED = new Set(['.git']);
+const PRIVATE_PATHS = JSON.parse(process.env.OK_WORKBENCH_PRIVATE_PATHS || '[]');
+function privatePath(relative) { return PRIVATE_PATHS.some(root => relative === root || relative.startsWith(`${root}/`)); }
 
 function parseReadGrants(value) {
   if (!value) return new Map();
@@ -56,7 +58,7 @@ function safeRelative(value) {
   if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('A relative path is required');
   const normalized = path.posix.normalize(value.replace(/\\/g, '/')).replace(/^\.\//, '');
   if (normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) throw new Error('Path is outside the selected project');
-  if (isDeniedPath(normalized.split('/'))) throw new Error('Path is not available to the agent');
+  if (privatePath(normalized) || isDeniedPath(normalized.split('/'))) throw new Error('Path is not available to the agent');
   return normalized;
 }
 function isWithin(root, target) { return target === root || target.startsWith(`${root}${path.sep}`); }
@@ -90,7 +92,7 @@ async function targetFor(relative, write = false) {
   // Check the final canonical location, not only user-controlled spelling.
   // This prevents aliases such as docs -> .git or public.md -> .npmrc from
   // bypassing the hidden-file policy.
-  if (deniedCanonicalPath(root, canonical)) throw new Error('Path is not available to the agent');
+  if (privatePath(path.relative(root, canonical).split(path.sep).join('/')) || deniedCanonicalPath(root, canonical)) throw new Error('Path is not available to the agent');
   if (write) {
     const lexicalInfo = await fs.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
     if (lexicalInfo?.isSymbolicLink()) throw new Error('Refusing to modify a symbolic link');
@@ -111,6 +113,7 @@ async function listFiles(relative = '.') {
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
       if (isDeniedPath([entry.name])) continue;
       const child = path.join(directory, entry.name); const childRelative = path.posix.join(prefix, entry.name);
+      if (privatePath(childRelative)) continue;
       if (entry.isDirectory()) await visit(child, childRelative);
       else if (entry.isFile()) output.push(childRelative);
       if (output.length >= MAX_RESULTS) return;

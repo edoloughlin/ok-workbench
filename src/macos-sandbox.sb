@@ -70,3 +70,6 @@
   (subpath (param "PRIVATE_TMP")))
 (allow file-read* (subpath (param "GRANTS")))
 (allow file-read* (subpath (param "TEMPLATE")))
+
+; Usage history remains private even when application state is in the project.
+(deny file-read* file-write* (subpath (param "PRIVATE_USAGE")))
