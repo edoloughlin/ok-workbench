@@ -346,7 +346,7 @@ function linksFromIndex(markdown, folder) {
   return found;
 }
 
-async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, externalGrants = new Map() } = {}) {
+async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, externalGrants = new Map(), externalBudget = { entries: 0 } } = {}) {
   if (depth > 12) return [];
   const indexFile = path.join(folder, 'index.md');
   const index = await readWorkspaceTextPrefix(indexFile);
@@ -362,6 +362,12 @@ async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, 
     if (await isIgnored(fullPath)) continue;
     const route = publicPath(fullPath);
     const exactIndex = indexedLinks.findIndex(link => link.path === route);
+    const recordedLinkPath = path.relative(projectRoot, fullPath).split(path.sep).join('/');
+    const recordedGrant = externalGrants.get(recordedLinkPath);
+    if (recordedGrant && !entry.isSymbolicLink()) {
+      candidates.push({ type: 'external-link', label: entry.name, path: route, linkPath: recordedLinkPath, status: recordedGrant.status, kind: recordedGrant.kind });
+      continue;
+    }
 
     if (entry.isDirectory()) {
       candidates.push({
@@ -369,7 +375,7 @@ async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, 
         indexed: await fs.lstat(path.join(fullPath, 'index.md')).then(info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1, () => false),
         label: navigationLabel(exactIndex >= 0 ? indexedLinks[exactIndex].label : entry.name, 'directory'),
         path: route,
-        children: await navigationTree(fullPath, { depth: depth + 1, projectRoot, externalGrants })
+        children: await navigationTree(fullPath, { depth: depth + 1, projectRoot, externalGrants, externalBudget })
       });
     } else if (entry.isFile()) {
       candidates.push({
@@ -381,15 +387,38 @@ async function navigationTree(folder, { isRoot = false, depth = 0, projectRoot, 
       const linkPath = path.relative(projectRoot, fullPath).split(path.sep).join('/');
       let destination = null;
       try { destination = await fs.realpath(fullPath); } catch { /* Keep a dangling link discoverable. */ }
-      if (!destination || !externalLinks.within(BUNDLE_ROOT, destination)) {
-        const grant = externalGrants.get(linkPath);
-        candidates.push({ type: 'external-link', label: entry.name, path: route, linkPath, status: grant?.status || (destination ? 'unapproved' : 'missing'), kind: grant?.kind || 'unknown' });
+      const grant = externalGrants.get(linkPath);
+      if (grant || !destination || !externalLinks.within(BUNDLE_ROOT, destination)) {
+        const item = { type: 'external-link', label: entry.name, path: route, linkPath, status: grant?.status || (destination ? 'unapproved' : 'missing'), kind: grant?.kind || 'unknown' };
+        if (grant?.status === 'approved' && grant.kind === 'directory') {
+          item.readOnly = true;
+          try {
+            item.children = await externalLinks.navigationChildren(grant, route, async (childRoute, target) => {
+              const resolved = await readableWorkspacePath(decodeURIComponent(childRoute));
+              return resolved?.external && resolved.target === target && resolved.grant.id === grant.id;
+            }, externalBudget);
+            const current = (await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, projectRoot, externalLinkOptions())).find(value => value.id === grant.id);
+            if (current?.status !== 'approved') { item.status = current?.status || 'missing'; delete item.children; delete item.readOnly; }
+            else item.navigationState = 'complete';
+          } catch (cause) {
+            const current = await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, projectRoot, externalLinkOptions()).then(values => values.find(value => value.id === grant.id)).catch(() => null);
+            if (current && current.status !== 'approved') { item.status = current.status; delete item.readOnly; }
+            else { item.children = []; item.navigationState = cause.code === 'EXTERNAL_LIMIT_EXCEEDED' ? 'limit_exceeded' : 'unavailable'; }
+          }
+        }
+        candidates.push(item);
       } else {
         candidates.push({ type: 'internal-link', label: entry.name, path: route });
       }
     }
   }
 
+  for (const grant of externalGrants.values()) {
+    const fullPath = path.join(projectRoot, ...grant.linkPath.split('/'));
+    if (grant.status === 'missing' && path.dirname(fullPath) === folder && !entries.some(entry => entry.name === path.basename(fullPath))) {
+      candidates.push({ type: 'external-link', label: path.basename(fullPath), path: publicPath(fullPath), linkPath: grant.linkPath, status: 'missing', kind: grant.kind });
+    }
+  }
   return candidates.sort((a, b) => {
     return Number(a.type === 'directory') - Number(b.type === 'directory')
       || a.label.localeCompare(b.label)
@@ -401,8 +430,7 @@ async function externalLinkEntries(projectRoot) {
   if (projectRoot === BUNDLE_ROOT) return [];
   let stored = [];
   try { stored = await externalLinks.listGrants(CHAT_STATE_DIR, BUNDLE_ROOT, projectRoot, externalLinkOptions()); } catch { return []; }
-  const entries = new Map(stored.map(item => [item.linkPath, { path: item.linkPath, status: item.status, kind: item.kind }]));
-  return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path));
+  return stored.sort((left, right) => left.linkPath.localeCompare(right.linkPath));
 }
 
 async function isProjectDirectory(directory) {
@@ -458,7 +486,7 @@ async function projectData(requested) {
   const stats = { documents: projectFiles.filter(item => item.isFile() && /\.md$/i.test(item.name)).length, folders: projectFiles.filter(item => item.isDirectory()).length, indexed: projectLinks.length };
   const isBundleRoot = projectRoot === BUNDLE_ROOT;
   const external = isBundleRoot ? [] : await externalLinkEntries(projectRoot);
-  const externalGrants = new Map(external.map(item => [item.path, item]));
+  const externalGrants = new Map(external.map(item => [item.linkPath, item]));
   const tree = isBundleRoot ? [] : await navigationTree(projectRoot, { isRoot: true, projectRoot, externalGrants });
   const catalog = isBundleRoot ? projects.slice(1) : [];
 
@@ -479,7 +507,7 @@ async function projectData(requested) {
     catalog,
     common,
     tree,
-    externalLinks: external,
+    externalLinks: external.map(item => ({ path: item.linkPath, status: item.status, kind: item.kind })),
     stats
   };
 }

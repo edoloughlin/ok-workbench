@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -34,6 +34,36 @@ test('approved external directory snapshots expose only eligible files through i
       await assert.rejects(worker.editFile({ path: 'reference/guide.md', hash: guide.hash, edits: [{ startLine: 1, endLine: 1, replacement: 'changed' }] }), /read-only/);
     } finally { await rm(snapshot.directory, { recursive: true, force: true }); }
   } finally { await rm(workspace, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); }
+});
+
+test('navigation enumerates filtered metadata deterministically and fails without partial output', async () => {
+  const outside = await mkdtemp(path.join(tmpdir(), 'ok-nav-source-'));
+  try {
+    await mkdir(path.join(outside, 'docs')); await mkdir(path.join(outside, 'node_modules'));
+    await writeFile(path.join(outside, 'docs', 'index.md'), '# Not navigation metadata');
+    await writeFile(path.join(outside, 'z.md'), 'z'); await writeFile(path.join(outside, '.env'), 'secret');
+    await link(path.join(outside, 'z.md'), path.join(outside, 'hard.md'));
+    await symlink(path.join(outside, 'docs'), path.join(outside, 'nested'));
+    const grant = { canonicalTarget: outside };
+    const result = await externalLinks.navigationChildren(grant, '/workspace/alpha/ref', async () => true);
+    assert.deepEqual(result.map(item => item.label), ['docs']);
+    assert.deepEqual(result[0].children.map(item => item.label), ['index.md']);
+    assert.equal(result[0].children[0].path, '/workspace/alpha/ref/docs/index.md');
+    const sharedBudget = { entries: 9999 };
+    await assert.rejects(externalLinks.navigationChildren(grant, '/alias', async () => true, sharedBudget), { code: 'EXTERNAL_LIMIT_EXCEEDED' });
+    assert.equal(sharedBudget.entries, 9999, 'a failed grant must not consume another grant\'s navigation budget');
+    const small = await mkdtemp(path.join(tmpdir(), 'ok-nav-small-'));
+    try {
+      await writeFile(path.join(small, 'after.md'), 'after');
+      const later = await externalLinks.navigationChildren({ canonicalTarget: small }, '/workspace/alpha/later', async () => true, sharedBudget);
+      assert.deepEqual(later.map(item => item.label), ['after.md']);
+      assert.equal(sharedBudget.entries, 10000);
+    } finally { await rm(small, { recursive: true, force: true }); }
+    await assert.rejects(externalLinks.navigationChildren(grant, '/alias', async () => { throw new Error('injected'); }), /injected/);
+    let deep = outside;
+    for (let i = 0; i < 13; i++) { deep = path.join(deep, `d${i}`); await mkdir(deep); }
+    await assert.rejects(externalLinks.navigationChildren(grant, '/alias', async () => true), { code: 'EXTERNAL_LIMIT_EXCEEDED' });
+  } finally { await rm(outside, { recursive: true, force: true }); }
 });
 
 test('retargeted or nested external symlinks do not retain approval', async () => {

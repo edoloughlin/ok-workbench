@@ -6,6 +6,10 @@ OK Workbench keeps an LLM-assisted project workflow grounded in a local workspac
 
 Core capabilities are document browsing, project-scoped chat, reviewable Git diffs, and isolated workspace tools: Bubblewrap on Linux and Seatbelt through `sandbox-exec` on macOS. Browsing has no provider requirement. Mutation requires the platform sandbox and is deliberately unavailable when isolation cannot be established. See the [macOS sandbox guide](MACOS-SANDBOX.md) for the Seatbelt policy and limits.
 
+## Implementation specifications
+
+The [external directory navigation specification](EXTERNAL-DIRECTORY-NAVIGATION-SPEC.md) defines a bounded change that renders approved external directory links as browsable, read-only navigation subtrees without changing approval or model-access scope.
+
 ## Proposed workspace overview
 
 The [workspace overview specification](WORKSPACE-OVERVIEW-SPEC.md) defines a read-only AI review of priorities, urgent actions, and emerging project drift. Explore the [interactive mockup](mockups/workspace-overview.html). These are implementation handoff artifacts, not shipped functionality. The [review reliability decision record](WORKSPACE-REVIEW-RELIABILITY.md) captures observed failure evidence, the envelope fixes to apply first, and the gated two-stage review direction.

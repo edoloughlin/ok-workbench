@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, symlink } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+const externalLinks = createRequire(import.meta.url)('../../src/external-links.js');
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
@@ -8,6 +10,36 @@ import test from 'node:test';
 import { chromium } from 'playwright';
 
 async function port() { return new Promise((resolve, reject) => { const server = net.createServer(); server.once('error', reject); server.listen(0, '127.0.0.1', () => { const value = server.address().port; server.close(() => resolve(value)); }); }); }
+
+test('approved external navigation is expandable and restricted', async () => {
+  const workspace = await mkdtemp(path.join(tmpdir(), 'ok-nav-ext-')); const state = await mkdtemp(path.join(tmpdir(), 'ok-nav-ext-state-')); const outside = await mkdtemp(path.join(tmpdir(), 'ok-nav-ext-source-'));
+  let server; let browser;
+  try {
+    const project = path.join(workspace, 'alpha'); await mkdir(project); await mkdir(path.join(outside, 'docs')); await mkdir(path.join(outside, 'docs-old'));
+    await writeFile(path.join(workspace, 'index.md'), '# Workspace'); await writeFile(path.join(project, 'index.md'), '# Alpha');
+    await writeFile(path.join(outside, 'index.md'), '# Misleading'); await writeFile(path.join(outside, 'docs', 'guide.md'), '# Guide');
+    await symlink(outside, path.join(project, 'reference'));
+    await externalLinks.approveGrant(state, await externalLinks.inspectLink({ workspaceRoot: workspace, projectRoot: project, linkPath: 'reference', deniedRoots: [state] }));
+    const serverPort = await port(); let assetPort = await port(); while (assetPort === serverPort) assetPort = await port();
+    server = spawn(process.execPath, ['dist/server.js'], { env: { ...process.env, OK_WORKSPACE_ROOT: workspace, OK_WORKBENCH_STATE_DIR: state, PORT: String(serverPort), OK_WORKBENCH_ASSET_PORT: String(assetPort) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error('server did not start')), 8000); server.stdout.once('data', () => { clearTimeout(timer); resolve(); }); server.once('exit', code => reject(new Error(`server exited ${code}`))); });
+    browser = await chromium.launch(); const page = await browser.newPage();
+    await page.goto(`http://127.0.0.1:${serverPort}/workspace/alpha/index.md`);
+    const root = page.locator('a[data-menu-path="/workspace/alpha/reference"]'); await root.waitFor();
+    await page.evaluate(() => document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()));
+    const rootDetails = root.locator('xpath=../..'); await rootDetails.locator(':scope > summary').click({ position: { x: 10, y: 15 } });
+    assert.equal(await rootDetails.evaluate(el => el.open), true); assert.match(page.url(), /alpha\/index.md/);
+    const docs = page.locator('a[data-menu-path="/workspace/alpha/reference/docs"]'); await docs.click();
+    await page.waitForURL('**/workspace/alpha/reference/docs');
+    const file = page.locator('a[data-menu-path="/workspace/alpha/reference/docs/guide.md"]'); await file.click();
+    await page.waitForURL('**/workspace/alpha/reference/docs/guide.md'); await page.waitForFunction(() => document.querySelector('a[data-menu-path="/workspace/alpha/reference/docs/guide.md"]')?.classList.contains('active'));
+    assert.equal(await page.locator('a[data-menu-path="/workspace/alpha/reference/docs-old"]').locator('xpath=../..').evaluate(el => el.open), false);
+    await file.click({ button: 'right' }); await page.getByRole('menuitem', { name: 'Copy relative path' }).waitFor(); assert.deepEqual(await page.getByRole('menuitem').allTextContents(), ['Copy relative path']); await page.keyboard.press('Escape');
+    assert.ok(!(await page.locator('#file-nav').innerHTML()).includes(outside));
+    await page.goBack(); await page.waitForURL('**/workspace/alpha/reference/docs'); await page.goForward(); await page.waitForURL('**/guide.md');
+    await page.reload(); await file.waitFor(); assert.match(await file.getAttribute('aria-label'), /read only/);
+  } finally { await browser?.close(); if (server && server.exitCode === null) { server.kill(); await new Promise(resolve => server.once('exit', resolve)); } await rm(workspace, { recursive: true, force: true }); await rm(state, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
 
 test('navigation menu copies and deletes the selected page', async () => {
   const workspace = await mkdtemp(path.join(tmpdir(), 'ok-nav-')); const state = await mkdtemp(path.join(tmpdir(), 'ok-nav-state-'));

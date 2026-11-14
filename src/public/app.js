@@ -534,6 +534,17 @@ function fileIcon(path) {
 }
 
 function treeNode(item) {
+  if (item.readOnly && (item.external || item.type === 'external-link' && item.kind === 'directory')) {
+    const isDirectory = item.type !== 'file';
+    const root = item.type === 'external-link';
+    const path = escapeHtml(item.path); const label = escapeHtml(item.label);
+    const current = decodeURIComponent(item.path).replace(/\/$/, '') === routePath().replace(/\/$/, '');
+    const trigger = `<button class="tree-menu-trigger" type="button" data-menu-path="${path}" data-menu-restricted="true" aria-label="Actions for ${label}" aria-haspopup="menu">⋯</button>`;
+    if (!isDirectory) return `<div class="tree-menu-row"><a class="nav-link tree-link tree-page ${current ? 'active' : ''}" href="${path}" data-menu-path="${path}" data-menu-restricted="true" aria-label="${label} · read only">${fileIcon(item.path)}<span>${label}</span></a>${trigger}</div>`;
+    const message = item.navigationState === 'unavailable' ? 'Content unavailable' : item.navigationState === 'limit_exceeded' ? 'Too large to show in navigation' : 'Empty';
+    const children = item.children.length ? item.children.map(treeNode).join('') : `<span class="tree-empty">${message}</span>`;
+    return `<details class="tree-directory" ${containsCurrent(decodeURIComponent(item.path)) ? 'open' : ''}><summary><a class="tree-directory-link ${root ? 'external-link-approved' : ''} ${current ? 'active' : ''}" href="${path}" data-menu-path="${path}" data-menu-restricted="true" aria-label="${label} · read only"><span class="nav-icon page-icon">${NAV_ICONS.project}</span><span>${label}${root ? '<small>External · read only</small>' : ''}</span></a>${trigger}</summary><div class="tree-children">${children}</div></details>`;
+  }
   if (item.type === 'file') {
     if (pendingEntryRename?.path === item.path) return `<form class="tree-inline-rename" data-entry-path="${escapeHtml(item.path)}">${fileIcon(item.path)}<input type="text" value="${escapeHtml(item.label)}" maxlength="120" aria-label="Page name"><span class="tree-inline-extension" aria-hidden="true">.md</span></form>`;
     const renamable = /\.md$/i.test(item.path) && item.path.split('/').pop() !== 'index.md';

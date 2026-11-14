@@ -73,6 +73,10 @@ test('external-link approval grants only the approved browser alias', { skip: !p
     const approved = await request({ port, host: `localhost:${port}`, pathname: '/api/projects/alpha/external-links', method: 'POST', body: JSON.stringify({ inspectionToken: inspected.inspectionToken }), headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(approved.status, 201);
     const approvedNavigation = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha/notes/' })).body);
     const approvedNotes = approvedNavigation.tree.find(item => item.path === '/workspace/alpha/notes'); const approvedLink = approvedNotes?.children.find(item => item.path === '/workspace/alpha/notes/reference'); assert.equal(approvedLink?.status, 'approved');
+    assert.equal(approvedLink.readOnly, true); assert.equal(approvedLink.navigationState, 'complete');
+    assert.deepEqual(approvedLink.children.map(item => item.label), ['empty', 'src', 'guide.md']);
+    assert.deepEqual(approvedLink.children[1].children, [{ type: 'file', label: 'core.clj', path: '/workspace/alpha/notes/reference/src/core.clj', external: true, readOnly: true }]);
+    assert.ok(!JSON.stringify(approvedNavigation).includes(outside)); assert.ok(!JSON.stringify(approvedNavigation).includes(JSON.parse(approved.body).id));
     const document = await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` }); assert.equal(document.status, 200); const body = JSON.parse(document.body); assert.equal(body.text, '# External guide\n'); assert.equal(body.path, linkPath); assert.equal(body.external, true); assert.doesNotMatch(JSON.stringify(body), new RegExp(outside.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
     const directoryPath = '/workspace/alpha/notes/reference';
     const listing = await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}` });
@@ -88,6 +92,16 @@ test('external-link approval grants only the approved browser alias', { skip: !p
     assert.deepEqual(empty.entries, []);
     for (const denied of ['.env', 'nested-link.md']) assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}/${denied}` })).status, 404);
     const asset = await request({ port: assetPort, host: `localhost:${assetPort}`, pathname: linkPath }); assert.equal(asset.status, 200); assert.equal(asset.body.toString(), '# External guide\n');
+    let deep = outside; for (let i = 0; i < 13; i++) { deep = path.join(deep, `d${i}`); await mkdir(deep); }
+    const limited = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha' })).body).tree.find(item => item.label === 'notes').children.find(item => item.label === 'reference');
+    assert.equal(limited.navigationState, 'limit_exceeded'); assert.deepEqual(limited.children, []);
+    await rm(path.join(outside, 'd0'), { recursive: true });
+    await rm(path.join(project, 'notes', 'reference'));
+    const missing = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha' })).body).tree.find(item => item.label === 'notes').children.find(item => item.label === 'reference');
+    assert.equal(missing.status, 'missing'); assert.equal('children' in missing, false);
+    await symlink(path.join(outside, 'guide.md'), path.join(project, 'notes', 'reference'));
+    const changed = JSON.parse((await request({ port, host: `localhost:${port}`, pathname: '/api/project?path=/workspace/alpha' })).body).tree.find(item => item.label === 'notes').children.find(item => item.label === 'reference');
+    assert.equal(changed.status, 'changed'); assert.equal('children' in changed, false);
     const revoked = await request({ port, host: `localhost:${port}`, pathname: `/api/projects/alpha/external-links/${JSON.parse(approved.body).id}`, method: 'DELETE', headers: { 'x-ok-workbench-csrf': csrf } }); assert.equal(revoked.status, 204);
     assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${encodeURIComponent(linkPath)}` })).status, 404);
     assert.equal((await request({ port, host: `localhost:${port}`, pathname: `/api/document?path=${directoryPath}` })).status, 404);

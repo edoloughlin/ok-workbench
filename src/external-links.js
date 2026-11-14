@@ -108,4 +108,35 @@ async function stageExternalGrants(grants) {
   catch (cause) { await fs.rm(directory, { recursive: true, force: true }); throw cause; }
 }
 
-module.exports = { ID, activeGrants, approveGrant, error, inspectLink, isSensitiveName, listGrants, revokeGrant, safeLinkPath, stageExternalGrants, within };
+// Enumerate metadata only. The caller supplies the browser resolver so every
+// published alias is subject to the same read boundary as a direct request.
+async function navigationChildren(grant, alias, resolve, budget = { entries: 0 }) {
+  async function visit(source, route, depth) {
+    if (depth > MAX_DEPTH) throw error('EXTERNAL_LIMIT_EXCEEDED', 'External navigation limit exceeded', 413);
+    const entries = await fs.readdir(source, { withFileTypes: true });
+    const children = [];
+    for (const entry of entries) {
+      if (++budget.entries > MAX_ENTRIES) throw error('EXTERNAL_LIMIT_EXCEEDED', 'External navigation limit exceeded', 413);
+      if (isSkippedName(entry.name)) continue;
+      const target = path.join(source, entry.name);
+      if (!within(grant.canonicalTarget, target)) continue;
+      let info;
+      try { info = await fs.lstat(target); } catch (cause) { if (cause.code === 'ENOENT' || cause.code === 'ENOTDIR') continue; throw cause; }
+      if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) || (info.isFile() && info.nlink !== 1)) continue;
+      const childRoute = `${route}/${encodeURIComponent(entry.name)}`;
+      if (!(await resolve(childRoute, target))) continue;
+      const item = { type: info.isDirectory() ? 'directory' : 'file', label: entry.name, path: childRoute, external: true, readOnly: true };
+      if (info.isDirectory()) {
+        try { item.children = await visit(target, childRoute, depth + 1); }
+        catch (cause) { if (cause.code === 'ENOENT' || cause.code === 'ENOTDIR') continue; throw cause; }
+      }
+      children.push(item);
+    }
+    return children.sort((a, b) => Number(b.type === 'directory') - Number(a.type === 'directory') || a.label.localeCompare(b.label));
+  }
+  const startingEntries = budget.entries;
+  try { return await visit(grant.canonicalTarget, alias, 0); }
+  catch (cause) { budget.entries = startingEntries; throw cause; }
+}
+
+module.exports = { ID, activeGrants, approveGrant, error, inspectLink, isSensitiveName, listGrants, navigationChildren, revokeGrant, safeLinkPath, stageExternalGrants, within };
