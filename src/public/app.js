@@ -328,11 +328,15 @@ function highlightCode(source, language = 'plaintext') {
   return output;
 }
 
+const tableSeparatorLine = line => /^[\s|:-]*-[\s|:-]*$/.test(line.trim());
+
 function table(lines, sourcePath, sectionHeadings, definitions, firstLine) {
-  const rows = lines.map((line, index) => ({ line, number: firstLine + index })).filter(item => !/^\s*\|?\s*:?-{3,}/.test(item.line));
+  const separator = lines.find(tableSeparatorLine) || null;
+  const rows = lines.map((line, index) => ({ line, number: firstLine + index })).filter(item => !tableSeparatorLine(item.line));
   if (!rows.length) return '';
   const sourceRows = rows.map(item => item.line.trim().replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()));
-  return dataTable(sourceRows, (cell, row, column) => inline(cell, sourcePath, sectionHeadings, definitions, column === 0 ? definitions?.sources.get(rows[row].number) : ''), 'markdown-table', (row, column) => column === 0 && definitions?.sources.has(rows[row].number) ? ` id="definition-source-${rows[row].number}"` : '');
+  const columnWeights = separator ? separator.trim().replace(/^\||\|$/g, '').split('|').map(cell => (cell.match(/-/g) || []).length) : null;
+  return dataTable(sourceRows, (cell, row, column) => inline(cell, sourcePath, sectionHeadings, definitions, column === 0 ? definitions?.sources.get(rows[row].number) : ''), 'markdown-table', (row, column) => column === 0 && definitions?.sources.has(rows[row].number) ? ` id="definition-source-${rows[row].number}"` : '', columnWeights);
 }
 
 function parseCsv(source) {
@@ -352,10 +356,16 @@ function parseCsv(source) {
   return rows.filter(values => values.some(value => value !== ''));
 }
 
-function dataTable(rows, renderCell, className, cellAttributes = () => '') {
+function dataTable(rows, renderCell, className, cellAttributes = () => '', columnWeights = null) {
   const width = Math.max(...rows.map(row => row.length));
   const normalized = rows.map(row => [...row, ...Array(Math.max(0, width - row.length)).fill('')]);
-  return `<table class="${className}"><thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0, index)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}"${cellAttributes(rowIndex + 1, index)}>${renderCell(cell, rowIndex + 1, index)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  let colgroup = '';
+  if (columnWeights) {
+    const weights = Array.from({ length: width }, (_, index) => Math.max(1, columnWeights[index] ?? 1));
+    const total = weights.reduce((sum, value) => sum + value, 0);
+    if (total > 0) colgroup = `<colgroup>${weights.map(value => `<col style="width:${Number((value / total * 100).toFixed(2))}%">`).join('')}</colgroup>`;
+  }
+  return `<table class="${className}">${colgroup}<thead><tr>${normalized[0].map((cell, index) => `<th scope="col" tabindex="0" data-sortable="true" aria-sort="none" data-column="${index}">${renderCell(cell, 0, index)}</th>`).join('')}</tr></thead><tbody>${normalized.slice(1).map((row, rowIndex) => `<tr>${row.map((cell, index) => `<td data-column="${index}"${cellAttributes(rowIndex + 1, index)}>${renderCell(cell, rowIndex + 1, index)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
 function csvTable(source) {
@@ -452,7 +462,7 @@ function renderMarkdown(markdown, sourcePath, documentDefinitionData = null) {
       const source = block.join('\n'); output.push(lang.toLowerCase() === 'mermaid' ? `<pre class="mermaid mermaid-diagram">${escapeHtml(source)}</pre>` : `<pre><code class="language-${escapeHtml(lang)}">${highlightCode(source, lang)}</code></pre>`); continue;
     }
     const heading = line.match(/^(#{1,6})\s+(.+)$/); if (heading) { const level = heading[1].length; const id = headingId(heading[2]); output.push(`<h${level} id="${id}">${inline(heading[2], sourcePath, sectionHeadings, definitions)}</h${level}>`); i++; continue; }
-    if (line.includes('|') && /^\s*\|?\s*:?-{3,}/.test(lines[i + 1] || '')) { const firstLine = i + 1 + sourceLineOffset; const tableLines = [line]; while (++i < lines.length && lines[i].includes('|') && lines[i].trim()) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath, sectionHeadings, definitions, firstLine)); continue; }
+    if (line.includes('|') && tableSeparatorLine(lines[i + 1] || '')) { const firstLine = i + 1 + sourceLineOffset; const tableLines = [line]; while (++i < lines.length && lines[i].includes('|') && lines[i].trim()) tableLines.push(lines[i]); output.push(table(tableLines, sourcePath, sectionHeadings, definitions, firstLine)); continue; }
     if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { output.push('<hr>'); i++; continue; }
     if (/^>\s?/.test(line)) { const quote = []; while (i < lines.length && /^>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, '')); output.push(`<blockquote><p>${inline(quote.join(' '), sourcePath, sectionHeadings, definitions)}</p></blockquote>`); continue; }
     if (/^\s*[-*+]\s+/.test(line)) { const items = []; let hasTask = false; while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { const start = i; const item = [lines[i++].replace(/^\s*[-*+]\s+/, '')]; while (i < lines.length && lines[i].trim() && !blockBoundary(lines[i])) item.push(lines[i++].trim()); const rendered = taskListItem(item.join(' '), sourcePath, { startLine: start + 1 + sourceLineOffset, endLine: i + sourceLineOffset }, sectionHeadings, definitions); hasTask ||= rendered.isTask; items.push(rendered.html); } output.push(`<ul${hasTask ? ' class="task-list"' : ''}>${items.join('')}</ul>`); continue; }
